@@ -115,7 +115,7 @@ task<std::optional<T>> attempt(task<T> t, Es&&... es);
 template <typename T, typename... Es>
 task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
 template <typename... Es>
-task<std::optional<bool>> attempt(task<void> t, Es&&... es);
+task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
 
 
 // Time and scheduling functions (operate on driver::main).
