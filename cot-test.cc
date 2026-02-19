@@ -637,6 +637,210 @@ cot::task<> test_duplicate_event_in_quorum() {
     co_return;
 }
 
+// 36. Mutex: exclusive/shared ordering
+cot::task<> test_mutex_exclusive(cot::mutex& m, std::vector<int>& ops, int id) {
+    co_await m.lock();
+    ops.push_back(id);
+    co_await cot::after(1s);
+    ops.push_back(-id);
+    m.unlock();
+}
+cot::task<> test_mutex_shared(cot::mutex& m, std::vector<int>& ops, int id) {
+    co_await m.lock_shared();
+    ops.push_back(id);
+    co_await cot::after(1s);
+    ops.push_back(-id);
+    m.unlock_shared();
+}
+cot::task<> test_mutex() {
+    cot::mutex m;
+    std::vector<int> ops;
+    test_mutex_exclusive(m, ops, 1).detach();
+    test_mutex_shared(m, ops, 2).detach();
+    test_mutex_shared(m, ops, 3).detach();
+    test_mutex_exclusive(m, ops, 4).detach();
+    test_mutex_shared(m, ops, 5).detach();
+    co_await cot::after(100s);
+    std::vector<int> expected = {1, -1, 2, 3, -2, -3, 4, -4, 5, -5};
+    //std::print(std::cerr, "order {}\n", ops);
+    assert(ops == expected && "mutex ordering mismatch");
+    std::cerr << "mutex: ok\n";
+}
+
+// 37. Mutex cancellation: attempt() cancels a pending lock, and the mutex
+//     still works for subsequent waiters. Tests that the cancelled waiter's
+//     event handle in waiters_ becomes empty() and gets cleaned up.
+cot::task<> test_mutex_cancellation() {
+    cot::mutex m;
+    std::vector<int> ops;
+
+    // Task 1: hold exclusive lock for 2s
+    auto task1 = [&]() -> cot::task<> {
+        co_await m.lock();
+        ops.push_back(1);
+        co_await cot::after(2s);
+        ops.push_back(-1);
+        m.unlock();
+    };
+    task1().detach();
+
+    // Task 2: try to get shared lock, but cancel after 1s.
+    // The lock_impl coroutine is destroyed mid-wait, leaving an empty
+    // event handle in the waiters_ deque; it should be skipped, not
+    // obtaining the lock.
+    auto task2 = [&]() -> cot::task<> {
+        auto locked = co_await cot::attempt(m.lock_shared(), cot::after(1s));
+        assert(!locked && "lock_shared should not have succeeded");
+        ops.push_back(20);
+    };
+    task2().detach();
+
+    // Task 3: exclusive lock, enqueues behind the (soon-to-be-cancelled) task 2
+    auto task3 = [&]() -> cot::task<> {
+        co_await m.lock();
+        ops.push_back(3);
+        co_await cot::after(1s);
+        ops.push_back(-3);
+        m.unlock();
+    };
+    task3().detach();
+
+    // Task 4: shared lock, enqueues behind task 3
+    auto task4 = [&]() -> cot::task<> {
+        co_await m.lock_shared();
+        ops.push_back(4);
+        co_await cot::after(1s);
+        ops.push_back(-4);
+        m.unlock_shared();
+    };
+    task4().detach();
+
+    co_await cot::after(100s);
+    std::cerr << "task 0\n";
+
+    // t=0:  task1 acquires exclusive lock, pushes 1
+    // t=0:  tasks 2,3,4 enqueue as waiters: [shared(2), excl(3), shared(4)]
+    // t=1s: task2's attempt times out; lock_impl coroutine destroyed;
+    //       task2 resumes with nullopt, pushes 20
+    // t=2s: task1 pushes -1, unlocks; notify() cleans empty shared(2),
+    //       triggers excl(3); task3 pushes 3
+    // t=3s: task3 pushes -3, unlocks; notify() triggers shared(4); task4 pushes 4
+    // t=4s: task4 pushes -4, unlocks
+    std::print(std::cerr, "mutex_cancellation ops: {}\n", ops);
+    std::vector<int> expected = {1, 20, -1, 3, -3, 4, -4};
+    assert(ops == expected && "mutex cancellation ordering mismatch");
+    std::cerr << "mutex_cancellation: ok\n";
+}
+
+// 38. Mutex cancellation with shared holder: T1 holds shared, T2 wants
+//     exclusive (cancelled), T3 wants shared. After T2 is cancelled and T1
+//     unlocks, T3 should be unblocked. Also tests a variant with two shared
+//     holders (T1a, T1b), where the first unlock_shared does NOT call notify()
+//     (because mf_waiter is set and count > 1), but the second does.
+cot::task<> test_mutex_cancel_excl_waiter() {
+    cot::mutex m;
+    std::vector<int> ops;
+
+    // T1: hold shared for 2s
+    auto t1 = [&]() -> cot::task<> {
+        co_await m.lock_shared();
+        ops.push_back(1);
+        co_await cot::after(2s);
+        ops.push_back(-1);
+        m.unlock_shared();
+    };
+    t1().detach();
+
+    // T2: want exclusive, cancel after 1s
+    auto t2 = [&]() -> cot::task<> {
+        auto locked = co_await cot::attempt(m.lock(), cot::after(1s));
+        assert(!locked && "exclusive lock should not have succeeded");
+        ops.push_back(20);
+    };
+    t2().detach();
+
+    // T3: want shared, enqueues behind T2
+    auto t3 = [&]() -> cot::task<> {
+        co_await m.lock_shared();
+        ops.push_back(3);
+        co_await cot::after(1s);
+        ops.push_back(-3);
+        m.unlock_shared();
+    };
+    t3().detach();
+
+    co_await cot::after(100s);
+
+    // t=0:  T1 acquires shared, pushes 1. T2 enqueues exclusive. T3 enqueues shared.
+    // t=1s: T2 cancelled, pushes 20.
+    // t=2s: T1 pushes -1, unlocks shared. notify() pops empty T2, triggers T3.
+    //       T3 pushes 3.
+    // t=3s: T3 pushes -3, unlocks.
+    //std::print(std::cerr, "cancel_excl_waiter ops: {}\n", ops);
+    std::vector<int> expected = {1, 20, -1, 3, -3};
+    assert(ops == expected && "cancel_excl_waiter ordering mismatch");
+    std::cerr << "cancel_excl_waiter: ok\n";
+}
+
+// 39. Same scenario but with two shared holders. The first unlock_shared
+//     skips notify() (old count > 1, mf_waiter set, not mf_waiter_shared).
+//     The second unlock_shared calls notify() and unblocks T3.
+cot::task<> test_mutex_cancel_excl_waiter_2shared() {
+    cot::mutex m;
+    std::vector<int> ops;
+
+    // T1a: hold shared for 2s
+    auto t1a = [&]() -> cot::task<> {
+        co_await m.lock_shared();
+        ops.push_back(1);
+        co_await cot::after(2s);
+        ops.push_back(-1);
+        m.unlock_shared();
+    };
+    t1a().detach();
+
+    // T1b: hold shared for 3s
+    auto t1b = [&]() -> cot::task<> {
+        co_await m.lock_shared();
+        ops.push_back(2);
+        co_await cot::after(3s);
+        ops.push_back(-2);
+        m.unlock_shared();
+    };
+    t1b().detach();
+
+    // T2: want exclusive, cancel after 1s
+    auto t2 = [&]() -> cot::task<> {
+        auto locked = co_await cot::attempt(m.lock(), cot::after(1s));
+        assert(!locked && "exclusive lock should not have succeeded");
+        ops.push_back(20);
+    };
+    t2().detach();
+
+    // T3: want shared, enqueues behind T2
+    auto t3 = [&]() -> cot::task<> {
+        co_await m.lock_shared();
+        ops.push_back(3);
+        co_await cot::after(1s);
+        ops.push_back(-3);
+        m.unlock_shared();
+    };
+    t3().detach();
+
+    co_await cot::after(100s);
+
+    // t=0:  T1a,T1b acquire shared (push 1,2). T2 enqueues excl. T3 enqueues shared.
+    // t=1s: T2 cancelled, pushes 20.
+    // t=2s: T1a pushes -1, unlocks. unlock_shared does NOT notify (count was 2,
+    //       mf_waiter set, not mf_waiter_shared).
+    // t=3s: T1b pushes -2, unlocks. notify() pops empty T2, triggers T3. T3 pushes 3.
+    // t=4s: T3 pushes -3.
+    //std::print(std::cerr, "cancel_excl_waiter_2shared ops: {}\n", ops);
+    std::vector<int> expected = {1, 2, 20, -1, -2, 3, -3};
+    assert(ops == expected && "cancel_excl_waiter_2shared ordering mismatch");
+    std::cerr << "cancel_excl_waiter_2shared: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -695,6 +899,10 @@ int main(int argc, char* argv[]) {
     run("timer_heap_cull", test_timer_heap_cull);
     run("any_default_event", test_any_default_event);
     run("duplicate_event_in_quorum", test_duplicate_event_in_quorum);
+    run("mutex", test_mutex);
+    run("mutex_cancellation", test_mutex_cancellation);
+    run("cancel_excl_waiter", test_mutex_cancel_excl_waiter);
+    run("cancel_excl_waiter_2shared", test_mutex_cancel_excl_waiter_2shared);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");

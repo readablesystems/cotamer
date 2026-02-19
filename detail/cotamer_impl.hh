@@ -1058,4 +1058,74 @@ inline size_t driver::timer_size() const {
     return timed_.size();
 }
 
+
+// mutex functions
+
+inline task<> mutex::lock() {
+    return lock_impl(false);
+}
+
+inline bool mutex::try_lock() {
+    latch_type l = 0;
+    return latch_.compare_exchange_strong(l, mf_lock_excl, std::memory_order_acquire, std::memory_order_relaxed);
+}
+
+inline void mutex::unlock() {
+    unsigned l = latch_.load(std::memory_order_relaxed);
+    // Fast-path unlock: not latched, no waiter.
+    if (!(l & (mf_latch | mfm_next))
+        && latch_.compare_exchange_strong(l, l - mf_lock_excl, std::memory_order_release, std::memory_order_relaxed)) {
+        return;
+    }
+    unlock_impl(false);
+}
+
+inline task<> mutex::lock_shared() {
+    return lock_impl(true);
+}
+
+inline bool mutex::try_lock_shared() {
+    latch_type l = latch_.load(std::memory_order_relaxed);
+    if (l & (mf_latch | mfm_next | mf_lock_excl)) {
+        return false;
+    }
+    return latch_.compare_exchange_strong(l, l + mf_lock_shared, std::memory_order_acquire, std::memory_order_relaxed);
+}
+
+inline void mutex::unlock_shared() {
+    unsigned l = latch_.load(std::memory_order_relaxed);
+    // Fast-path unlock: not latched, no shared waiter, and either no
+    // exclusive waiter or the shared lock is still held.
+    if (!(l & (mf_latch | mf_next_shared))
+        && (!(l & mf_next_excl) || l >= 2 * mf_lock_shared)
+        && latch_.compare_exchange_strong(l, l - mf_lock_shared, std::memory_order_release, std::memory_order_relaxed)) {
+        return;
+    }
+    unlock_impl(true);
+}
+
+inline bool mutex::waiter_shared(const detail::event_handle& eh) const noexcept {
+    return eh.get()->relaxed_flags() & detail::ef_user;
+}
+
+inline auto mutex::latch() -> latch_type {
+    while (true) {
+        latch_type l = latch_.load(std::memory_order_relaxed);
+        if (!(l & mf_latch)
+            && latch_.compare_exchange_weak(l, l | mf_latch, std::memory_order_acquire, std::memory_order_relaxed)) {
+            return l & ~mfm_next;
+        }
+        detail::spinlock_hint();
+    }
+}
+
+inline void mutex::unlatch(latch_type l) {
+    if (awoken_ != 0) {
+        l += awoken_ == mf_lock_excl ? mf_next_excl : mf_next_shared;
+    } else if (!waiters_.empty()) {
+        l += waiter_shared(waiters_.front()) ? mf_next_shared : mf_next_excl;
+    }
+    latch_.store(l, std::memory_order_release);
+}
+
 }

@@ -188,6 +188,53 @@ private:
     inline void unlock(uint32_t flags);
 };
 
+
+// event-driven mutexes
+
+class mutex {
+public:
+    inline mutex() = default;
+    mutex(const mutex&) = delete;
+    mutex(mutex&&) = delete;
+    mutex& operator=(const mutex&) = delete;
+    mutex& operator=(mutex&&) = delete;
+    inline ~mutex() = default;
+
+    inline task<> lock();
+    inline bool try_lock();
+    inline void unlock();
+
+    inline task<> lock_shared();
+    inline bool try_lock_shared();
+    inline void unlock_shared();
+
+private:
+    using latch_type = unsigned;
+    static constexpr latch_type mf_latch = 1;         // latch bit for multithreading
+    static constexpr latch_type mf_next_excl = 2;     // next in line wants exclusive
+    static constexpr latch_type mf_next_shared = 4;   // next in line wants shared
+    static constexpr latch_type mfm_next = 6;         // either mf_next_excl or mf_next_shared
+    static constexpr latch_type mf_lock_excl = 8;     // exclusive lock held
+    static constexpr latch_type mf_lock_shared = 16;  // added once per shared lock held
+
+    // protects awoken_ + waiters_
+    std::atomic<latch_type> latch_ = 0;          // see mf_ constants
+    // `awoken_ != 0` when one or more tasks have been granted the mutex, but
+    // haven't claimed it yet. Either `mf_lock_excl` or a multiple of
+    // `mf_lock_shared`.
+    latch_type awoken_ = 0;
+    // queue of events waiting for mutex; see `lock_impl`
+    std::deque<detail::event_handle> waiters_;
+
+    inline latch_type latch();
+    inline void unlatch(latch_type);
+    inline bool allow(bool shared, latch_type) const noexcept;
+    inline bool waiter_shared(const detail::event_handle&) const noexcept;
+    inline void notify_locked(latch_type);
+    task<> lock_impl(bool shared);
+    void unlock_impl(bool shared);
+};
+
 }
 
 #include "detail/cotamer_impl.hh"
