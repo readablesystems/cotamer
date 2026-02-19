@@ -1,4 +1,5 @@
 #include "cotamer.hh"
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -636,8 +637,18 @@ cot::task<> test_duplicate_event_in_quorum() {
     co_return;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    unsigned ran = 0;
+
     auto run = [&](const char* name, auto fn) {
+        bool found = argc == 1;
+        for (int argi = 1; !found && argi < argc; ++argi) {
+            found = strcmp(name, argv[argi]) == 0;
+        }
+        if (!found) {
+            return;
+        }
+        ++ran;
         std::cerr << "=== " << name << " ===\n";
         cot::reset();
         auto t = fn();
@@ -684,4 +695,12 @@ int main() {
     run("timer_heap_cull", test_timer_heap_cull);
     run("any_default_event", test_any_default_event);
     run("duplicate_event_in_quorum", test_duplicate_event_in_quorum);
+
+    if (ran == 0) {
+        std::print(std::cerr, "No matching tests\n");
+        exit(1);
+    } else {
+        std::print(std::cerr, "*** done ***\n");
+        exit(0);
+    }
 }

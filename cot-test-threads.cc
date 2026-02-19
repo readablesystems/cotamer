@@ -12,8 +12,6 @@ namespace cot = cotamer;
 // Test 1: Cross-thread trigger — thread B triggers an event owned by thread A,
 // coroutine resumes on thread A.
 void test_cross_thread_trigger() {
-    std::cerr << "=== cross_thread_trigger ===\n";
-
     std::atomic<int> phase{0};
     std::thread::id resumed_thread;
     cot::event* ev_ptr = nullptr;
@@ -60,8 +58,6 @@ void test_cross_thread_trigger() {
 
 // Test 2: Cross-thread trigger through an any() combinator.
 void test_cross_thread_any() {
-    std::cerr << "=== cross_thread_any ===\n";
-
     std::atomic<int> phase{0};
     std::thread::id resumed_thread;
     cot::event* ev_ptr = nullptr;
@@ -108,8 +104,6 @@ void test_cross_thread_any() {
 
 // Test 3: Multiple cross-thread triggers — thread B triggers several events.
 void test_cross_thread_multi() {
-    std::cerr << "=== cross_thread_multi ===\n";
-
     constexpr int N = 10;
     std::atomic<int> phase{0};
     int resume_count = 0;
@@ -166,8 +160,6 @@ void test_cross_thread_multi() {
 
 // Test 4: Each thread runs its own independent driver.
 void test_independent_drivers() {
-    std::cerr << "=== independent_drivers ===\n";
-
     std::atomic<int> done_count{0};
 
     auto thread_fn = [&] {
@@ -203,8 +195,6 @@ void test_independent_drivers() {
 
 // Test 5: Cross-thread trigger on an already-triggered event is a no-op.
 void test_cross_thread_already_triggered() {
-    std::cerr << "=== cross_thread_already_triggered ===\n";
-
     std::atomic<int> phase{0};
     cot::event* ev_ptr = nullptr;
 
@@ -247,8 +237,6 @@ void test_cross_thread_already_triggered() {
 // Torture 1: 8 threads all triggering events on one driver, many rounds.
 // Exercises high contention on the driver lock (remote_ready_).
 void test_torture_hammer() {
-    std::cerr << "=== torture_hammer ===\n";
-
     constexpr int NTHREADS = 8;
     constexpr int ROUNDS = 100;
     constexpr int EVENTS_PER_ROUND = 50;
@@ -314,8 +302,6 @@ void test_torture_hammer() {
 // Torture 2: Multiple threads race to trigger the same event.
 // Only one trigger has any effect; the rest hit the lock and see f_triggered.
 void test_torture_same_event() {
-    std::cerr << "=== torture_same_event ===\n";
-
     constexpr int NTHREADS = 8;
     constexpr int ROUNDS = 500;
 
@@ -372,8 +358,6 @@ void test_torture_same_event() {
 // Exercises trigger_member contention — multiple trigger_members racing on the
 // quorum's lock, with exactly one reaching the quorum threshold.
 void test_torture_quorum_race() {
-    std::cerr << "=== torture_quorum_race ===\n";
-
     constexpr int NTHREADS = 4;
     constexpr int ROUNDS = 200;
 
@@ -432,8 +416,6 @@ void test_torture_quorum_race() {
 // any(all(e0, e1), all(e2, e3)) — four threads each trigger one event.
 // The inner all() that completes first satisfies the outer any().
 void test_torture_nested_quorum() {
-    std::cerr << "=== torture_nested_quorum ===\n";
-
     constexpr int ROUNDS = 200;
 
     for (int round = 0; round < ROUNDS; ++round) {
@@ -491,8 +473,6 @@ void test_torture_nested_quorum() {
 // Torture 5: Bidirectional — two drivers, each triggers events on the other.
 // Both loop concurrently, processing injected triggers.
 void test_torture_bidirectional() {
-    std::cerr << "=== torture_bidirectional ===\n";
-
     constexpr int ROUNDS = 200;
     constexpr int N = 10;
 
@@ -592,8 +572,6 @@ void test_torture_bidirectional() {
 // The driver thread starts looping immediately; trigger threads fire events
 // with random delays so injections arrive mid-loop.
 void test_torture_inject_during_loop() {
-    std::cerr << "=== torture_inject_during_loop ===\n";
-
     constexpr int NTHREADS = 4;
     constexpr int ROUNDS = 100;
     constexpr int EVENTS_PER_ROUND = 40;
@@ -661,8 +639,6 @@ void test_torture_inject_during_loop() {
 // threads simultaneously. Only the first trigger satisfies the quorum;
 // the rest race into trigger_member on an already-triggered quorum.
 void test_torture_any_race() {
-    std::cerr << "=== torture_any_race ===\n";
-
     constexpr int NTHREADS = 8;
     constexpr int ROUNDS = 200;
 
@@ -720,8 +696,6 @@ void test_torture_any_race() {
 
 // Leak test 1: any() frees non-triggering members when the event handle drops.
 void test_leak_any() {
-    std::cerr << "=== leak_any ===\n";
-
     cot::event e0, e1, e2;
     auto* b0 = e0.handle().get();
     auto* b1 = e1.handle().get();
@@ -755,8 +729,6 @@ void test_leak_any() {
 
 // Leak test 2: nested any(all(), all()) frees entire non-triggering branch.
 void test_leak_nested() {
-    std::cerr << "=== leak_nested ===\n";
-
     cot::event e0, e1, e2, e3;
     auto* b0 = e0.handle().get();
     auto* b1 = e1.handle().get();
@@ -798,8 +770,6 @@ void test_leak_nested() {
 
 // Leak test 3: verify co_await any() releases promptly after loop().
 void test_leak_await() {
-    std::cerr << "=== leak_await ===\n";
-
     cot::event e0, e1;
     auto* b1 = e1.handle().get();
 
@@ -830,8 +800,6 @@ void test_leak_await() {
 // (thread B's consumer coroutine) back to thread B's driver, not resume it
 // directly on thread A.
 void test_cross_thread_await_task() {
-    std::cerr << "=== cross_thread_await_task ===\n";
-
     std::atomic<int> phase{0};
     cot::event* ev_ptr = nullptr;
     std::optional<cot::task<int>> f_task;
@@ -906,8 +874,6 @@ void test_cross_thread_await_task() {
 // refcount 0→1, triggers, releases (1→0), and deletes — then Thread B
 // accesses freed memory in destroy().
 void test_torture_destroy_trigger_race() {
-    std::cerr << "=== torture_destroy_trigger_race ===\n";
-
     constexpr int ROUNDS = 5000;
 
     for (int round = 0; round < ROUNDS; ++round) {
@@ -945,22 +911,45 @@ void test_torture_destroy_trigger_race() {
 }
 
 
-int main() {
-    test_cross_thread_trigger();
-    test_cross_thread_any();
-    test_cross_thread_multi();
-    test_independent_drivers();
-    test_cross_thread_already_triggered();
-    test_torture_hammer();
-    test_torture_same_event();
-    test_torture_quorum_race();
-    test_torture_nested_quorum();
-    test_torture_bidirectional();
-    test_torture_inject_during_loop();
-    test_torture_any_race();
-    test_leak_any();
-    test_leak_nested();
-    test_leak_await();
-    test_cross_thread_await_task();
-    test_torture_destroy_trigger_race();
+int main(int argc, char* argv[]) {
+    unsigned ran = 0;
+
+    auto run = [&](const char* name, auto fn) {
+        bool found = argc == 1;
+        for (int argi = 1; !found && argi < argc; ++argi) {
+            found = strcmp(name, argv[argi]) == 0;
+        }
+        if (!found) {
+            return;
+        }
+        ++ran;
+        std::cerr << "=== " << name << " ===\n";
+        fn();
+    };
+
+    run("cross_thread_trigger", test_cross_thread_trigger);
+    run("cross_thread_any", test_cross_thread_any);
+    run("cross_thread_multi", test_cross_thread_multi);
+    run("independent_drivers", test_independent_drivers);
+    run("cross_thread_already_triggered", test_cross_thread_already_triggered);
+    run("torture_hammer", test_torture_hammer);
+    run("torture_same_event", test_torture_same_event);
+    run("torture_quorum_race", test_torture_quorum_race);
+    run("torture_nested_quorum", test_torture_nested_quorum);
+    run("torture_bidirectional", test_torture_bidirectional);
+    run("torture_inject_during_loop", test_torture_inject_during_loop);
+    run("torture_any_race", test_torture_any_race);
+    run("leak_any", test_leak_any);
+    run("leak_nested", test_leak_nested);
+    run("leak_await", test_leak_await);
+    run("cross_thread_await_task", test_cross_thread_await_task);
+    run("torture_destroy_trigger_race", test_torture_destroy_trigger_race);
+
+    if (ran == 0) {
+        std::print(std::cerr, "No matching tests\n");
+        exit(1);
+    } else {
+        std::print(std::cerr, "*** done ***\n");
+        exit(0);
+    }
 }
