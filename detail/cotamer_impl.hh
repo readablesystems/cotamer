@@ -336,10 +336,11 @@ struct event_body {
         remove_listener_unlock(reinterpret_cast<uintptr_t>(qb) | lf_quorum, flags);
     }
 
-    inline void trigger() {
-        trigger_unlock(lock());
+    inline bool trigger() {
+        auto f = untriggered_lock();
+        return !(f & ef_triggered) && trigger_unlock(f);
     }
-    inline void trigger_unlock(uint32_t flags);
+    inline bool trigger_unlock(uint32_t flags);
 
 
     std::atomic<uint32_t> refcount_ = 1;
@@ -495,7 +496,8 @@ struct quorum_event_body : event_body {
 };
 
 
-inline void event_body::trigger_unlock(uint32_t f) {
+inline bool event_body::trigger_unlock(uint32_t f) {
+    bool result = !(f & ef_empty) || refcount_.load(std::memory_order_acquire) > 1;
     // Triggering a quorum removes it from its members' listener lists, but that
     // might cause recursive triggers and eventually drop the last remaining
     // reference to `this`. Add a temporary reference so the quorum survives
@@ -544,6 +546,7 @@ inline void event_body::trigger_unlock(uint32_t f) {
     if (f & ef_quorum) {
         event_handle{this}; // release temporary reference
     }
+    return result;
 }
 
 
@@ -785,10 +788,8 @@ inline bool event::triggered() const noexcept {
     return !ep_ || ep_->triggered();
 }
 
-inline void event::trigger() {
-    if (ep_) {
-        ep_->trigger();
-    }
+inline bool event::trigger() {
+    return ep_ && ep_->trigger();
 }
 
 inline const detail::event_handle& event::handle() const& {
