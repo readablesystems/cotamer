@@ -1,0 +1,1060 @@
+#pragma once
+#include "detail/small_vector.hh"
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
+
+
+// cotamer_impl.hh
+//    This file defines the gory details of the Cotamer implementation,
+//    including C++ coroutine machinery.
+
+namespace cotamer {
+namespace detail {
+
+// mark a listener as a quorum
+constexpr uintptr_t lf_quorum = uintptr_t(1);
+
+// event_body::flags_
+constexpr uint32_t ef_quorum = 1;         // this is a quorum_event_body
+constexpr uint32_t ef_lock = 2;           // locked
+constexpr uint32_t ef_empty = 4;          // has no listeners
+constexpr uint32_t ef_empty_members = 8;  // has no members
+constexpr uint32_t ef_triggered = 16;     // has been triggered
+constexpr uint32_t ef_want_interest = 32; // transitive quorum member has interest{}
+constexpr uint32_t ef_user = 64;          // first user flag
+constexpr uint32_t ef_nuser = 4;          // number of user flags
+constexpr uint32_t efm_user = 0x3C0;      // mask of user flags
+constexpr uint32_t ef_interest = 1024;    // this quorum has 1 interest{}
+                                          // (added once per interest{})
+
+inline void spinlock_hint() {
+#if defined(__x86_64__)
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+// task_promise<T>
+//    This structure is part of the C++ coroutine machinery. Coroutines don’t
+//    actually use the stack for local variables; they can’t, because they can
+//    suspend themselves and resume later. When a coroutine is first called, the
+//    C++ runtime allocates a heap structure for the function’s locals. That
+//    heap structure also contains this *promise*. The promise interface is
+//    defined by the C++ language standard; the runtime calls its methods in
+//    specific situations, such as when a `co_await` expression is evaluated.
+
+struct task_promise_base {
+    bool detached_ = false;                // is this task detached?
+    bool has_interest_ = false;            // has interest been requested?
+    driver* home_;                         // coroutine home driver
+    event_handle completion_;              // completion event (lazily created)
+    event_handle interest_;                // interest event (lazily created)
+    // coroutine awaiting me, if any
+    std::coroutine_handle<task_promise_base> continuation_;
+
+    inline task_promise_base()
+        : home_(driver::main.get()) {
+    }
+    inline event_handle& make_interest();
+};
+
+template <typename T>
+struct task_promise : public task_promise_base {
+    // Functions required by the C++ runtime
+    // - Initialize the task<T> return value that manages the coroutine:
+    inline task<T> get_return_object() noexcept;
+    // - Behavior when coroutine starts (here, run eagerly):
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    // - Handle `co_await E` for different `E` types:
+    task_event_awaiter<T> await_transform(event ev);
+    inline task_event_awaiter<T> await_transform(interest);
+    inline interest_event_awaiter await_transform(interest_event);
+    template <typename Aw>
+    Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
+    // - Handle `co_return V` or throwing an exception in the coroutine:
+    void return_value(T value) { result_.template emplace<1>(std::move(value)); }
+    void unhandled_exception() noexcept { result_.template emplace<2>(std::current_exception()); }
+    // - Behavior after coroutine exits:
+    task_final_awaiter<T> final_suspend() noexcept;
+    // - Export coroutine return value to `co_await`er:
+    inline T result();
+
+    std::variant<std::monostate, T, std::exception_ptr> result_;
+};
+
+template <typename T>
+inline task<T> task_promise<T>::get_return_object() noexcept {
+    // When an event schedules a task_promise, it needs the task's home driver.
+    // It uses coroutine_handle<task_promise_base>::from_address() to get it.
+    // That is strictly speaking UB -- one can only call
+    // coroutine_handle<T>::from_address() if T is the actual promise type or
+    // void -- but it works on GCC and Clang when the actual promise type
+    // and the base type have the same alignment.
+    static_assert(alignof(task_promise<T>) == alignof(task_promise_base));
+    return task<T>{std::coroutine_handle<task_promise<T>>::from_promise(*this)};
+}
+
+template <typename T>
+T task_promise<T>::result() {
+    if (result_.index() == 2) {
+        std::rethrow_exception(std::move(std::get<2>(result_)));
+    }
+    return std::move(std::get<1>(result_));
+}
+
+
+// task_promise<void>
+//    Similar, but no value is returned.
+
+template <>
+struct task_promise<void> : public task_promise_base {
+    inline task<void> get_return_object() noexcept;
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    task_event_awaiter<void> await_transform(event ev);
+    inline task_event_awaiter<void> await_transform(interest);
+    inline interest_event_awaiter await_transform(interest_event);
+    template <typename Aw>
+    Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
+    void return_void() noexcept { }
+    void unhandled_exception() noexcept { exception_ = std::current_exception(); }
+    void result() {
+        if (exception_) {
+            std::rethrow_exception(std::move(exception_));
+        }
+    }
+    inline task_final_awaiter<void> final_suspend() noexcept;
+
+    std::exception_ptr exception_;
+};
+
+inline task<void> task_promise<void>::get_return_object() noexcept {
+    // See comment in task_promise<T>::get_return_object.
+    static_assert(alignof(task_promise<void>) == alignof(task_promise_base));
+    return task<void>{std::coroutine_handle<task_promise<void>>::from_promise(*this)};
+}
+
+
+// task_awaiter<T>
+//    This structure is also part of the C++ coroutine machinery. “Awaiter”
+//    objects are created as part of `co_await` expression evaluation; the
+//    C++ runtime calls their methods to determine whether to suspend, how
+//    to handle a suspension (including what to run next), and how to resume.
+//
+//    task_awaiter<T> awaits a task. We also define task_final_awaiter<T>,
+//    which handles the implicit final suspension when a coroutine completes;
+//    task_event_awaiter<T>, which awaits an event; and a few others.
+
+template <typename T>
+struct task_awaiter {
+    // - Return true if `co_await` should not suspend
+    bool await_ready() noexcept {
+        return self_.done();
+    }
+    // - Suspend this coroutine and return the next coroutine to execute
+    template <typename U>
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiting) noexcept {
+        // XXX UB, but see task_promise<T>::get_return_object
+        std::coroutine_handle<task_promise_base> base_awaiting =
+            std::coroutine_handle<task_promise_base>::from_address(awaiting.address());
+        self_.promise().continuation_ = base_awaiting;
+        if (self_.promise().interest_) {
+            self_.promise().interest_->trigger();
+        }
+        return std::noop_coroutine();
+    }
+    // - Resume this coroutine, returning the `co_await` expression’s result
+    T await_resume() {
+        return self_.promise().result();
+    }
+
+    std::coroutine_handle<task_promise<T>> self_;
+};
+
+
+// Awaiter for the implicit final suspension when a coroutine completes.
+template <typename T>
+struct task_final_awaiter {
+    bool await_ready() noexcept {
+        return false;
+    }
+    inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
+        auto& promise = self.promise();
+        // trigger completion event, since the task is done
+        if (promise.completion_) {
+            promise.completion_->trigger();
+        }
+        // if another coroutine wants this task's result, resume them on their
+        // home thread
+        if (promise.continuation_) {
+            auto continuation = std::exchange(promise.continuation_, nullptr);
+            driver* home = continuation.promise().home_;
+            if (home == driver::main.get()) {
+                return continuation;
+            }
+            uint32_t flags = home->lock();
+            home->remote_ready_.push_back(continuation);
+            home->unlock(flags | driver::df_nonempty);
+            return std::noop_coroutine();
+        }
+        // destroy if detached and then return to event loop
+        if (promise.detached_) {
+            self.destroy();
+        }
+        return std::noop_coroutine();
+    }
+    void await_resume() noexcept {
+    }
+};
+
+template <typename T>
+inline task_final_awaiter<T> task_promise<T>::final_suspend() noexcept {
+    return {};
+}
+
+inline task_final_awaiter<void> task_promise<void>::final_suspend() noexcept {
+    return {};
+}
+
+
+// make_event: converts various types into events.
+
+template <typename T>
+inline event make_event(T resumable) {
+    co_await resumable;
+}
+
+inline event& make_event(event& ev) {
+    return ev;
+}
+
+inline event&& make_event(event&& ev) {
+    return std::move(ev);
+}
+
+inline event make_event(interest);
+
+
+// event_body
+//    The heap-allocated state behind an event. Managed by reference-counted
+//    event_handle smart pointers. Each event_body has a list of *listeners*
+//    (coroutines or quorum bodies) that are notified when the event triggers.
+//
+//    Event bodies can be accessed concurrently from multiple threads. The lock
+//    is a bit in `flags_`. Difficulties arise with quorum events (coroutines
+//    are naturally linear). Sometimes a member of a quorum event needs to lock
+//    its quorum, and sometimes a quorum needs to lock its members; deadlock is
+//    avoided because when a quorum locks its members, it gives up trying as
+//    soon as member becomes triggered. Logic in trigger_unlock() and around
+//    reference counts ensures everything works out.
+
+struct event_body {
+    event_body() = default;
+    event_body(const event_body&) = delete;
+    event_body(event_body&&) = delete;
+    event_body& operator=(const event_body&) = delete;
+    event_body& operator=(event_body&&) = delete;
+    ~event_body() = default;
+
+    uint32_t relaxed_flags() const noexcept {
+        return flags_.load(std::memory_order_relaxed);
+    }
+
+    void set_user_flags(uint32_t userf) {
+        assert((userf & ~efm_user) == 0);
+        while (true) {
+            uint32_t flags = relaxed_flags();
+            if (flags_.compare_exchange_weak(flags, (flags & ~efm_user) | userf, std::memory_order_relaxed)) {
+                return;
+            }
+            spinlock_hint();
+        }
+    }
+
+    // This event can be garbage collected: it has triggered, or it has no
+    // listeners and no other references.
+    bool empty() const noexcept {
+        auto f = relaxed_flags();
+        return (f & ef_triggered)
+            || ((f & ef_empty) && refcount_.load(std::memory_order_relaxed) == 1);
+    }
+
+    // This event has no listeners.
+    bool idle() const noexcept {
+        return (relaxed_flags() & ef_empty) != 0;
+    }
+
+    // The event has triggered.
+    bool triggered() const noexcept {
+        return (relaxed_flags() & ef_triggered) != 0;
+    }
+
+    inline uint32_t lock() {
+        while (true) {
+            uint32_t flags = relaxed_flags();
+            if ((flags & ef_lock) == 0
+                && flags_.compare_exchange_weak(flags, flags | ef_lock, std::memory_order_acquire, std::memory_order_relaxed)) {
+                return flags;
+            }
+            spinlock_hint();
+        }
+    }
+
+    inline uint32_t untriggered_lock() {
+        while (true) {
+            uint32_t flags = relaxed_flags();
+            if ((flags & ef_triggered)
+                || ((flags & ef_lock) == 0
+                    && flags_.compare_exchange_weak(flags, flags | ef_lock, std::memory_order_acquire, std::memory_order_relaxed))) {
+                return flags;
+            }
+            spinlock_hint();
+        }
+    }
+
+    inline void unlock(uint32_t flags) {
+        flags_.store(flags, std::memory_order_release);
+    }
+
+    template <typename T>
+    inline void add_listener_unlock(std::coroutine_handle<task_promise<T>> coroutine,
+                                    uint32_t flags) {
+        add_listener_unlock(reinterpret_cast<uintptr_t>(coroutine.address()), flags);
+    }
+
+    inline void add_listener_unlock(quorum_event_body* qb, uint32_t flags) {
+        add_listener_unlock(reinterpret_cast<uintptr_t>(qb) | lf_quorum, flags);
+    }
+
+    template <typename T>
+    inline void remove_listener(std::coroutine_handle<task_promise<T>> coroutine) {
+        remove_listener_unlock(reinterpret_cast<uintptr_t>(coroutine.address()), lock());
+    }
+
+    inline void remove_listener_unlock(quorum_event_body* qb, uint32_t flags) {
+        remove_listener_unlock(reinterpret_cast<uintptr_t>(qb) | lf_quorum, flags);
+    }
+
+    inline void trigger() {
+        trigger_unlock(lock());
+    }
+    inline void trigger_unlock(uint32_t flags);
+
+
+    std::atomic<uint32_t> refcount_ = 1;
+    std::atomic<uint32_t> flags_ = ef_empty;
+    small_vector<uintptr_t, 3> listeners_;
+
+private:
+    void add_listener_unlock(uintptr_t listener, uint32_t flags) {
+        // A listener is either a `coroutine_handle<T>::address()` or the
+        // address of a `quorum_event_body`. Quorum bodies are distinguished by
+        // setting the `lf_quorum` bit, bit 1; this is safe because coroutines
+        // and quorum bodies are both aligned.
+        assert(listener && (flags & ef_triggered) == 0);
+        listeners_.push_back(listener);
+        unlock(flags & ~ef_empty);
+    }
+
+    void remove_listener_unlock(uintptr_t listener, uint32_t flags) {
+        // Remove a listener. It might have been added multiple times;
+        // `remove_listener_unlock` will be called the same number of times.
+        for (auto& l : listeners_) {
+            if (l == listener) {
+                l = listeners_.back();
+                listeners_.pop_back();
+                break;
+            }
+        }
+        unlock(listeners_.size() ? flags : flags | ef_empty);
+    }
+
+    static std::coroutine_handle<task_promise_base> listener_coroutine(uintptr_t l) noexcept {
+        return std::coroutine_handle<task_promise_base>::from_address(reinterpret_cast<void*>(l));
+    }
+
+    static quorum_event_body* listener_quorum(uintptr_t l) noexcept {
+        return reinterpret_cast<quorum_event_body*>(l & ~lf_quorum);
+    }
+};
+
+
+// quorum_event_body
+//    A subclass of event_body. Implements `any()` and `all()` by tracking
+//    member events, counting the number that have triggered, and triggering its
+//    own event (the event_body base type) once a quorum is reached.
+//
+//    The `ef_interest` and `ef_want_interest` flags implement an optimization
+//    that avoids allocating separate memory for `interest{}`.
+
+struct quorum_event_body : event_body {
+    template<typename... Es>
+    quorum_event_body(size_t quorum, Es&&... es)
+        : quorum_(quorum) {
+        uint32_t qf = ef_quorum | ef_empty | ef_empty_members;
+        flags_.store(qf | ef_lock, std::memory_order_release);
+        ((qf = add_member(qf, std::forward<Es>(es))), ...);
+        if (triggered_ >= quorum_) {
+            trigger_unlock(qf);
+        } else {
+            unlock(qf);
+        }
+    }
+
+    uint32_t add_member(uint32_t qf, event_handle eh) {
+        uint32_t ef;
+        if (!eh || ((ef = eh->untriggered_lock()) & ef_triggered)) {
+            ++triggered_;
+            return qf;
+        }
+        eh->add_listener_unlock(this, ef);
+        if (ef & ef_want_interest) {
+            qf |= ef_want_interest;
+        }
+        members_.push_back(std::move(eh));
+        return qf & ~ef_empty_members;
+    }
+
+    template <typename E>
+    inline uint32_t add_member(uint32_t qf, E&& e) {
+        return add_member(qf, make_event(std::forward<E>(e)).handle());
+    }
+
+    inline uint32_t add_member(uint32_t qf, interest) {
+        return (qf | ef_want_interest) + ef_interest;
+    }
+
+    // Called by a member event when it triggers. Removes that event from
+    // members_ (once), increases the triggered_ count, and potentially triggers
+    // this event.
+    void trigger_member(event_body* e) {
+        auto qf = lock();
+        for (auto& mem : members_) {
+            if (mem.get() == e) {
+                ++triggered_;
+                mem.swap(members_.back());
+                members_.pop_back();
+                if (members_.empty()) {
+                    qf |= ef_empty_members;
+                }
+                break;
+            }
+        }
+        if (!(qf & ef_triggered) && triggered_ >= quorum_) {
+            trigger_unlock(qf);
+        } else if ((qf & (ef_triggered | ef_empty_members)) == (ef_triggered | ef_empty_members)
+                   && refcount_.load(std::memory_order_relaxed) == 0) {
+            delete this;
+        } else {
+            unlock(qf);
+        }
+    }
+
+    inline void fix_want_interest(event_handle& ievent);
+
+    uint32_t cull_members(uint32_t qf) {
+        for (auto it = members_.begin(); it != members_.end(); ) {
+            auto f = (*it)->untriggered_lock();
+            if (f & ef_triggered) {
+                // The triggered event `*it` is still in our members list. This
+                // only happens when the event is still triggering & hasn't yet
+                // gotten around to removing itself from our members list. We
+                // must wait for them to remove themselves.
+                ++it;
+            } else {
+                (*it)->remove_listener_unlock(this, f);
+                it->swap(members_.back());
+                members_.pop_back();
+            }
+        }
+        return members_.empty() ? qf | ef_empty_members : qf;
+    }
+
+    void hard_deref() {
+        // This may not actually delete!
+        auto f = lock();
+        if (refcount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+            unlock(f);
+            return;
+        }
+        if (!(f & ef_triggered)) {
+            f = cull_members(f);
+        }
+        if (f & ef_empty_members) {
+            delete this;
+        } else {
+            unlock(f); // One of the concurrent trigger()s will delete us.
+        }
+    }
+
+
+    small_vector<event_handle, 3> members_;
+    uint32_t triggered_ = 0;
+    uint32_t quorum_;
+};
+
+
+inline void event_body::trigger_unlock(uint32_t f) {
+    // Triggering a quorum removes it from its members' listener lists, but that
+    // might cause recursive triggers and eventually drop the last remaining
+    // reference to `this`. Add a temporary reference so the quorum survives
+    // until the end.
+    if (f & ef_quorum) {
+        refcount_.fetch_add(1, std::memory_order_relaxed);
+        auto qbody = static_cast<quorum_event_body*>(this);
+        f = qbody->cull_members(f);
+    }
+    // Fast path: process same-thread coroutines
+    driver* this_driver = driver::main.get();
+    auto lit = listeners_.begin();
+    while (lit != listeners_.end()
+           && !(*lit & lf_quorum)
+           && listener_coroutine(*lit).promise().home_ == this_driver) {
+        this_driver->ready_.push_back(listener_coroutine(*lit));
+        ++lit;
+    }
+    // Remaining listeners include quorums and coroutines with other homes.
+    // Save them locally, then unlock, to avoid deadlock with quorum
+    // trigger_member (which acquires our lock).
+    small_vector<uintptr_t, 3> listeners;
+    while (lit != listeners_.end()) {
+        listeners.push_back(*lit);
+        ++lit;
+    }
+    listeners_.clear();
+    unlock(f | ef_triggered | ef_empty);
+    // Activate listeners: schedule coroutines and inform quorum events.
+    for (auto listener : listeners) {
+        if (listener & lf_quorum) {
+            auto qb = listener_quorum(listener);
+            qb->trigger_member(this);
+            continue;
+        }
+        auto coroutine = listener_coroutine(listener);
+        driver* home = coroutine.promise().home_;
+        if (home == this_driver) {
+            home->ready_.push_back(coroutine);
+        } else {
+            uint32_t flags = home->lock();
+            home->remote_ready_.push_back(coroutine);
+            home->unlock(flags | driver::df_nonempty);
+        }
+    }
+    if (f & ef_quorum) {
+        event_handle{this}; // release temporary reference
+    }
+}
+
+
+// event_handle implementation
+//    Reference-counted smart pointer for event_body
+
+inline event_handle::event_handle(event_body* eb) noexcept
+    : eb_(eb) {
+}
+
+inline event_handle::event_handle(const event_handle& x) noexcept
+    : eb_(x.eb_) {
+    if (eb_) {
+        eb_->refcount_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+inline event_handle::event_handle(event_handle&& x) noexcept
+    : eb_(std::exchange(x.eb_, nullptr)) {
+}
+
+inline event_handle& event_handle::operator=(std::nullptr_t) {
+    event_handle tmp;
+    std::swap(eb_, tmp.eb_);
+    return *this;
+}
+
+inline event_handle& event_handle::operator=(const event_handle& x) {
+    if (this != &x) {
+        event_handle tmp(x);
+        std::swap(eb_, tmp.eb_);
+    }
+    return *this;
+}
+
+inline event_handle& event_handle::operator=(event_handle&& x) noexcept {
+    if (this != &x) {
+        event_handle tmp(std::move(x));
+        std::swap(eb_, tmp.eb_);
+    }
+    return *this;
+}
+
+inline event_handle::~event_handle() {
+    if (!eb_) {
+        return;
+    }
+    auto f = eb_->relaxed_flags();
+    if ((f & (ef_quorum | ef_empty_members)) == ef_quorum) {
+        static_cast<quorum_event_body*>(eb_)->hard_deref();
+    } else if (eb_->refcount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+        // do nothing
+    } else if (f & ef_quorum) {
+        delete static_cast<quorum_event_body*>(eb_);
+    } else {
+        delete eb_;
+    }
+}
+
+inline void event_handle::swap(event_handle& x) noexcept {
+    auto tmp = eb_;
+    eb_ = x.eb_;
+    x.eb_ = tmp;
+}
+
+inline bool event_handle::empty() const noexcept {
+    return !eb_ || eb_->empty();
+}
+
+
+
+// task_event_awaiter<T>
+//    Awaiter for `co_await event` inside a task.
+
+template <typename T>
+struct task_event_awaiter {
+    event_handle eh_;
+    std::coroutine_handle<task_promise<T>> coroutine_;
+
+    ~task_event_awaiter() {
+        if (coroutine_) {
+            eh_->remove_listener(coroutine_);
+        }
+    }
+    bool await_ready() noexcept {
+        return !eh_ || eh_->triggered();
+    }
+    bool await_suspend(std::coroutine_handle<task_promise<T>> awaiting) noexcept {
+        event_body* eb = eh_.get();
+        // apply interest{} if necessary, which might trigger `eb`
+        if (eb->relaxed_flags() & ef_want_interest) {
+            static_cast<quorum_event_body*>(eb)->fix_want_interest(awaiting.promise().make_interest());
+        }
+        uint32_t ef = eb->untriggered_lock();
+        if (ef & ef_triggered) {
+            return false;
+        }
+        coroutine_ = awaiting;
+        eb->add_listener_unlock(coroutine_, ef);
+        return true;
+    }
+    void await_resume() {
+        // Check if our driver is being cleared, which can only happen if we
+        // suspended ((bool) coroutine_).
+        bool clearing = coroutine_ && coroutine_.promise().home_->clearing();
+        // Optimization: Don't call remove_listener, which will do nothing
+        coroutine_ = nullptr;
+        // Recover memory when clearing a driver (for instance, if a test exits
+        // early). driver::clear() triggers all outstanding events and unblocks
+        // their waiting coroutines, but those might have other coroutines
+        // waiting for their results. We destroy the whole chain by forcing the
+        // event-unblocked coroutines to throw an exception; that exception is
+        // propagated through their awaiters.
+        if (clearing) {
+            throw clearing_error{};
+        }
+    }
+};
+
+template <typename T>
+inline task_event_awaiter<T> task_promise<T>::await_transform(event ev) {
+    return task_event_awaiter<T>{std::move(ev).handle(), nullptr};
+}
+
+inline task_event_awaiter<void> task_promise<void>::await_transform(event ev) {
+    return task_event_awaiter<void>{std::move(ev).handle(), nullptr};
+}
+
+
+// Support `interest{}` and `interest_event{}`
+
+inline event_handle& task_promise_base::make_interest() {
+    if (!has_interest_) {
+        interest_ = event_handle(new event_body);
+        has_interest_ = true;
+    }
+    return interest_;
+}
+
+template <typename T>
+inline task_event_awaiter<T> task_promise<T>::await_transform(interest) {
+    return task_event_awaiter<T>{make_interest(), nullptr};
+}
+
+inline task_event_awaiter<void> task_promise<void>::await_transform(interest) {
+    return task_event_awaiter<void>{make_interest(), nullptr};
+}
+
+// make_event(interest)
+//    Wrap bare `interest{}` in a single-member quorum. This is used when
+//    `interest{}` appears as the sole argument to any()/all().
+
+inline event make_event(interest) {
+    auto q = new detail::quorum_event_body(1, interest{});
+    return event_handle(q);
+}
+
+// interest_event_awaiter: for `co_await interest_event{}`
+
+struct interest_event_awaiter {
+    event_handle handle_;
+    bool await_ready() noexcept { return true; }
+    void await_suspend(std::coroutine_handle<>) noexcept { }
+    event await_resume() { return event(std::move(handle_)); }
+};
+
+template <typename T>
+inline interest_event_awaiter task_promise<T>::await_transform(interest_event) {
+    return interest_event_awaiter{make_interest()};
+}
+
+inline interest_event_awaiter task_promise<void>::await_transform(interest_event) {
+    return interest_event_awaiter{make_interest()};
+}
+
+// fix_want_interest(ievent)
+//    Called when this quorum and/or its transitive members need to apply
+//    interest{}. The `ievent` is the lazily-created event_handle representing
+//    interest; it may have already triggered.
+
+inline void quorum_event_body::fix_want_interest(event_handle& ievent) {
+    uint32_t qf = lock();
+    qf &= ~ef_want_interest;
+    if (qf & ef_triggered) {
+        unlock(qf);
+        return;
+    }
+    // Apply local interest (this quorum has one or more `interest{}` members)
+    while (qf >= ef_interest) {
+        qf = add_member(qf - ef_interest, ievent);
+    }
+    // That might trigger `this`. If it does, exit now, *without* propagating
+    // interest{} to members. They will need to be awaited explicitly to get
+    // the interest notification.
+    if (triggered_ >= quorum_) {
+        trigger_unlock(qf);
+        return;
+    }
+    // Update members who want interest. Just as with `trigger_unlock()`, we
+    // cannot call `mem.fix_want_interest()` directly, since those calls might
+    // eventually delete `this`.
+    small_vector<event_handle, 3> wi_members;
+    for (auto& mem : members_) {
+        if (mem->relaxed_flags() & ef_want_interest) {
+            wi_members.push_back(mem);
+        }
+    }
+    unlock(qf);
+    for (auto& mem : wi_members) {
+        static_cast<quorum_event_body*>(mem.get())->fix_want_interest(ievent);
+    }
+}
+
+}
+
+
+// event methods
+
+inline event::event()
+    : ep_(new detail::event_body) {
+}
+
+inline event::event(detail::event_handle ev)
+    : ep_(std::move(ev)) {
+}
+
+inline event::event(std::nullptr_t) {
+}
+
+inline bool event::empty() const noexcept {
+    return !ep_ || ep_->empty();
+}
+
+inline bool event::idle() const noexcept {
+    return !ep_ || ep_->idle();
+}
+
+inline bool event::triggered() const noexcept {
+    return !ep_ || ep_->triggered();
+}
+
+inline void event::trigger() {
+    if (ep_) {
+        ep_->trigger();
+    }
+}
+
+inline const detail::event_handle& event::handle() const& {
+    return ep_;
+}
+
+inline detail::event_handle&& event::handle() && {
+    return std::move(ep_);
+}
+
+
+// task methods
+
+template <typename T>
+inline task<T>::task(handle_type handle) noexcept
+    : handle_(handle) {
+}
+
+template <typename T>
+inline task<T>::task(task&& x) noexcept
+    : handle_(std::exchange(x.handle_, nullptr)) {
+}
+
+template <typename T>
+inline task<T>& task<T>::operator=(task&& x) noexcept {
+    if (this != &x) {
+        if (handle_) {
+            handle_.destroy();
+        }
+        handle_ = std::exchange(x.handle_, nullptr);
+    }
+    return *this;
+}
+
+template <typename T>
+inline task<T>::~task() {
+    if (handle_) {
+        handle_.destroy();
+    }
+}
+
+template <typename T>
+inline bool task<T>::done() {
+    return handle_ && handle_.done();
+}
+
+template <typename T>
+inline event task<T>::completion() {
+    if (done()) {
+        return event(nullptr);
+    }
+    auto& p = handle_.promise();
+    if (!p.completion_) {
+        p.completion_ = detail::event_handle(new detail::event_body);
+    }
+    return event(p.completion_);
+}
+
+template <typename T>
+inline void task<T>::start() {
+    if (done()) {
+        return;
+    }
+    auto& p = handle_.promise();
+    if (p.interest_) {
+        p.interest_->trigger();
+    } else {
+        p.has_interest_ = true;
+    }
+}
+
+template <typename T>
+inline void task<T>::detach() {
+    if (!handle_) {
+        return;
+    }
+    handle_.promise().detached_ = true;
+    if (handle_.done()) {
+        handle_.destroy();
+    }
+    handle_ = nullptr;
+}
+
+template <typename T>
+inline detail::task_awaiter<T> task<T>::operator co_await() const noexcept {
+    return detail::task_awaiter<T>{handle_};
+}
+
+
+// driver methods
+
+inline clock::time_point driver::now() {
+    return now_;
+}
+
+inline void driver::step_time() {
+    now_ += clock::duration{1};
+}
+
+inline void driver::asap(event e) {
+    asap_.push_back(std::move(e));
+}
+
+inline event driver::asap() {
+    event e;
+    asap(e);
+    return e;
+}
+
+inline void driver::at(clock::time_point t, event e) {
+    timed_.emplace(t, std::move(e).handle());
+}
+
+inline event driver::at(clock::time_point t) {
+    if (t <= now_) {
+        return event(nullptr);
+    }
+    event e;
+    at(t, e);
+    return e;
+}
+
+inline void driver::after(clock::duration d, event e) {
+    at(now() + d, std::move(e));
+}
+
+inline event driver::after(clock::duration d) {
+    return at(now() + d);
+}
+
+
+// time functions
+
+inline clock::time_point now() {
+    return driver::main->now();
+}
+
+inline void step_time() {
+    driver::main->step_time();
+}
+
+inline event asap() {
+    return driver::main->asap();
+}
+
+inline event at(clock::time_point t) {
+    return driver::main->at(t);
+}
+
+inline event after(clock::duration d) {
+    return driver::main->after(d);
+}
+
+
+// Event combinators
+
+// any(), all()
+//    Multi-argument forms create a quorum_event_body. Single-argument forms
+//    pass through to make_event (no quorum needed). Zero-argument forms
+//    return an already-triggered event.
+
+template <typename E0, typename... Es>
+inline event any(E0 e0, Es&&... es) {
+    auto q = new detail::quorum_event_body(1, std::forward<E0>(e0), std::forward<Es>(es)...);
+    return detail::event_handle(q);
+}
+
+template <typename E>
+inline event any(E&& e) {
+    return detail::make_event(std::forward<E>(e));
+}
+
+inline event any() {
+    // any() with no arguments returns an already-triggered event.
+    // An alternate design would treat any() as an untriggered event (like
+    // how false is the identity for logical or).
+    return event(nullptr);
+}
+
+
+template <typename... Es>
+inline event all(Es&&... es) {
+    auto q = new detail::quorum_event_body(sizeof...(Es), std::forward<Es>(es)...);
+    return detail::event_handle(q);
+}
+
+template <typename E>
+inline event all(E&& e) {
+    return detail::make_event(std::forward<E>(e));
+}
+
+inline event all() {
+    return event(nullptr);
+}
+
+
+// attempt(t, e...)
+//    Runs a `task<T>` (the first argument) with cancellation (the other
+//    arguments). Returns `task<std::optional<T>>`, which is `nullopt` if the
+//    task was cancelled.
+
+template <typename T, typename... Es>
+task<std::optional<T>> attempt(task<T> t, Es&&... es) {
+    if (!t.done()) {
+        t.start();
+        co_await any(t.completion(), std::forward<Es>(es)...);
+    }
+    if (t.done()) {
+        co_return co_await t;
+    }
+    co_return std::nullopt;
+}
+
+template <typename T, typename... Es>
+task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es) {
+    if (!t.done()) {
+        t.start();
+        co_await any(t.completion(), std::forward<Es>(es)...);
+    }
+    if (t.done()) {
+        co_return co_await t;
+    }
+    co_return std::nullopt;
+}
+
+template <typename... Es>
+task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es) {
+    if (!t.done()) {
+        t.start();
+        co_await any(t.completion(), std::forward<Es>(es)...);
+    }
+    if (t.done()) {
+        co_await t;
+        co_return std::monostate{};
+    }
+    co_return std::nullopt;
+}
+
+
+// driver functions
+
+inline void loop() {
+    driver::main->loop();
+}
+
+inline void clear() {
+    driver::main->clear();
+}
+
+inline uint32_t driver::lock() {
+    while (true) {
+        uint32_t flags = lock_.load(std::memory_order_relaxed);
+        if ((flags & df_lock) == 0
+            && lock_.compare_exchange_weak(flags, flags | df_lock, std::memory_order_acquire, std::memory_order_relaxed)) {
+            return flags;
+        }
+        detail::spinlock_hint();
+    }
+}
+
+inline void driver::unlock(uint32_t flags) {
+    lock_.store(flags, std::memory_order_release);
+}
+
+inline size_t driver::timer_size() const {
+    return timed_.size();
+}
+
+}
