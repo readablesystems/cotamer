@@ -1111,6 +1111,76 @@ cot::task<> test_lock_errors() {
     std::cerr << "lock_errors: ok\n";
 }
 
+// 45. mutex_event with any/all: tests make_event(mutex_event<shared>&)
+//     and make_event(mutex_event<shared>&&) overloads.
+cot::task<> test_mutex_event_combinators() {
+    cot::mutex m;
+
+    // Test with `any`: lock completes, any triggers
+    {
+        auto me = m.lock(); // mutex_event<false>, lvalue
+        co_await cot::any(me, cot::after(10s));
+        assert(me.triggered());
+        m.unlock();
+    }
+
+    // Test with `any` using rvalue mutex_event
+    {
+        co_await cot::any(m.lock_shared(), cot::after(10s));
+        m.unlock_shared();
+    }
+
+    // Test with `all`: both a mutex lock and a timer must complete
+    {
+        auto me = m.lock(); // lvalue path
+        co_await cot::all(me, cot::after(1s));
+        assert(me.triggered());
+        m.unlock();
+    }
+
+    // Test contended case: hold exclusive, use any to race lock vs timeout
+    {
+        co_await m.lock();
+        // Start a shared lock attempt that will block
+        auto me = m.lock_shared();
+        assert(!me.triggered());
+        auto timeout = cot::after(1s);
+        auto winner = cot::any(me, timeout);
+        // Unlock after 500ms so the lock wins
+        auto unlocker = [&]() -> cot::task<> {
+            co_await cot::after(500ms);
+            m.unlock();
+        };
+        unlocker().detach();
+        co_await winner;
+        assert(me.triggered());
+        m.unlock_shared();
+    }
+
+    // Test contended case: timeout wins
+    {
+        co_await m.lock();
+        auto me = m.lock_shared(); // rvalue would be consumed, use lvalue
+        assert(!me.triggered());
+        auto timeout = cot::after(1s);
+        auto winner = cot::any(me, timeout);
+        // Unlock after 2s so timeout wins
+        auto unlocker = [&]() -> cot::task<> {
+            co_await cot::after(2s);
+            m.unlock();
+        };
+        unlocker().detach();
+        co_await winner;
+        assert(!me.triggered());
+        // Clean up: let the lock eventually resolve
+        co_await cot::after(2s);
+        assert(me.triggered());
+        m.unlock_shared();
+    }
+
+    std::cerr << "mutex_event_combinators: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -1178,6 +1248,7 @@ int main(int argc, char* argv[]) {
     run("shared_lock", test_shared_lock);
     run("shared_lock_move", test_shared_lock_move);
     run("lock_errors", test_lock_errors);
+    run("mutex_event_combinators", test_mutex_event_combinators);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");

@@ -70,6 +70,8 @@ struct task_promise : public task_promise_base {
     std::suspend_never initial_suspend() noexcept { return {}; }
     // - Handle `co_await E` for different `E` types:
     task_event_awaiter<T> await_transform(event ev);
+    template <bool shared>
+    task_mutex_event_awaiter<T, shared> await_transform(mutex_event<shared> ev);
     inline task_event_awaiter<T> await_transform(interest);
     inline interest_event_awaiter await_transform(interest_event);
     template <typename Aw>
@@ -114,6 +116,8 @@ struct task_promise<void> : public task_promise_base {
     inline task<void> get_return_object() noexcept;
     std::suspend_never initial_suspend() noexcept { return {}; }
     task_event_awaiter<void> await_transform(event ev);
+    template <bool shared>
+    task_mutex_event_awaiter<void, shared> await_transform(mutex_event<shared> ev);
     inline task_event_awaiter<void> await_transform(interest);
     inline interest_event_awaiter await_transform(interest_event);
     template <typename Aw>
@@ -232,6 +236,16 @@ inline event& make_event(event& ev) {
 
 inline event&& make_event(event&& ev) {
     return std::move(ev);
+}
+
+template <bool shared>
+inline event make_event(mutex_event<shared>& ev) {
+    return event(ev.handle());
+}
+
+template <bool shared>
+inline event make_event(mutex_event<shared>&& ev) {
+    return event(std::move(ev.handle()));
 }
 
 inline event make_event(interest);
@@ -761,6 +775,32 @@ inline void quorum_event_body::fix_want_interest(event_handle& ievent) {
     }
 }
 
+
+// task_mutex_event_awaiter<T, shared>
+//    Awaiter for `co_await mutex_event` inside a task.
+
+template <typename T, bool shared>
+struct task_mutex_event_awaiter : public task_event_awaiter<T> {
+    using parent = task_event_awaiter<T>;
+    mutex* m_;
+
+    locked_mutex_t<shared> await_resume() {
+        parent::await_resume();
+        return locked_mutex_t<shared>{m_};
+    }
+};
+
+template <typename T>
+template <bool shared>
+inline task_mutex_event_awaiter<T, shared> task_promise<T>::await_transform(mutex_event<shared> ev) {
+    return task_mutex_event_awaiter<T, shared>{{std::move(ev).handle(), nullptr}, ev.mutex()};
+}
+
+template <bool shared>
+inline task_mutex_event_awaiter<void, shared> task_promise<void>::await_transform(mutex_event<shared> ev) {
+    return task_mutex_event_awaiter<void, shared>{{std::move(ev).handle(), nullptr}, ev.mutex()};
+}
+
 }
 
 
@@ -1029,6 +1069,17 @@ task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es) {
     co_return std::nullopt;
 }
 
+template <bool shared, typename... Es>
+task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&... es) {
+    if (!e.triggered()) {
+        co_await any(event(e.handle()), std::forward<Es>(es)...);
+    }
+    if (e.triggered()) {
+        co_return locked_mutex_t<shared>{e.mutex()};
+    }
+    co_return std::nullopt;
+}
+
 
 // driver functions
 
@@ -1062,8 +1113,36 @@ inline size_t driver::timer_size() const {
 
 // mutex functions
 
-inline task<locked_mutex_t<false>> mutex::lock() {
-    return lock_impl<false>();
+template <bool shared>
+inline mutex_event<shared>::mutex_event(mutex_type* m)
+    : m_(m) {
+}
+
+template <bool shared>
+inline bool mutex_event<shared>::triggered() const noexcept {
+    return !ep_ || ep_->triggered();
+}
+
+template <bool shared>
+inline auto mutex_event<shared>::mutex() const noexcept -> mutex_type* {
+    return m_;
+}
+
+template <bool shared>
+inline const detail::event_handle& mutex_event<shared>::handle() const& noexcept {
+    return ep_;
+}
+
+template <bool shared>
+inline detail::event_handle&& mutex_event<shared>::handle() && noexcept {
+    return std::move(ep_);
+}
+
+
+inline mutex_event<false> mutex::lock() {
+    mutex_event<false> me(this);
+    lock_impl(false, me.ep_);
+    return me;
 }
 
 inline bool mutex::try_lock() {
@@ -1081,8 +1160,10 @@ inline void mutex::unlock() {
     unlock_impl(false);
 }
 
-inline task<locked_mutex_t<true>> mutex::lock_shared() {
-    return lock_impl<true>();
+inline mutex_event<true> mutex::lock_shared() {
+    mutex_event<true> me(this);
+    lock_impl(true, me.ep_);
+    return me;
 }
 
 inline bool mutex::try_lock_shared() {
@@ -1121,56 +1202,10 @@ inline auto mutex::latch() -> latch_type {
 }
 
 inline void mutex::unlatch(latch_type l) {
-    if (awoken_ != 0) {
-        l += awoken_ == mf_lock_excl ? mf_next_excl : mf_next_shared;
-    } else if (!waiters_.empty()) {
+    if (!waiters_.empty()) {
         l += waiter_shared(waiters_.front()) ? mf_next_shared : mf_next_excl;
     }
     latch_.store(l, std::memory_order_release);
-}
-
-inline bool mutex::allow(bool is_shared, latch_type l) const noexcept {
-    return is_shared
-        ? awoken_ != mf_lock_excl && !(l & mf_lock_excl)
-        : awoken_ == 0 && l < mf_lock_excl;
-}
-
-inline void mutex::notify_locked(latch_type l) {
-    while (!waiters_.empty()) {
-        auto& fw = waiters_.front();
-        if (!fw.empty()) {
-            bool fws = waiter_shared(fw);
-            if (!allow(fws, l)) {
-                break;
-            }
-            if (fw->trigger()) {
-                awoken_ += fws ? mf_lock_shared : mf_lock_excl;
-            }
-        }
-        waiters_.pop_front();
-    }
-}
-
-template <bool shared>
-task<locked_mutex_t<shared>> mutex::lock_impl() {
-    latch_type l = latch();
-    notify_locked(l);
-    if (!waiters_.empty() || !allow(shared, l)) {
-        event e;
-        if (shared) {
-            e.handle().get()->set_user_flags(detail::ef_user);
-        }
-        waiters_.push_back(e.handle());
-        unlatch(l);
-
-        co_await std::move(e);
-
-        l = latch();
-        assert(shared ? awoken_ >= mf_lock_shared : awoken_ == mf_lock_excl);
-        awoken_ -= shared ? mf_lock_shared : mf_lock_excl;
-    }
-    unlatch(l + (shared ? mf_lock_shared : mf_lock_excl));
-    co_return locked_mutex_t<shared>{this};
 }
 
 

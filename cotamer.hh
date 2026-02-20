@@ -190,13 +190,47 @@ private:
 };
 
 
-// event-driven mutexes
+// mutex, mutex_event, unique_lock, shared_lock
+//    Event-driven mutual exclusion for coroutines. `mutex` provides exclusive
+//    or shared access to a resource controlled by task suspension. A task can
+//    `co_await mutex.lock()` to obtain the lock. The `unique_lock` and
+//    `shared_lock` classes are RAII wrappers resembling their standard
+//    counterparts. For instance:
+//        cot::unique_lock guard(co_await mutex.lock());
+//    When that guard goes out of scope the mutex will automatically unlock.
 
 class mutex;
 
 template <bool shared>
 struct locked_mutex_t {
     mutex* mutex;
+};
+
+template <bool shared>
+class mutex_event {
+public:
+    using mutex_type = cotamer::mutex;
+
+    ~mutex_event() = default;
+    mutex_event(const mutex_event&) = default;
+    mutex_event(mutex_event&&) = default;
+    mutex_event& operator=(const mutex_event&) = default;
+    mutex_event& operator=(mutex_event&&) = default;
+
+    inline bool triggered() const noexcept;
+
+    inline mutex_type* mutex() const noexcept;
+    inline const detail::event_handle& handle() const& noexcept;
+    inline detail::event_handle&& handle() && noexcept;
+
+private:
+    friend class mutex;
+
+    mutex_type* m_;
+    detail::event_handle ep_;
+
+    inline mutex_event(mutex_type*);
+    inline bool trigger();
 };
 
 class mutex {
@@ -208,11 +242,11 @@ public:
     mutex& operator=(mutex&&) = delete;
     inline ~mutex() = default;
 
-    [[nodiscard]] inline task<locked_mutex_t<false>> lock();
+    [[nodiscard]] inline mutex_event<false> lock();
     [[nodiscard]] inline bool try_lock();
     inline void unlock();
 
-    [[nodiscard]] inline task<locked_mutex_t<true>> lock_shared();
+    [[nodiscard]] inline mutex_event<true> lock_shared();
     [[nodiscard]] inline bool try_lock_shared();
     inline void unlock_shared();
 
@@ -225,12 +259,8 @@ private:
     static constexpr latch_type mf_lock_excl = 8;     // exclusive lock held
     static constexpr latch_type mf_lock_shared = 16;  // added once per shared lock held
 
-    // protects awoken_ + waiters_
+    // protects waiters_, tracks information about lock
     std::atomic<latch_type> latch_ = 0;          // see mf_ constants
-    // `awoken_ != 0` when one or more tasks have been granted the mutex, but
-    // haven't claimed it yet. Either `mf_lock_excl` or a multiple of
-    // `mf_lock_shared`.
-    latch_type awoken_ = 0;
     // queue of events waiting for mutex; see `lock_impl`
     std::deque<detail::event_handle> waiters_;
 
@@ -238,9 +268,8 @@ private:
     inline void unlatch(latch_type);
     inline bool allow(bool shared, latch_type) const noexcept;
     inline bool waiter_shared(const detail::event_handle&) const noexcept;
-    inline void notify_locked(latch_type);
-    template <bool shared>
-    task<locked_mutex_t<shared>> lock_impl();
+    [[nodiscard]] inline latch_type notify_locked(latch_type);
+    void lock_impl(bool shared, detail::event_handle& ep);
     void unlock_impl(bool shared);
 };
 
