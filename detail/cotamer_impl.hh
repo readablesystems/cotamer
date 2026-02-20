@@ -793,11 +793,11 @@ inline bool event::trigger() {
     return ep_ && ep_->trigger();
 }
 
-inline const detail::event_handle& event::handle() const& {
+inline const detail::event_handle& event::handle() const& noexcept {
     return ep_;
 }
 
-inline detail::event_handle&& event::handle() && {
+inline detail::event_handle&& event::handle() && noexcept {
     return std::move(ep_);
 }
 

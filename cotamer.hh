@@ -36,14 +36,14 @@ public:
     event& operator=(const event&) = default;
     event& operator=(event&&) = default;
 
-    inline bool trigger();
     inline bool triggered() const noexcept;
-
     inline bool empty() const noexcept;
     inline bool idle() const noexcept;
 
-    inline const detail::event_handle& handle() const&;
-    inline detail::event_handle&& handle() &&;
+    inline bool trigger();
+
+    inline const detail::event_handle& handle() const& noexcept;
+    inline detail::event_handle&& handle() && noexcept;
     std::string debug_info() const;
 
 private:
