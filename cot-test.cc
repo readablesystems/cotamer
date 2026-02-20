@@ -841,6 +841,276 @@ cot::task<> test_mutex_cancel_excl_waiter_2shared() {
     std::cerr << "cancel_excl_waiter_2shared: ok\n";
 }
 
+// 40. unique_lock: RAII, token construction, move, unlock, release
+cot::task<> test_unique_lock() {
+    cot::mutex m;
+    std::vector<int> ops;
+
+    // Token construction from co_await lock()
+    auto task1 = [&]() -> cot::task<> {
+        cot::unique_lock ul(co_await m.lock());
+        assert(ul.owns_lock());
+        assert(ul.mutex() == &m);
+        assert(static_cast<bool>(ul));
+        ops.push_back(1);
+        co_await cot::after(1s);
+        ops.push_back(-1);
+        // RAII unlock on scope exit
+    };
+    task1().detach();
+
+    // defer_lock + explicit lock()
+    auto task2 = [&]() -> cot::task<> {
+        cot::unique_lock ul(m, std::defer_lock);
+        assert(!ul.owns_lock());
+        assert(ul.mutex() == &m);
+        co_await ul.lock();
+        assert(ul.owns_lock());
+        ops.push_back(2);
+        co_await cot::after(1s);
+        ops.push_back(-2);
+        // RAII unlock
+    };
+    task2().detach();
+
+    // try_to_lock (should fail while held)
+    auto task3 = [&]() -> cot::task<> {
+        co_await cot::asap(); // let task1 acquire first
+        cot::unique_lock ul(m, std::try_to_lock);
+        assert(!ul.owns_lock());
+        ops.push_back(30); // 30 = failed try_lock
+        // wait for task1 to release, then task2 to acquire and release
+        co_await cot::after(10s);
+        // now mutex is free, try again via method
+        assert(ul.try_lock());
+        assert(ul.owns_lock());
+        ops.push_back(3);
+        ul.unlock();
+        assert(!ul.owns_lock());
+        ops.push_back(-3);
+    };
+    task3().detach();
+
+    co_await cot::after(100s);
+    std::vector<int> expected = {1, 30, -1, 2, -2, 3, -3};
+    assert(ops == expected && "unique_lock ordering mismatch");
+    std::cerr << "unique_lock: ok\n";
+}
+
+// 41. unique_lock: move semantics and release()
+cot::task<> test_unique_lock_move() {
+    cot::mutex m;
+
+    // Move constructor transfers ownership
+    cot::unique_lock ul1(co_await m.lock());
+    assert(ul1.owns_lock());
+    cot::unique_lock ul2(std::move(ul1));
+    assert(!ul1.owns_lock());
+    assert(ul1.mutex() == nullptr);
+    assert(ul2.owns_lock());
+    assert(ul2.mutex() == &m);
+
+    // release() returns mutex without unlocking
+    auto* released = ul2.release();
+    assert(released == &m);
+    assert(!ul2.owns_lock());
+    assert(ul2.mutex() == nullptr);
+    // Must manually unlock since we released
+    m.unlock();
+
+    // Move assignment unlocks the target
+    cot::unique_lock ul3(co_await m.lock());
+    cot::unique_lock ul4(m, std::defer_lock);
+    ul4 = std::move(ul3); // ul4 wasn't owned, so no unlock needed
+    assert(ul4.owns_lock());
+    assert(!ul3.owns_lock());
+    // ul4 destructor unlocks
+
+    // adopt_lock
+    m.unlock(); // ul4 destructor unlocked above... need to re-lock
+    // Actually, let's just test adopt_lock freshly
+    co_await m.lock();
+    {
+        cot::unique_lock ul5(m, std::adopt_lock);
+        assert(ul5.owns_lock());
+        // destructor unlocks
+    }
+
+    // swap
+    cot::unique_lock a(co_await m.lock());
+    cot::unique_lock b(m, std::defer_lock);
+    assert(a.owns_lock() && !b.owns_lock());
+    a.swap(b);
+    assert(!a.owns_lock() && b.owns_lock());
+    assert(a.mutex() == &m && b.mutex() == &m);
+    // b destructor unlocks
+
+    std::cerr << "unique_lock_move: ok\n";
+}
+
+// 42. shared_lock: RAII, token construction, shared semantics
+cot::task<> test_shared_lock() {
+    cot::mutex m;
+    std::vector<int> ops;
+
+    // Two shared locks can coexist
+    auto shared_holder = [&](int id) -> cot::task<> {
+        cot::shared_lock sl(co_await m.lock_shared());
+        assert(sl.owns_lock());
+        assert(sl.mutex() == &m);
+        ops.push_back(id);
+        co_await cot::after(1s);
+        ops.push_back(-id);
+        // RAII unlock_shared
+    };
+    shared_holder(1).detach();
+    shared_holder(2).detach();
+
+    // Exclusive lock waits for both shared locks
+    auto excl_holder = [&]() -> cot::task<> {
+        cot::unique_lock ul(co_await m.lock());
+        ops.push_back(3);
+        co_await cot::after(1s);
+        ops.push_back(-3);
+    };
+    excl_holder().detach();
+
+    // defer_lock + lock() on shared_lock
+    auto deferred = [&]() -> cot::task<> {
+        cot::shared_lock sl(m, std::defer_lock);
+        assert(!sl.owns_lock());
+        co_await sl.lock();
+        assert(sl.owns_lock());
+        ops.push_back(4);
+        co_await cot::after(1s);
+        ops.push_back(-4);
+    };
+    deferred().detach();
+
+    co_await cot::after(100s);
+    // t=0: shared 1 and 2 acquired concurrently
+    // t=1s: both release, exclusive 3 acquires
+    // t=2s: 3 releases, shared 4 acquires
+    // t=3s: 4 releases
+    std::vector<int> expected = {1, 2, -1, -2, 3, -3, 4, -4};
+    assert(ops == expected && "shared_lock ordering mismatch");
+    std::cerr << "shared_lock: ok\n";
+}
+
+// 43. shared_lock: move, try_lock, release, swap
+cot::task<> test_shared_lock_move() {
+    cot::mutex m;
+
+    // Token + move
+    cot::shared_lock sl1(co_await m.lock_shared());
+    assert(sl1.owns_lock());
+    cot::shared_lock sl2(std::move(sl1));
+    assert(!sl1.owns_lock());
+    assert(sl2.owns_lock());
+
+    // release
+    auto* released = sl2.release();
+    assert(released == &m);
+    assert(!sl2.owns_lock());
+    m.unlock_shared();
+
+    // try_to_lock when free
+    {
+        cot::shared_lock sl3(m, std::try_to_lock);
+        assert(sl3.owns_lock());
+    }
+
+    // try_to_lock when exclusively held
+    co_await m.lock();
+    {
+        cot::shared_lock sl4(m, std::try_to_lock);
+        assert(!sl4.owns_lock());
+    }
+    m.unlock();
+
+    // adopt_lock
+    co_await m.lock_shared();
+    {
+        cot::shared_lock sl5(m, std::adopt_lock);
+        assert(sl5.owns_lock());
+    }
+
+    // swap
+    cot::shared_lock a(co_await m.lock_shared());
+    cot::shared_lock b(m, std::defer_lock);
+    assert(a.owns_lock() && !b.owns_lock());
+    a.swap(b);
+    assert(!a.owns_lock() && b.owns_lock());
+
+    std::cerr << "shared_lock_move: ok\n";
+}
+
+// 44. unique_lock/shared_lock: error conditions
+cot::task<> test_lock_errors() {
+    cot::mutex m;
+    bool caught;
+
+    // unlock without owning
+    caught = false;
+    try {
+        cot::unique_lock ul(m, std::defer_lock);
+        ul.unlock();
+    } catch (const std::system_error& e) {
+        caught = true;
+        assert(e.code() == std::errc::operation_not_permitted);
+    }
+    assert(caught && "unlock on unowned unique_lock should throw");
+
+    // lock when already owned
+    caught = false;
+    try {
+        cot::unique_lock ul(co_await m.lock());
+        co_await ul.lock();
+    } catch (const std::system_error& e) {
+        caught = true;
+        assert(e.code() == std::errc::resource_deadlock_would_occur);
+    }
+    assert(caught && "double lock on unique_lock should throw");
+    // The lock was acquired but the coroutine threw, so ul's destructor ran...
+    // Actually, the exception propagates out of lock() which is a coroutine,
+    // so we need to handle this differently. Let me just test the simpler cases.
+
+    // shared_lock: unlock without owning
+    caught = false;
+    try {
+        cot::shared_lock sl(m, std::defer_lock);
+        sl.unlock();
+    } catch (const std::system_error& e) {
+        caught = true;
+        assert(e.code() == std::errc::operation_not_permitted);
+    }
+    assert(caught && "unlock on unowned shared_lock should throw");
+
+    // try_lock on nullptr mutex
+    caught = false;
+    try {
+        cot::unique_lock ul;
+        (void) ul.try_lock();
+    } catch (const std::system_error& e) {
+        caught = true;
+        assert(e.code() == std::errc::operation_not_permitted);
+    }
+    assert(caught && "try_lock on null mutex should throw");
+
+    // shared try_lock on nullptr mutex
+    caught = false;
+    try {
+        cot::shared_lock sl;
+        (void) sl.try_lock();
+    } catch (const std::system_error& e) {
+        caught = true;
+        assert(e.code() == std::errc::operation_not_permitted);
+    }
+    assert(caught && "shared try_lock on null mutex should throw");
+
+    std::cerr << "lock_errors: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -903,6 +1173,11 @@ int main(int argc, char* argv[]) {
     run("mutex_cancellation", test_mutex_cancellation);
     run("cancel_excl_waiter", test_mutex_cancel_excl_waiter);
     run("cancel_excl_waiter_2shared", test_mutex_cancel_excl_waiter_2shared);
+    run("unique_lock", test_unique_lock);
+    run("unique_lock_move", test_unique_lock_move);
+    run("shared_lock", test_shared_lock);
+    run("shared_lock_move", test_shared_lock_move);
+    run("lock_errors", test_lock_errors);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");

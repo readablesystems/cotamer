@@ -3,6 +3,7 @@
 #if defined(__x86_64__)
 #include <xmmintrin.h>
 #endif
+#include <system_error>
 
 
 // cotamer_impl.hh
@@ -1061,8 +1062,8 @@ inline size_t driver::timer_size() const {
 
 // mutex functions
 
-inline task<> mutex::lock() {
-    return lock_impl(false);
+inline task<locked_mutex_t<false>> mutex::lock() {
+    return lock_impl<false>();
 }
 
 inline bool mutex::try_lock() {
@@ -1080,8 +1081,8 @@ inline void mutex::unlock() {
     unlock_impl(false);
 }
 
-inline task<> mutex::lock_shared() {
-    return lock_impl(true);
+inline task<locked_mutex_t<true>> mutex::lock_shared() {
+    return lock_impl<true>();
 }
 
 inline bool mutex::try_lock_shared() {
@@ -1126,6 +1127,202 @@ inline void mutex::unlatch(latch_type l) {
         l += waiter_shared(waiters_.front()) ? mf_next_shared : mf_next_excl;
     }
     latch_.store(l, std::memory_order_release);
+}
+
+inline bool mutex::allow(bool is_shared, latch_type l) const noexcept {
+    return is_shared
+        ? awoken_ != mf_lock_excl && !(l & mf_lock_excl)
+        : awoken_ == 0 && l < mf_lock_excl;
+}
+
+inline void mutex::notify_locked(latch_type l) {
+    while (!waiters_.empty()) {
+        auto& fw = waiters_.front();
+        if (!fw.empty()) {
+            bool fws = waiter_shared(fw);
+            if (!allow(fws, l)) {
+                break;
+            }
+            if (fw->trigger()) {
+                awoken_ += fws ? mf_lock_shared : mf_lock_excl;
+            }
+        }
+        waiters_.pop_front();
+    }
+}
+
+template <bool shared>
+task<locked_mutex_t<shared>> mutex::lock_impl() {
+    latch_type l = latch();
+    notify_locked(l);
+    if (!waiters_.empty() || !allow(shared, l)) {
+        event e;
+        if (shared) {
+            e.handle().get()->set_user_flags(detail::ef_user);
+        }
+        waiters_.push_back(e.handle());
+        unlatch(l);
+
+        co_await std::move(e);
+
+        l = latch();
+        assert(shared ? awoken_ >= mf_lock_shared : awoken_ == mf_lock_excl);
+        awoken_ -= shared ? mf_lock_shared : mf_lock_excl;
+    }
+    unlatch(l + (shared ? mf_lock_shared : mf_lock_excl));
+    co_return locked_mutex_t<shared>{this};
+}
+
+
+inline unique_lock::unique_lock(locked_mutex_t<false> t) noexcept
+    : m_(t.mutex), owned_(true) {
+}
+
+inline unique_lock::~unique_lock() {
+    if (owned_) {
+        m_->unlock();
+    }
+}
+
+inline unique_lock::unique_lock(unique_lock&& x) noexcept
+    : m_(std::exchange(x.m_, nullptr)), owned_(std::exchange(x.owned_, false)) {
+}
+
+inline unique_lock::unique_lock(mutex_type& m, std::defer_lock_t) noexcept
+    : m_(&m), owned_(false) {
+}
+
+inline unique_lock::unique_lock(mutex_type& m, std::try_to_lock_t) noexcept
+    : m_(&m), owned_(m.try_lock()) {
+}
+
+inline unique_lock::unique_lock(mutex_type& m, std::adopt_lock_t) noexcept
+    : m_(&m), owned_(true) {
+}
+
+inline unique_lock& unique_lock::operator=(unique_lock&& x) noexcept {
+    if (owned_) {
+        m_->unlock();
+    }
+    m_ = std::exchange(x.m_, nullptr);
+    owned_ = std::exchange(x.owned_, false);
+    return *this;
+}
+
+inline void unique_lock::swap(unique_lock& x) noexcept {
+    if (&x != this) {
+        std::swap(m_, x.m_);
+        std::swap(owned_, x.owned_);
+    }
+}
+
+inline task<> unique_lock::lock() {
+    if (!m_) {
+        throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    } else if (owned_) {
+        throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+    }
+    co_await m_->lock();
+    owned_ = true;
+}
+
+inline bool unique_lock::try_lock() {
+    if (!m_) {
+        throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    } else if (owned_) {
+        throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+    }
+    owned_ = m_->try_lock();
+    return owned_;
+}
+
+inline void unique_lock::unlock() {
+    if (!owned_) {
+        throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    }
+    m_->unlock();
+    owned_ = false;
+}
+
+inline auto unique_lock::release() noexcept -> mutex_type* {
+    owned_ = false;
+    return std::exchange(m_, nullptr);
+}
+
+
+inline shared_lock::shared_lock(locked_mutex_t<true> t) noexcept
+    : m_(t.mutex), owned_(true) {
+}
+
+inline shared_lock::~shared_lock() {
+    if (owned_) {
+        m_->unlock_shared();
+    }
+}
+
+inline shared_lock::shared_lock(mutex_type& m, std::defer_lock_t) noexcept
+    : m_(&m), owned_(false) {
+}
+
+inline shared_lock::shared_lock(mutex_type& m, std::try_to_lock_t) noexcept
+    : m_(&m), owned_(m.try_lock_shared()) {
+}
+
+inline shared_lock::shared_lock(mutex_type& m, std::adopt_lock_t) noexcept
+    : m_(&m), owned_(true) {
+}
+
+inline shared_lock::shared_lock(shared_lock&& x) noexcept
+    : m_(std::exchange(x.m_, nullptr)), owned_(std::exchange(x.owned_, false)) {
+}
+
+inline shared_lock& shared_lock::operator=(shared_lock&& x) noexcept {
+    if (owned_) {
+        m_->unlock_shared();
+    }
+    m_ = std::exchange(x.m_, nullptr);
+    owned_ = std::exchange(x.owned_, false);
+    return *this;
+}
+
+inline void shared_lock::swap(shared_lock& x) noexcept {
+    if (&x != this) {
+        std::swap(m_, x.m_);
+        std::swap(owned_, x.owned_);
+    }
+}
+
+inline task<> shared_lock::lock() {
+    if (!m_) {
+        throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    } else if (owned_) {
+        throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+    }
+    co_await m_->lock_shared();
+    owned_ = true;
+}
+
+inline bool shared_lock::try_lock() {
+    if (!m_) {
+        throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    } else if (owned_) {
+        throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+    }
+    owned_ = m_->try_lock_shared();
+    return owned_;
+}
+
+inline void shared_lock::unlock() {
+    if (!owned_) {
+        throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    }
+    m_->unlock_shared();
+    owned_ = false;
+}
+
+inline auto shared_lock::release() noexcept -> mutex_type* {
+    owned_ = false;
+    return std::exchange(m_, nullptr);
 }
 
 }

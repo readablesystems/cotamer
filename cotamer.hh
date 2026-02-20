@@ -6,6 +6,7 @@
 #include <deque>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -111,11 +112,11 @@ template <typename... Es> inline event all(Es&&... es);
 // result (wrapped in optional) if the task completes first, or nullopt if
 // one of the events triggers first.
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<T> t, Es&&... es);
+[[nodiscard]] task<std::optional<T>> attempt(task<T> t, Es&&... es);
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
+[[nodiscard]] task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
 template <typename... Es>
-task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
+[[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
 
 
 // Time and scheduling functions (operate on driver::main).
@@ -191,6 +192,13 @@ private:
 
 // event-driven mutexes
 
+class mutex;
+
+template <bool shared>
+struct locked_mutex_t {
+    mutex* mutex;
+};
+
 class mutex {
 public:
     inline mutex() = default;
@@ -200,12 +208,12 @@ public:
     mutex& operator=(mutex&&) = delete;
     inline ~mutex() = default;
 
-    inline task<> lock();
-    inline bool try_lock();
+    [[nodiscard]] inline task<locked_mutex_t<false>> lock();
+    [[nodiscard]] inline bool try_lock();
     inline void unlock();
 
-    inline task<> lock_shared();
-    inline bool try_lock_shared();
+    [[nodiscard]] inline task<locked_mutex_t<true>> lock_shared();
+    [[nodiscard]] inline bool try_lock_shared();
     inline void unlock_shared();
 
 private:
@@ -231,8 +239,75 @@ private:
     inline bool allow(bool shared, latch_type) const noexcept;
     inline bool waiter_shared(const detail::event_handle&) const noexcept;
     inline void notify_locked(latch_type);
-    task<> lock_impl(bool shared);
+    template <bool shared>
+    task<locked_mutex_t<shared>> lock_impl();
     void unlock_impl(bool shared);
+};
+
+
+// unique_lock, shared_lock
+//    RAII lock guards for cotamer::mutex.
+
+class unique_lock {
+public:
+    using mutex_type = cotamer::mutex;
+
+    unique_lock() noexcept = default;
+    inline unique_lock(mutex_type&, std::defer_lock_t) noexcept;
+    inline unique_lock(mutex_type&, std::try_to_lock_t) noexcept;
+    inline unique_lock(mutex_type&, std::adopt_lock_t) noexcept;
+    inline unique_lock(locked_mutex_t<false> token) noexcept;
+    inline unique_lock(unique_lock&&) noexcept;
+    inline unique_lock& operator=(unique_lock&&) noexcept;
+    unique_lock(const unique_lock&) = delete;
+    unique_lock& operator=(const unique_lock&) = delete;
+    inline ~unique_lock();
+
+    [[nodiscard]] inline task<> lock();
+    [[nodiscard]] inline bool try_lock();
+    inline void unlock();
+
+    inline void swap(unique_lock&) noexcept;
+    inline mutex_type* release() noexcept;
+
+    mutex_type* mutex() const noexcept { return m_; }
+    bool owns_lock() const noexcept { return owned_; }
+    explicit operator bool() const noexcept { return owned_; }
+
+private:
+    mutex_type* m_ = nullptr;
+    bool owned_ = false;
+};
+
+class shared_lock {
+public:
+    using mutex_type = cotamer::mutex;
+
+    shared_lock() noexcept = default;
+    inline shared_lock(mutex_type&, std::defer_lock_t) noexcept;
+    inline shared_lock(mutex_type&, std::try_to_lock_t) noexcept;
+    inline shared_lock(mutex_type&, std::adopt_lock_t) noexcept;
+    inline shared_lock(locked_mutex_t<true> token) noexcept;
+    inline shared_lock(shared_lock&& x) noexcept;
+    inline shared_lock& operator=(shared_lock&& x) noexcept;
+    shared_lock(const shared_lock&) = delete;
+    shared_lock& operator=(const shared_lock&) = delete;
+    inline ~shared_lock();
+
+    [[nodiscard]] inline task<> lock();
+    [[nodiscard]] inline bool try_lock();
+    inline void unlock();
+
+    inline void swap(shared_lock&) noexcept;
+    inline mutex_type* release() noexcept;
+
+    mutex_type* mutex() const noexcept { return m_; }
+    bool owns_lock() const noexcept { return owned_; }
+    explicit operator bool() const noexcept { return owned_; }
+
+private:
+    mutex_type* m_ = nullptr;
+    bool owned_ = false;
 };
 
 }
