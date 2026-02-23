@@ -122,7 +122,7 @@ private:
     bool verbose_;
     network<T>& net_;
 
-    cot::clock::duration receive_delay_ = 1ms;
+    cot::clock::duration receive_delay_ = 0ms;
 
     std::deque<std::pair<message_type, id_type>> messageq_;
     cot::event receiver_event_;
@@ -175,6 +175,11 @@ auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
         // Register an event that senders will trigger on delivery.
         // Need a new one every time because events are one-shot.
         co_await (receiver_event_ = cot::event());
+
+        // Delay after the message is delivered and before dequeuing it.
+        // (We must not delay *after* dequeuing it, because doing so might
+        // drop the message!)
+        co_await cot::after(receive_delay_);
     }
 
     auto m = std::move(messageq_.front());
@@ -184,8 +189,6 @@ auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
         std::print("{}: {} ← {} \"{}\"\n", cot::now(), id(), m.second,
                    message_traits_type::print_transform(m.first));
     }
-
-    co_await cot::after(receive_delay_);
 
     co_return std::move(m);
 }
