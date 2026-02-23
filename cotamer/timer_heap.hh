@@ -1,17 +1,14 @@
 #pragma once
-#include "detail/circular_int.hh"
+#include "cotamer/circular_int.hh"
 #include <chrono>
 
 template <typename T>
-struct empty {
-    bool operator()(const T& x) const {
-        return x.empty();
-    }
-};
-
-template <typename T>
 struct timer_heap_traits {
-    using empty_type = empty<T>;
+    struct empty_type {
+        bool operator()(const T& x) const {
+            return x.empty();
+        }
+    };
     using time_point_type = std::chrono::system_clock::time_point;
     static constexpr int arity = 4;
 };

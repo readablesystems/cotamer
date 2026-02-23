@@ -12,8 +12,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
-#include "detail/timer_heap.hh"
-#include "detail/event_handle.hh"
+#include "cotamer/timer_heap.hh"
+#include "cotamer/event_handle.hh"
 
 // cotamer.hh
 //    Public interface to the Cotamer coroutine library.
@@ -354,4 +354,4 @@ private:
 
 }
 
-#include "detail/cotamer_impl.hh"
+#include "cotamer/cotamer_impl.hh"

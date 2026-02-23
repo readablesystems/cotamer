@@ -34,7 +34,7 @@ build/cot-test-threads        # threading tests (use build-tsan/ for race detect
 
 ## Architecture
 
-### Cotamer Library (`cotamer.hh`, `detail/cotamer.cc`)
+### Cotamer Library (`cotamer.hh`, `cotamer/cotamer.cc`)
 Coroutine framework with deterministic virtual time. Core abstractions:
 - `cotamer::task<T>` — coroutine returning T, uses `co_await`/`co_return`
 - `cotamer::event` — one-shot signal, awaitable
@@ -56,7 +56,7 @@ Implementation of the Chandra-Toueg rotating-coordinator consensus protocol. Mes
 
 ### Utilities
 - `utils.hh` — string-to-number parsing, random seeding helpers
-- `detail/` — internal Cotamer implementation (timer heap, event handles)
+- `cotamer/` — internal Cotamer implementation (timer heap, event handles)
 
 ## Key Conventions
 

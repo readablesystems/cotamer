@@ -27,8 +27,8 @@ if(TSAN)
 endif()
 
 add_library(Cotamer OBJECT
-    detail/cotamer.cc
-    detail/utils.cc
+    cotamer/cotamer.cc
+    cotamer/utils.cc
 )
 
 add_executable(cot-test

@@ -1,5 +1,5 @@
 #pragma once
-#include "detail/small_vector.hh"
+#include "cotamer/small_vector.hh"
 #if defined(__x86_64__)
 #include <xmmintrin.h>
 #endif
