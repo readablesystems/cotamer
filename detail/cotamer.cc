@@ -3,20 +3,22 @@
 
 namespace cotamer {
 
-thread_local std::unique_ptr<driver> driver::main{new driver};
+std::unique_ptr<driver> driver::main{new driver};
+bool driver::clearing = false;
 
 driver::driver()
-    : now_(clock::from_time_t(1634070069)) {
+    : now_(std::chrono::system_clock::from_time_t(1634070069)) {
 }
 
 driver::~driver() {
-    if (!asap_.empty()
-        || !ready_.empty()
-        || !timed_.empty()
-        || lock_.load(std::memory_order_relaxed)) {
+    if (!asap_.empty() || !ready_.empty() || !timed_.empty()) {
         // Clear any remaining events and coroutines
+        std::unique_ptr<driver> tmp(this);
+        tmp.swap(main);
         clear();
         loop();
+        tmp.swap(main);
+        tmp.release();
     }
 }
 
@@ -29,14 +31,6 @@ void driver::loop() {
             asap_.front().trigger();
             asap_.pop_front();
             again = true;
-        }
-
-        if (lock_.load(std::memory_order_relaxed)) {
-            uint32_t flags = lock();
-            std::deque<std::coroutine_handle<>> remote_ready;
-            remote_ready_.swap(remote_ready);
-            unlock(flags & ~df_nonempty);
-            ready_.append_range(remote_ready);
         }
 
         while (!ready_.empty()) {
@@ -58,17 +52,12 @@ void driver::loop() {
             timed_.pop();
             again = true;
         }
-
-        // go again if incoming
-        if (lock_.load(std::memory_order_relaxed)) {
-            again = true;
-        }
     }
-    clearing_ = false;
+    clearing = false;
 }
 
 void driver::clear() {
-    clearing_ = true;
+    clearing = true;
 }
 
 void reset() {

@@ -15,15 +15,7 @@ struct small_vector {
 
     small_vector() = default;
     small_vector(const small_vector<T, N>&) = delete;
-    small_vector(small_vector<T, N>&& x)
-        : sz_(x.sz_), cap_(x.cap_) {
-        if (x.cap_ > N) {
-            u_.out = x.u_.out;
-            x.sz_ = x.cap_ = 0;
-        } else {
-            std::uninitialized_move_n(x.begin(), x.sz_, begin());
-        }
-    }
+    small_vector(small_vector<T, N>&&) = delete;
     small_vector<T, N>& operator=(const small_vector<T, N>&) = delete;
     small_vector<T, N>& operator=(small_vector<T, N>&&) = delete;
     ~small_vector() {
@@ -35,6 +27,9 @@ struct small_vector {
     }
     bool empty() const {
         return size() == 0;
+    }
+    bool empty_capacity() const {
+        return cap_ == 0;
     }
     void clear() {
         std::destroy_n(begin(), sz_);
@@ -105,27 +100,6 @@ struct small_vector {
     void pop_back() {
         std::destroy_at(end() - 1);
         --sz_;
-    }
-
-    void take(small_vector<T, N>&& x) {
-        if (this == &x) {
-            return;
-        }
-        std::destroy_n(begin(), sz_);
-        if (cap_ > N) {
-            std::allocator<T> alloc;
-            alloc.deallocate(u_.out, cap_);
-        }
-        sz_ = x.sz_;
-        cap_ = x.cap_;
-        if (x.cap_ > N) {
-            u_.out = x.u_.out;
-        } else {
-            std::uninitialized_move_n(x.begin(), x.sz_, begin());
-            std::destroy_n(x.begin(), x.sz_);
-        }
-        x.sz_ = 0;
-        x.cap_ = N;
     }
 
 private:

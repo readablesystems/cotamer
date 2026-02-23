@@ -162,30 +162,21 @@ public:
 
     void loop();
     void clear();
-    bool clearing() const { return clearing_; }
 
     // introspection
     inline size_t timer_size() const;
 
-    static thread_local std::unique_ptr<driver> main;
+    static std::unique_ptr<driver> main;
+    static bool clearing;
 
 private:
     friend struct detail::event_body;
-    template <typename T> friend struct detail::task_final_awaiter;
+    template <typename T> friend struct detail::task_event_awaiter;
 
-    bool clearing_ = false;
     std::deque<std::coroutine_handle<>> ready_;
     std::deque<event> asap_;
     timer_heap<detail::event_handle> timed_;
     clock::time_point now_;
-
-    static constexpr uint32_t df_lock = 1;
-    static constexpr uint32_t df_nonempty = 2;
-    std::atomic<uint32_t> lock_ = 0;
-    std::deque<std::coroutine_handle<>> remote_ready_;
-
-    inline uint32_t lock();
-    inline void unlock(uint32_t flags);
 };
 
 }
