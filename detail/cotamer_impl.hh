@@ -459,7 +459,7 @@ struct quorum_event_body : event_body {
         }
         if (!(qf & ef_triggered) && triggered_ >= quorum_) {
             trigger_unlock(qf);
-        } else if ((qf & (ef_triggered | ef_empty_members)) == (ef_triggered | ef_empty_members)
+        } else if ((qf & ef_empty_members)
                    && refcount_.load(std::memory_order_relaxed) == 0) {
             delete this;
         } else {
