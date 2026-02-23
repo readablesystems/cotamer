@@ -416,7 +416,7 @@ void test_torture_quorum_race() {
 // any(all(e0, e1), all(e2, e3)) — four threads each trigger one event.
 // The inner all() that completes first satisfies the outer any().
 void test_torture_nested_quorum() {
-    constexpr int ROUNDS = 200;
+    constexpr int ROUNDS = 20000;
 
     for (int round = 0; round < ROUNDS; ++round) {
         std::atomic<bool> go{false};
@@ -795,23 +795,16 @@ void test_leak_await() {
 }
 
 
-// Cross-thread task await: task created on thread A, co_awaited on thread B.
-// When F completes on thread A, final_suspend should marshal the continuation
-// (thread B's consumer coroutine) back to thread B's driver, not resume it
-// directly on thread A.
+// Cross-thread task await: co_awaiting a task created on a different driver
+// should throw cotamer_error with code cross_driver_await.
 void test_cross_thread_await_task() {
     std::atomic<int> phase{0};
-    cot::event* ev_ptr = nullptr;
     std::optional<cot::task<int>> f_task;
-    std::thread::id thread_a_id, thread_b_id, resumed_on;
+    bool got_error = false;
 
     std::thread thread_a([&] {
-        thread_a_id = std::this_thread::get_id();
-        cot::event ev;
-        ev_ptr = &ev;
-
         auto fn = [&]() -> cot::task<int> {
-            co_await ev;
+            co_await cot::after(std::chrono::hours(1000));
             co_return 42;
         };
         f_task.emplace(fn());
@@ -820,48 +813,34 @@ void test_cross_thread_await_task() {
         while (phase.load(std::memory_order_acquire) < 2) {
             std::this_thread::yield();
         }
-
-        // Complete F on thread A
-        ev.trigger();
-        cot::loop();
-
-        while (phase.load(std::memory_order_acquire) < 3) {
-            std::this_thread::yield();
-        }
     });
 
     std::thread thread_b([&] {
-        thread_b_id = std::this_thread::get_id();
         while (phase.load(std::memory_order_acquire) < 1) {
             std::this_thread::yield();
         }
 
+        // co_await of a task from thread A's driver should throw
         auto consumer = [&]() -> cot::task<> {
-            int val = co_await std::move(*f_task);
-            resumed_on = std::this_thread::get_id();
-            assert(val == 42);
+            try {
+                co_await std::move(*f_task);
+                assert(false && "should have thrown");
+            } catch (const cot::cotamer_error& e) {
+                assert(e.code() == cot::cotamer_errc::cross_driver_await);
+                got_error = true;
+            }
         };
         auto c = consumer();
+        cot::loop();
 
+        assert(c.done());
         phase.store(2, std::memory_order_release);
-
-        // Consumer should be resumed here via remote_ready_, not on thread A
-        while (!c.done()) {
-            cot::loop();
-            std::this_thread::yield();
-        }
-
-        phase.store(3, std::memory_order_release);
     });
 
     thread_a.join();
     thread_b.join();
 
-    std::cerr << "  resumed on thread "
-              << (resumed_on == thread_a_id ? "A" : resumed_on == thread_b_id ? "B" : "?")
-              << " (expected B)\n";
-    assert(resumed_on == thread_b_id && "consumer should resume on its home thread");
-
+    assert(got_error && "should have caught cotamer_error");
     std::cerr << "cross_thread_await_task: ok\n";
 }
 

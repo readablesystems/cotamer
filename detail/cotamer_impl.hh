@@ -29,6 +29,9 @@ constexpr uint32_t efm_user = 0x3C0;      // mask of user flags
 constexpr uint32_t ef_interest = 1024;    // this quorum has 1 interest{}
                                           // (added once per interest{})
 
+// exception thrown during driver::clearing()
+struct clearing_exception {};
+
 inline void spinlock_hint() {
 #if defined(__x86_64__)
     _mm_pause();
@@ -159,7 +162,10 @@ struct task_awaiter {
     }
     // - Suspend this coroutine and return the next coroutine to execute
     template <typename U>
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiting) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiting) {
+        if (awaiting.promise().home_ != self_.promise().home_) {
+            throw cotamer_error(cotamer_errc::cross_driver_await);
+        }
         // XXX UB, but see task_promise<T>::get_return_object
         std::coroutine_handle<task_promise_base> base_awaiting =
             std::coroutine_handle<task_promise_base>::from_address(awaiting.address());
@@ -190,18 +196,11 @@ struct task_final_awaiter {
         if (promise.completion_) {
             promise.completion_->trigger();
         }
-        // if another coroutine wants this task's result, resume them on their
-        // home thread
+        // if another coroutine wants this task's result, resume it directly
+        // (cross-driver awaits are rejected at co_await time, so the
+        // continuation is always on the same driver)
         if (promise.continuation_) {
-            auto continuation = std::exchange(promise.continuation_, nullptr);
-            driver* home = continuation.promise().home_;
-            if (home == driver::main.get()) {
-                return continuation;
-            }
-            uint32_t flags = home->lock();
-            home->remote_ready_.push_back(continuation);
-            home->unlock(flags | driver::df_nonempty);
-            return std::noop_coroutine();
+            return std::exchange(promise.continuation_, nullptr);
         }
         // destroy if detached and then return to event loop
         if (promise.detached_) {
@@ -271,6 +270,10 @@ struct event_body {
     event_body& operator=(const event_body&) = delete;
     event_body& operator=(event_body&&) = delete;
     ~event_body() = default;
+
+    void ref(uint32_t n = 1) noexcept {
+        refcount_.fetch_add(n, std::memory_order_relaxed);
+    }
 
     uint32_t relaxed_flags() const noexcept {
         return flags_.load(std::memory_order_relaxed);
@@ -355,7 +358,11 @@ struct event_body {
         auto f = untriggered_lock();
         return !(f & ef_triggered) && trigger_unlock(f);
     }
-    inline bool trigger_unlock(uint32_t flags);
+
+    inline std::coroutine_handle<> driver_trigger(driver* drv);
+
+    inline bool trigger_unlock(uint32_t flags, driver* drv = nullptr,
+                               std::coroutine_handle<>* cot = nullptr);
 
 
     std::atomic<uint32_t> refcount_ = 1;
@@ -383,7 +390,7 @@ private:
                 break;
             }
         }
-        unlock(listeners_.size() ? flags : flags | ef_empty);
+        unlock(flags | (listeners_.empty() ? ef_empty : 0));
     }
 
     static std::coroutine_handle<task_promise_base> listener_coroutine(uintptr_t l) noexcept {
@@ -444,7 +451,7 @@ struct quorum_event_body : event_body {
     // Called by a member event when it triggers. Removes that event from
     // members_ (once), increases the triggered_ count, and potentially triggers
     // this event.
-    void trigger_member(event_body* e) {
+    void trigger_member(event_body* e, driver* drv, std::coroutine_handle<>* coh) {
         auto qf = lock();
         for (auto& mem : members_) {
             if (mem.get() == e) {
@@ -458,7 +465,7 @@ struct quorum_event_body : event_body {
             }
         }
         if (!(qf & ef_triggered) && triggered_ >= quorum_) {
-            trigger_unlock(qf);
+            trigger_unlock(qf, drv, coh);
         } else if ((qf & ef_empty_members)
                    && refcount_.load(std::memory_order_relaxed) == 0) {
             delete this;
@@ -510,58 +517,96 @@ struct quorum_event_body : event_body {
     uint32_t quorum_;
 };
 
+// event_body::trigger_unlock: the key trigger machinery
 
-inline bool event_body::trigger_unlock(uint32_t f) {
-    bool result = !(f & ef_empty) || refcount_.load(std::memory_order_acquire) > 1;
+inline bool event_body::trigger_unlock(uint32_t f, driver* drv,
+                                       std::coroutine_handle<>* coh) {
+    bool result = !(f & ef_empty)
+        || refcount_.load(std::memory_order_acquire) > 1;
     // Triggering a quorum removes it from its members' listener lists, but that
     // might cause recursive triggers and eventually drop the last remaining
     // reference to `this`. Add a temporary reference so the quorum survives
     // until the end.
     if (f & ef_quorum) {
-        refcount_.fetch_add(1, std::memory_order_relaxed);
+        ref();
         auto qbody = static_cast<quorum_event_body*>(this);
         f = qbody->cull_members(f);
     }
-    // Fast path: process same-thread coroutines
-    driver* this_driver = driver::main.get();
-    auto lit = listeners_.begin();
-    while (lit != listeners_.end()
-           && !(*lit & lf_quorum)
-           && listener_coroutine(*lit).promise().home_ == this_driver) {
-        this_driver->ready_.push_back(listener_coroutine(*lit));
-        ++lit;
-    }
-    // Remaining listeners include quorums and coroutines with other homes.
-    // Save them locally, then unlock, to avoid deadlock with quorum
-    // trigger_member (which acquires our lock).
-    small_vector<uintptr_t, 3> listeners;
-    while (lit != listeners_.end()) {
-        listeners.push_back(*lit);
-        ++lit;
-    }
-    listeners_.clear();
-    unlock(f | ef_triggered | ef_empty);
-    // Activate listeners: schedule coroutines and inform quorum events.
-    for (auto listener : listeners) {
-        if (listener & lf_quorum) {
-            auto qb = listener_quorum(listener);
-            qb->trigger_member(this);
+    // Process listeners: remove quorums, maybe claim 1 `drv` coroutine,
+    // and collect all other interested drivers with interested coroutines.
+    small_vector<uintptr_t, 3> quorums;
+    small_vector<driver*, 3> drivers;
+    auto lit = listeners_.begin(), oit = lit, eit = listeners_.end();
+    for (; lit != eit; ++lit) {
+        if (*lit & lf_quorum) {
+            quorums.push_back(*lit);
             continue;
         }
-        auto coroutine = listener_coroutine(listener);
-        driver* home = coroutine.promise().home_;
-        if (home == this_driver) {
-            home->ready_.push_back(coroutine);
-        } else {
-            uint32_t flags = home->lock();
-            home->remote_ready_.push_back(coroutine);
-            home->unlock(flags | driver::df_nonempty);
+        auto lcoh = listener_coroutine(*lit);
+        driver* ldrv = lcoh.promise().home_;
+        if (ldrv == drv) {
+            // The coroutine `lcoh` should run on driver `drv`, which called
+            // us via `driver_trigger`. No need to post this event to `drivers`:
+            // our caller will run it to completion.
+            if (!*coh) {
+                *coh = lcoh;
+                continue;
+            }
+        } else if (std::find(drivers.begin(), drivers.end(), ldrv) == drivers.end()) {
+            drivers.push_back(ldrv);
+        }
+        if (oit != lit) {
+            *oit = *lit;
+        }
+        ++oit;
+    }
+    listeners_.truncate(oit);
+    // Unlock before triggering quorums to avoid deadlock with quorum
+    // trigger_member (which acquires our lock).
+    unlock(f | ef_triggered | (listeners_.empty() ? ef_empty : 0));
+    // Inform quorums.
+    for (auto listener : quorums) {
+        auto qb = listener_quorum(listener);
+        qb->trigger_member(this, drv, coh);
+    }
+    // Store references on the `migrate_` lists of remote drivers so they run
+    // the relevant coroutines.
+    if (!drivers.empty()) {
+        ref(drivers.size());
+        for (auto* d : drivers) {
+            auto df = d->lock();
+            d->migrate_.emplace_back(this);
+            d->unlock(df | driver::df_nonempty);
         }
     }
     if (f & ef_quorum) {
         event_handle{this}; // release temporary reference
     }
     return result;
+}
+
+inline std::coroutine_handle<> event_body::driver_trigger(driver* drv) {
+    std::coroutine_handle<> coh(nullptr);
+    if ((flags_.load(std::memory_order_relaxed) & (ef_empty | ef_triggered)) == (ef_empty | ef_triggered)) {
+        // definitely nothing left to do, don't bother locking
+        return coh;
+    }
+    auto f = lock();
+    if (!(f & ef_triggered)) {
+        trigger_unlock(f, drv, &coh);
+        return coh;
+    }
+    // Already triggered; search for a coroutine on this driver.
+    for (auto& l : listeners_) {
+        if (listener_coroutine(l).promise().home_ == drv) {
+            coh = listener_coroutine(l);
+            l = listeners_.back();
+            listeners_.pop_back();
+            break;
+        }
+    }
+    unlock(f | (listeners_.empty() ? ef_empty : 0));
+    return coh;
 }
 
 
@@ -575,7 +620,7 @@ inline event_handle::event_handle(event_body* eb) noexcept
 inline event_handle::event_handle(const event_handle& x) noexcept
     : eb_(x.eb_) {
     if (eb_) {
-        eb_->refcount_.fetch_add(1, std::memory_order_relaxed);
+        eb_->ref();
     }
 }
 
@@ -676,7 +721,7 @@ struct task_event_awaiter {
         // event-unblocked coroutines to throw an exception; that exception is
         // propagated through their awaiters.
         if (clearing) {
-            throw clearing_error{};
+            throw clearing_exception{};
         }
     }
 };
@@ -931,7 +976,7 @@ inline void driver::step_time() {
 }
 
 inline void driver::asap(event e) {
-    asap_.push_back(std::move(e));
+    asap_.emplace_back(std::move(e).handle());
 }
 
 inline event driver::asap() {

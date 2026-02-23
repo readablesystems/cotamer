@@ -530,26 +530,25 @@ cot::task<> test_stored_event_triggers() {
     std::cerr << "stored_event_triggers: ok\n";
 }
 
-// 32. Timer heap culling — verifies that empty() allows the timer heap to
-//     stay small. Create many any(after(10ms), after(300ms)) events. After
-//     the 10ms timers fire, the any() quorums complete and deregister from the
-//     300ms timers, making those entries cullable. After 100ms the timer heap
-//     should be much smaller than the number of 300ms entries we created.
+// 32. Timer heap autocull — verifies that the timer heap stays small through
+//     the amortized empty() check within timer_heap::emplace
 cot::task<> test_timer_heap_cull() {
     std::vector<cot::event> events;
     for (int i = 0; i < 100; ++i) {
         events.push_back(cot::any(cot::after(10ms), cot::after(300ms)));
     }
-    // 200 timer entries created (100 x 10ms + 100 x 300ms), plus our own
+    // 200 timer entries created (100 x 10ms + 100 x 300ms), plus our own.
+    // After the 10ms timers fire, the any() quorums deregister from the 300ms
+    // timers, making those 100 entries stale (empty).
     co_await cot::after(100ms);
-    // Yield so the event loop runs cull() on the timer heap (cull runs
-    // after processing ready coroutines, before the next time step).
-    co_await cot::asap();
-    // The 10ms timers have fired and been popped. The 300ms timer entries
-    // should have been culled (idle, single reference).
+    // Each after() call does a timer_heap::emplace, which probes a random entry
+    // and culls it if empty (autocull). With ~100 stale entries and no other
+    // entries, the first emplace should cull down to ~32 (the autocull loop
+    // threshold).
+    co_await cot::after(1ms);
     size_t sz = cot::driver::main->timer_size();
     std::cerr << "timer_heap_cull: timer_size=" << sz << "\n";
-    assert(sz < 10 && "timer heap should have culled stale 300ms entries");
+    assert(sz < 40 && "timer heap should have autoculled stale 300ms entries");
 }
 
 // 33. any(event()) should not be immediately triggered.

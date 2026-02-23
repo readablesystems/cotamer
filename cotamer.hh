@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -96,10 +97,6 @@ private:
 struct interest {};
 struct interest_event {};
 
-// Exception thrown during driver::clear() to unwind suspended coroutines.
-struct clearing_error {};
-
-
 // Event combinators.
 // any(e1, e2, ...) — triggers when any one of its arguments triggers.
 // all(e1, e2, ...) — triggers when all of its arguments have triggered.
@@ -175,15 +172,14 @@ private:
     template <typename T> friend struct detail::task_final_awaiter;
 
     bool clearing_ = false;
-    std::deque<std::coroutine_handle<>> ready_;
-    std::deque<event> asap_;
+    std::deque<detail::event_handle> asap_;
     timer_heap<detail::event_handle> timed_;
     clock::time_point now_;
 
     static constexpr uint32_t df_lock = 1;
     static constexpr uint32_t df_nonempty = 2;
     std::atomic<uint32_t> lock_ = 0;
-    std::deque<std::coroutine_handle<>> remote_ready_;
+    std::deque<detail::event_handle> migrate_;
 
     inline uint32_t lock();
     inline void unlock(uint32_t flags);
@@ -337,6 +333,23 @@ public:
 private:
     mutex_type* m_ = nullptr;
     bool owned_ = false;
+};
+
+
+
+// Error codes and exception type.
+
+enum class cotamer_errc {
+    cross_driver_await = 1
+};
+
+struct cotamer_error : std::logic_error {
+    explicit cotamer_error(cotamer_errc ec);
+    inline cotamer_errc code() const noexcept { return errc_; }
+
+private:
+    cotamer_errc errc_;
+    static constexpr const char* message(cotamer_errc ec) noexcept;
 };
 
 }

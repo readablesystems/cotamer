@@ -48,6 +48,19 @@ struct small_vector {
         }
         sz_ = cap_ = 0;
     }
+    iterator erase(const_iterator first, const_iterator last) {
+        if (first != last) {
+            auto eit = end(), delsz = last - first;
+            std::move(const_cast<iterator>(last), eit, const_cast<iterator>(first));
+            sz_ -= delsz;
+            std::destroy(end(), eit);
+        }
+        return const_cast<iterator>(first);
+    }
+    void truncate(const_iterator first) {
+        std::destroy(const_cast<iterator>(first), end());
+        sz_ = first - begin();
+    }
 
     T* begin() {
         return cap_ <= N ? reinterpret_cast<T*>(u_.inbuf) : u_.out;

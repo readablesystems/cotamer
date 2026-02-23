@@ -4,6 +4,8 @@
 
 namespace cotamer {
 
+// driver methods
+
 thread_local std::unique_ptr<driver> driver::main{new driver};
 
 driver::driver()
@@ -12,7 +14,6 @@ driver::driver()
 
 driver::~driver() {
     if (!asap_.empty()
-        || !ready_.empty()
         || !timed_.empty()
         || lock_.load(std::memory_order_relaxed)) {
         // Clear any remaining events and coroutines
@@ -25,26 +26,23 @@ void driver::loop() {
     bool again = true;
     while (again) {
         again = false;
+        std::coroutine_handle<> coh;
+
+        if (lock_.load(std::memory_order_relaxed) != 0) {
+            uint32_t flags = lock();
+            std::deque<detail::event_handle> migrate;
+            migrate_.swap(migrate);
+            unlock(flags & ~df_nonempty);
+            std::move(migrate.begin(), migrate.end(), std::back_inserter(asap_));
+        }
 
         while (!asap_.empty()) {
-            asap_.front().trigger();
+            auto eh = std::move(asap_.front());
             asap_.pop_front();
-            again = true;
-        }
-
-        if (lock_.load(std::memory_order_relaxed)) {
-            uint32_t flags = lock();
-            std::deque<std::coroutine_handle<>> remote_ready;
-            remote_ready_.swap(remote_ready);
-            unlock(flags & ~df_nonempty);
-            ready_.append_range(remote_ready);
-        }
-
-        while (!ready_.empty()) {
-            auto ch = ready_.front();
-            ready_.pop_front();
-            ch();
-            now_ += clock::duration{1};
+            while ((coh = eh->driver_trigger(this))) {
+                coh();
+                now_ += clock::duration{1};
+            }
             again = true;
         }
 
@@ -55,8 +53,12 @@ void driver::loop() {
         }
 
         while (!timed_.empty() && timed_.top_time() <= now_) {
-            timed_.top()->trigger();
+            auto eh = std::move(timed_.top());
             timed_.pop();
+            while ((coh = eh->driver_trigger(this))) {
+                coh();
+                now_ += clock::duration{1};
+            }
             again = true;
         }
 
@@ -82,6 +84,8 @@ std::string event::debug_info() const {
                        triggered() ? " triggered" : "");
 }
 
+
+// mutex functions
 
 inline bool mutex::allow(bool is_shared, latch_type l) const noexcept {
     return is_shared ? !(l & mf_lock_excl) : l < mf_lock_excl;
@@ -128,6 +132,20 @@ void mutex::unlock_impl(bool is_shared) {
     latch_type l = latch();
     l = notify_locked(l - (is_shared ? mf_lock_shared : mf_lock_excl));
     unlatch(l);
+}
+
+
+cotamer_error::cotamer_error(cotamer_errc ec)
+    : std::logic_error(message(ec)), errc_(ec) {
+}
+
+constexpr const char* cotamer_error::message(cotamer_errc ec) noexcept {
+    switch (ec) {
+    case cotamer_errc::cross_driver_await:
+        return "cannot co_await a task created on a different driver";
+    default:
+        return "unknown cotamer error";
+    }
 }
 
 }
