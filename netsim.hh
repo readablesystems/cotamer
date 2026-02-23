@@ -126,6 +126,7 @@ private:
 
     std::deque<std::pair<message_type, id_type>> messageq_;
     cot::event receiver_event_;
+    id_type last_sender_;
 };
 
 
@@ -169,7 +170,7 @@ cot::task<> channel<T>::send_after(cot::clock::duration delay, message_type m) {
 //    Suspend until a message is available, then dequeue and return it.
 
 template <typename T>
-auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
+cot::task<T> port<T>::receive() {
     // sleep until there’s a message
     while (messageq_.empty()) {
         // Register an event that senders will trigger on delivery.
@@ -179,7 +180,7 @@ auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
         // Delay after the message is delivered and before dequeuing it.
         // (We must not delay *after* dequeuing it, because doing so might
         // drop the message!)
-        co_await cot::after(receive_delay_);
+        //co_await cot::after(receive_delay_);
     }
 
     auto m = std::move(messageq_.front());
@@ -190,12 +191,14 @@ auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
                    message_traits_type::print_transform(m.first));
     }
 
-    co_return std::move(m);
+    last_sender_ = m.second;
+    co_return std::move(m.first);
 }
 
 template <typename T>
-cot::task<T> port<T>::receive() {
-    co_return (co_await receive_with_id()).first;
+auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
+    auto m = co_await receive();
+    co_return std::make_pair(m, last_sender_);
 }
 
 
