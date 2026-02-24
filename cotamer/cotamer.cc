@@ -27,8 +27,8 @@ using namespace std::chrono_literals;
 
 namespace cotamer {
 
-struct timespec duration_timespec(clock::duration d) {
-    if (d <= clock::duration::zero()) {
+struct timespec duration_timespec(duration d) {
+    if (d <= duration::zero()) {
         return {0, 0};
     }
     auto sec = std::chrono::duration_cast<std::chrono::seconds>(d);
@@ -36,8 +36,8 @@ struct timespec duration_timespec(clock::duration d) {
     return {sec.count(), nsec.count()};
 }
 
-int duration_milliseconds(clock::duration d) {
-    if (d <= clock::duration::zero()) {
+int duration_milliseconds(duration d) {
+    if (d <= duration::zero()) {
         return 0;
     }
     auto msec = std::chrono::duration_cast<std::chrono::milliseconds>(d);
@@ -281,12 +281,12 @@ void driver::apply_fd_update(detail::fd_batch& batch, const detail::fd_update& f
     }
 }
 
-bool driver::watch_fds(detail::fd_batch& batch, clock::duration timeout) {
+bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     // block in kernel
 #if COTAMER_USE_KQUEUE
     wakefd_.store(pollfd_, std::memory_order_seq_cst);
     if (lock_.load(std::memory_order_seq_cst)) {
-        timeout = clock::duration::zero();
+        timeout = duration::zero();
     }
 
     struct timespec ts = duration_timespec(timeout);
@@ -297,7 +297,7 @@ bool driver::watch_fds(detail::fd_batch& batch, clock::duration timeout) {
 #elif COTAMER_USE_EPOLL
     wakefd_.store(epoll_wakefd_, std::memory_order_seq_cst);
     if (lock_.load(std::memory_order_seq_cst)) {
-        timeout = clock::duration::zero();
+        timeout = duration::zero();
     }
 
     batch.size = epoll_wait(pollfd_, batch.ev, batch.capacity, duration_milliseconds(timeout));
@@ -408,7 +408,7 @@ thread_local std::unique_ptr<driver> driver::main{new driver};
 std::atomic<bool> driver::real_time;
 
 driver::driver()
-    : now_(clock::from_time_t(1634070069)),
+    : virtual_epoch_(std::chrono::system_clock::from_time_t(1634070069)),
       real_time_(real_time.load(std::memory_order_relaxed)) {
 }
 
@@ -467,20 +467,20 @@ void driver::loop() {
         }
 
         // compute timeout
-        clock::duration timeout;
+        duration timeout;
         if (!asap_.empty()
             || !real_time_
             || lock_.load(std::memory_order_relaxed)) {
-            timeout = clock::duration::zero();
+            timeout = duration::zero();
         } else if (!timed_.empty()) {
-            timeout = timed_.top_time() - clock::now();
+            timeout = timed_.top_time() - steady_now();
         } else {
-            timeout = clock::duration(1h);
+            timeout = duration(1h);
         }
 
         // block or poll for file descriptor events
         bool had_fd_event = false;
-        if (nfdctl_ == 0 && timeout <= clock::duration::zero()) {
+        if (nfdctl_ == 0 && timeout <= duration::zero()) {
             fdb.clear(pollfd_);
         } else {
             // call kqueue/epoll/poll, process batch of returned events
@@ -489,16 +489,16 @@ void driver::loop() {
 
         // update time
         if (real_time_) {
-            now_ = now();
+            snow_ = steady_now();
         } else if (!timed_.empty()
                    && asap_.empty()
                    && !had_fd_event) {
-            now_ = timed_.top_time();
+            snow_ = timed_.top_time();
         }
 
         // process timers
         while (!timed_.empty()
-               && timed_.top_time() <= now_) {
+               && timed_.top_time() <= snow_) {
             auto eh = std::move(timed_.top());
             timed_.pop();
             while (auto coh = eh->driver_trigger(this)) {

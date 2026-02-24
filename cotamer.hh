@@ -125,7 +125,9 @@ template <typename... Es>
 //    A single global driver is stored in `driver::main`. The free functions
 //    `now()`, `after()`, `loop()`, etc. delegate to it.
 
-using clock = std::chrono::system_clock;
+using system_time_point = std::chrono::system_clock::time_point;
+using steady_time_point = std::chrono::steady_clock::time_point;
+using duration = std::chrono::steady_clock::duration;
 
 enum class fdi { read = 0, write = 1, close = 2 };
 
@@ -140,15 +142,22 @@ public:
 
     inline void set_real_time(bool real_time);
 
-    inline clock::time_point now();
-    inline void step_time();
+    inline system_time_point now() noexcept;        // current system time (might go backwards)
+    inline steady_time_point steady_now() noexcept; // time since boot (monotonic)
+    inline void step_time() noexcept;
 
     inline void asap(event);
     inline event asap();
-    inline void at(clock::time_point t, event);
-    inline event at(clock::time_point t);
-    inline void after(clock::duration d, event);
-    inline event after(clock::duration d);
+    inline void at(steady_time_point t, event);
+    inline event at(steady_time_point t);
+    inline void at(system_time_point t, event);
+    inline event at(system_time_point t);
+    inline void after(duration d, event);
+    inline event after(duration d);
+    template <typename Rep, typename Period>
+    inline void after(const std::chrono::duration<Rep, Period>&, event);
+    template <typename Rep, typename Period>
+    inline event after(const std::chrono::duration<Rep, Period>&);
     inline event fd(int fd, fdi type);
 
     int close_fd(int fd);
@@ -168,7 +177,8 @@ private:
     template <typename T> friend struct detail::task_final_awaiter;
     friend void set_real_time(bool);
 
-    clock::time_point now_;
+    system_time_point virtual_epoch_;
+    steady_time_point snow_;
     bool clearing_ = false;
     bool real_time_ = false;
     std::deque<detail::event_handle> asap_;
@@ -194,7 +204,7 @@ private:
 
     inline int pollfd();
     void apply_fd_update(detail::fd_batch&, const detail::fd_update&);
-    bool watch_fds(detail::fd_batch&, clock::duration timeout);
+    bool watch_fds(detail::fd_batch&, duration timeout);
 };
 
 
@@ -202,12 +212,16 @@ private:
 
 inline void set_real_time(bool real_time);
 
-inline clock::time_point now();
-inline void step_time();
+inline system_time_point now() noexcept;
+inline steady_time_point steady_now() noexcept;
+inline void step_time() noexcept;
 
 inline event asap();                   // triggers before next time step
-inline event after(clock::duration);   // triggers after a delay
-inline event at(clock::time_point);    // triggers at an absolute time
+inline event after(duration);          // triggers after a delay
+template <typename Rep, typename Period>
+inline event after(const std::chrono::duration<Rep, Period>&);
+inline event at(steady_time_point);    // triggers at an absolute time
+inline event at(system_time_point);    // triggers at an absolute system time
 
 inline event readable(int fd);         // triggers when `read(fd)` won't block
 inline event writable(int fd);         // triggers when `write(fd)` won't block

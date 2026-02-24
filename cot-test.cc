@@ -309,17 +309,17 @@ cot::task<> test_lazy_attempt() {
 
 // 22. Lazy task with internal timeout — any(interest, after(...)) auto-starts
 bool lazy_timeout_ran = false;
-cot::clock::time_point lazy_timeout_time;
+cot::steady_time_point lazy_timeout_time;
 cot::task<int> lazy_timeout_task() {
     co_await cot::any(cot::interest{}, cot::after(5h));
     lazy_timeout_ran = true;
-    lazy_timeout_time = cot::now();
+    lazy_timeout_time = cot::steady_now();
     co_await cot::after(1h);
     co_return 33;
 }
 cot::task<> test_lazy_internal_timeout() {
     lazy_timeout_ran = false;
-    auto start = cot::now();
+    auto start = cot::steady_now();
     auto t = lazy_timeout_task();
     // Don't co_await t — let the internal timeout fire
     co_await cot::after(10h);

@@ -9,7 +9,7 @@ struct timer_heap_traits {
             return x.empty();
         }
     };
-    using time_point_type = std::chrono::system_clock::time_point;
+    using time_point_type = std::chrono::steady_clock::time_point;
     static constexpr int arity = 4;
 };
 

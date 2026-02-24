@@ -969,16 +969,23 @@ inline void driver::set_real_time(bool real_time) {
     real_time_ = real_time;
 }
 
-inline clock::time_point driver::now() {
+inline system_time_point driver::now() noexcept {
     if (real_time_) {
-        return clock::now();
+        return std::chrono::system_clock::now();
     }
-    return now_;
+    return virtual_epoch_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(snow_.time_since_epoch());
 }
 
-inline void driver::step_time() {
+inline steady_time_point driver::steady_now() noexcept {
+    if (real_time_) {
+        return std::chrono::steady_clock::now();
+    }
+    return snow_;
+}
+
+inline void driver::step_time() noexcept {
     if (!real_time_) {
-        now_ += clock::duration{1};
+        snow_ += duration{1};
     }
 }
 
@@ -992,12 +999,12 @@ inline event driver::asap() {
     return e;
 }
 
-inline void driver::at(clock::time_point t, event e) {
+inline void driver::at(steady_time_point t, event e) {
     timed_.emplace(t, std::move(e).handle());
 }
 
-inline event driver::at(clock::time_point t) {
-    if (t <= now_) {
+inline event driver::at(steady_time_point t) {
+    if (!real_time_ && t <= snow_) {
         return event(nullptr);
     }
     event e;
@@ -1005,12 +1012,30 @@ inline event driver::at(clock::time_point t) {
     return e;
 }
 
-inline void driver::after(clock::duration d, event e) {
-    at(now() + d, std::move(e));
+inline void driver::at(system_time_point t, event e) {
+    after(t - now(), std::move(e));
 }
 
-inline event driver::after(clock::duration d) {
-    return at(now() + d);
+inline event driver::at(system_time_point t) {
+    return after(t - now());
+}
+
+inline void driver::after(duration d, event e) {
+    at(steady_now() + d, std::move(e));
+}
+
+inline event driver::after(duration d) {
+    return at(steady_now() + d);
+}
+
+template <typename Rep, typename Period>
+inline event driver::after(const std::chrono::duration<Rep, Period>& d) {
+    return at(steady_now() + std::chrono::duration_cast<duration>(d));
+}
+
+template <typename Rep, typename Period>
+inline void driver::after(const std::chrono::duration<Rep, Period>& d, event e) {
+    at(steady_now() + std::chrono::duration_cast<duration>(d), std::move(e));
 }
 
 inline event driver::fd(int fd, fdi type) {
@@ -1025,11 +1050,15 @@ inline void set_real_time(bool real_time) {
     driver::main->set_real_time(real_time);
 }
 
-inline clock::time_point now() {
+inline system_time_point now() noexcept {
     return driver::main->now();
 }
 
-inline void step_time() {
+inline steady_time_point steady_now() noexcept {
+    return driver::main->steady_now();
+}
+
+inline void step_time() noexcept {
     driver::main->step_time();
 }
 
@@ -1037,11 +1066,20 @@ inline event asap() {
     return driver::main->asap();
 }
 
-inline event at(clock::time_point t) {
+inline event at(steady_time_point t) {
     return driver::main->at(t);
 }
 
-inline event after(clock::duration d) {
+inline event at(system_time_point t) {
+    return driver::main->at(t);
+}
+
+inline event after(duration d) {
+    return driver::main->after(d);
+}
+
+template <typename Rep, typename Period>
+inline event after(const std::chrono::duration<Rep, Period>& d) {
     return driver::main->after(d);
 }
 
