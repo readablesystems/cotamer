@@ -1,6 +1,7 @@
 #include "cotamer.hh"
 #include <atomic>
 #include <cassert>
+#include <cstring>
 #include <iostream>
 #include <optional>
 #include <thread>

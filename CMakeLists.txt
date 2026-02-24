@@ -41,6 +41,11 @@ add_executable(cot-test-threads
     $<TARGET_OBJECTS:Cotamer>
 )
 
+add_executable(cot-test-io
+    cot-test-io.cc
+    $<TARGET_OBJECTS:Cotamer>
+)
+
 add_executable(ctconsensus
     ctconsensus.cc
     $<TARGET_OBJECTS:Cotamer>

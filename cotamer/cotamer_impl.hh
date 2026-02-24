@@ -574,9 +574,7 @@ inline bool event_body::trigger_unlock(uint32_t f, driver* drv,
     if (!drivers.empty()) {
         ref(drivers.size());
         for (auto* d : drivers) {
-            auto df = d->lock();
-            d->migrate_.emplace_back(this);
-            d->unlock(df | driver::df_nonempty);
+            d->migrate_asap(event_handle{this});
         }
     }
     if (f & ef_quorum) {
@@ -967,12 +965,21 @@ inline detail::task_awaiter<T> task<T>::operator co_await() const noexcept {
 
 // driver methods
 
+inline void driver::set_real_time(bool real_time) {
+    real_time_ = real_time;
+}
+
 inline clock::time_point driver::now() {
+    if (real_time_) {
+        return clock::now();
+    }
     return now_;
 }
 
 inline void driver::step_time() {
-    now_ += clock::duration{1};
+    if (!real_time_) {
+        now_ += clock::duration{1};
+    }
 }
 
 inline void driver::asap(event e) {
@@ -1006,8 +1013,17 @@ inline event driver::after(clock::duration d) {
     return at(now() + d);
 }
 
+inline event driver::fd(int fd, fdi type) {
+    return fds_.watch(fd, int(type));
+}
 
-// time functions
+
+// free functions
+
+inline void set_real_time(bool real_time) {
+    driver::real_time = real_time;
+    driver::main->set_real_time(real_time);
+}
 
 inline clock::time_point now() {
     return driver::main->now();
@@ -1027,6 +1043,18 @@ inline event at(clock::time_point t) {
 
 inline event after(clock::duration d) {
     return driver::main->after(d);
+}
+
+inline event readable(int fd) {
+    return driver::main->fd(fd, fdi::read);
+}
+
+inline event writable(int fd) {
+    return driver::main->fd(fd, fdi::write);
+}
+
+inline event closed(int fd) {
+    return driver::main->fd(fd, fdi::close);
 }
 
 
@@ -1136,6 +1164,14 @@ inline void clear() {
     driver::main->clear();
 }
 
+inline void forget_fd(int fd) {
+    driver::main->forget_fd(fd);
+}
+
+inline int close_fd(int fd) {
+    return driver::main->close_fd(fd);
+}
+
 inline uint32_t driver::lock() {
     while (true) {
         uint32_t flags = lock_.load(std::memory_order_relaxed);
@@ -1153,6 +1189,109 @@ inline void driver::unlock(uint32_t flags) {
 
 inline size_t driver::timer_size() const {
     return timed_.size();
+}
+
+
+// file descriptor functions
+
+namespace detail {
+
+inline fd_event_set::~fd_event_set() {
+    clear();
+}
+
+inline event_handle fd_event_set::watch(int fd, int interest) {
+    if (fd < 0) {
+        return event_handle();
+    }
+    unsigned ufd = fd;
+    if (ufd >= capacity_) {
+        hard_ensure(ufd);
+    }
+    fdrec& fdi = fdrs_[ufd];
+    if (!fdi.ev[interest]) {
+        if (fdi.update_link == 0) {
+            fdi.update_link = update_link_;
+            update_link_ = ufd + 1;
+        }
+        fdi.ev[interest] = event_handle{new event_body};
+    }
+    return fdi.ev[interest];
+}
+
+inline event_handle fd_event_set::take(int fd, int interest, unsigned epoch) {
+    unsigned ufd = fd;
+    if (ufd >= capacity_) {
+        return event_handle();
+    }
+    fdrec& fdi = fdrs_[ufd];
+    if (!fdi.ev[interest]
+        || fdi.ev[interest]->empty()
+        || (epoch && epoch != fdi.epoch)) {
+        return event_handle();
+    }
+    if (fdi.update_link == 0) {
+        fdi.update_link = update_link_;
+        update_link_ = ufd + 1;
+    }
+    return std::exchange(fdi.ev[interest], nullptr);
+}
+
+inline std::optional<fd_update> fd_event_set::forget(int fd) noexcept {
+    unsigned ufd = fd;
+    if (ufd >= capacity_) {
+        return std::nullopt;
+    }
+    fdrec& fdi = fdrs_[ufd];
+    int mask = fdi.mask();
+    if (mask == 0) {
+        return std::nullopt;
+    }
+    unsigned epoch = fdi.epoch;
+    fdi.ev[0] = fdi.ev[1] = fdi.ev[2] = nullptr;
+    ++fdi.epoch;
+    return {{fd, 0, epoch}};
+}
+
+inline bool fd_event_set::has_update() const noexcept {
+    return update_link_ != unsigned(-1);
+}
+
+inline std::optional<fd_update> fd_event_set::pop_update() noexcept {
+    if (update_link_ == unsigned(-1)) {
+        return std::nullopt;
+    }
+    unsigned ufd = update_link_ - 1;
+    fdrec& fdi = fdrs_[ufd];
+    update_link_ = fdi.update_link;
+    fdi.update_link = 0;
+    auto mask = fdi.mask();
+    unsigned epoch = fdi.epoch;
+    if (!mask) {
+        ++fdi.epoch;
+    } else if (epoch < user_epoch) { // epoch 1 is reserved for internal FDs
+        fdi.epoch = epoch = user_epoch;
+    }
+    return {{int(ufd), mask, epoch}};
+}
+
+inline std::optional<fd_update> fd_event_set::next_nonempty(int fd) const noexcept {
+    unsigned ufd = fd + 1;
+    if (ufd >= capacity_) {
+        return std::nullopt;
+    }
+    const fdrec* fdrp = fdrs_ + ufd;
+    while (true) {
+        if (int mask = fdrp->mask()) {
+            return {{int(ufd), mask, fdrp->epoch}};
+        }
+        if (++ufd == capacity_) {
+            return std::nullopt;
+        }
+        ++fdrp;
+    }
+}
+
 }
 
 
@@ -1255,7 +1394,7 @@ inline void mutex::unlatch(latch_type l) {
 
 
 inline unique_lock::unique_lock(locked_mutex_t<false> t) noexcept
-    : m_(t.mutex), owned_(true) {
+    : m_(t.m), owned_(true) {
 }
 
 inline unique_lock::~unique_lock() {
@@ -1331,7 +1470,7 @@ inline auto unique_lock::release() noexcept -> mutex_type* {
 
 
 inline shared_lock::shared_lock(locked_mutex_t<true> t) noexcept
-    : m_(t.mutex), owned_(true) {
+    : m_(t.m), owned_(true) {
 }
 
 inline shared_lock::~shared_lock() {

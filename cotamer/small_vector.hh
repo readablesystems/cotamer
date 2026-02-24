@@ -106,6 +106,12 @@ struct small_vector {
     const T& back() const {
         return *(end() - 1);
     }
+    T& operator[](size_type i) {
+        return begin()[i];
+    }
+    const T& operator[](size_type i) const {
+        return begin()[i];
+    }
 
     void push_back(const T& v) {
         std::construct_at(push_space(), v);
@@ -115,30 +121,16 @@ struct small_vector {
         std::construct_at(push_space(), std::move(v));
         ++sz_;
     }
+    template <typename... Args>
+    T& emplace_back(Args&&... args) {
+        auto sp = push_space();
+        std::construct_at(sp, std::forward<Args>(args)...);
+        ++sz_;
+        return *sp;
+    }
     void pop_back() {
         std::destroy_at(end() - 1);
         --sz_;
-    }
-
-    void take(small_vector<T, N>&& x) {
-        if (this == &x) {
-            return;
-        }
-        std::destroy_n(begin(), sz_);
-        if (cap_ > N) {
-            std::allocator<T> alloc;
-            alloc.deallocate(u_.out, cap_);
-        }
-        sz_ = x.sz_;
-        cap_ = x.cap_;
-        if (x.cap_ > N) {
-            u_.out = x.u_.out;
-        } else {
-            std::uninitialized_move_n(x.begin(), x.sz_, begin());
-            std::destroy_n(x.begin(), x.sz_);
-        }
-        x.sz_ = 0;
-        x.cap_ = N;
     }
 
 private:

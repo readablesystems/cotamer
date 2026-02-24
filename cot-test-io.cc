@@ -1,0 +1,823 @@
+#include "cotamer.hh"
+#include "cotamer_io.hh"
+#include "cotamer_tcp.hh"
+#include "cotamer_serial.hh"
+#include <atomic>
+#include <cassert>
+#include <cstring>
+#include <iostream>
+#include <optional>
+#include <print>
+#include <thread>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <vector>
+
+namespace cot = cotamer;
+using namespace std::chrono_literals;
+
+
+// TEST: Pipe read/write: basic test of readable() and async I/O
+cot::task<> test_pipe_readwrite() {
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+    cot::set_nonblocking(pipefd[0]);
+    cot::set_nonblocking(pipefd[1]);
+
+    // Writer: write to the pipe
+    auto writer = [&]() -> cot::task<> {
+        const char* msg = "hello from pipe";
+        auto r = co_await cot::async_write(pipefd[1], msg, strlen(msg));
+        assert(r == static_cast<ssize_t>(strlen(msg)));
+    };
+
+    // Reader: read from the pipe
+    auto reader = [&]() -> cot::task<> {
+        char buf[64] = {};
+        auto r = co_await cot::async_read(pipefd[0], buf, sizeof(buf));
+        assert(r > 0);
+        assert(std::string(buf, r) == "hello from pipe");
+        std::cerr << "pipe_readwrite: read \"" << std::string(buf, r) << "\"\n";
+    };
+
+    writer().detach();
+    co_await reader();
+
+    close(pipefd[0]);
+    close(pipefd[1]);
+}
+
+
+// TEST: Readable event triggers correctly
+cot::task<> test_readable_event() {
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+    cot::set_nonblocking(pipefd[0]);
+    cot::set_nonblocking(pipefd[1]);
+
+    // Write something to make the read end readable
+    auto writer = [&]() -> cot::task<> {
+        co_await cot::asap(); // let the reader set up first
+        const char data[] = "test";
+        ssize_t nw = ::write(pipefd[1], data, 4);
+        assert(nw == 4);
+    };
+    writer().detach();
+
+    // Wait for readable
+    co_await cot::readable(pipefd[0]);
+    char buf[16] = {};
+    ssize_t r = ::read(pipefd[0], buf, sizeof(buf));
+    assert(r == 4);
+    assert(std::string(buf, 4) == "test");
+    std::cerr << "readable_event: ok\n";
+
+    close(pipefd[0]);
+    close(pipefd[1]);
+}
+
+
+// TEST: Timer still works in real-time mode
+cot::task<> test_realtime_timer() {
+    auto start = std::chrono::system_clock::now();
+    co_await cot::after(50ms);
+    auto elapsed = std::chrono::system_clock::now() - start;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    std::cerr << "realtime_timer: elapsed " << ms << "ms\n";
+    // In realtime mode, 50ms should actually take roughly 50ms wall clock
+    assert(ms >= 30 && ms < 500);
+}
+
+
+// TEST: TCP echo server
+cot::task<> test_tcp_echo() {
+    uint16_t port = 19876;
+
+    // Echo server: accept one connection, echo back one frame, then close
+    auto server = [&]() -> cot::task<> {
+        int lfd = cot::tcp_listen("127.0.0.1", port);
+        auto stream = co_await cot::tcp_accept(lfd);
+        auto frame = co_await stream.recv_frame();
+        co_await stream.send_frame(frame.data(), frame.size());
+        close(lfd);
+    };
+    server().detach();
+
+    // Give the server a moment to start listening
+    co_await cot::asap();
+
+    // Client: connect, send a frame, receive the echo
+    auto client = [&]() -> cot::task<> {
+        auto stream = co_await cot::tcp_connect("127.0.0.1", port);
+        const char msg[] = "echo test message";
+        co_await stream.send_frame(msg, sizeof(msg));
+        auto reply = co_await stream.recv_frame();
+        assert(reply.size() == sizeof(msg));
+        assert(std::memcmp(reply.data(), msg, sizeof(msg)) == 0);
+        std::cerr << "tcp_echo: ok\n";
+    };
+    co_await client();
+}
+
+
+// TEST: Serialization round-trip
+cot::task<> test_serialization() {
+    // Integer types
+    {
+        auto buf = cot::serialize<int32_t>(-42);
+        auto val = cot::deserialize<int32_t>(buf);
+        assert(val == -42);
+    }
+    {
+        auto buf = cot::serialize<uint64_t>(0xDEADBEEFCAFEBABEULL);
+        auto val = cot::deserialize<uint64_t>(buf);
+        assert(val == 0xDEADBEEFCAFEBABEULL);
+    }
+    // String
+    {
+        std::string orig = "hello world!";
+        auto buf = cot::serialize<std::string>(orig);
+        auto val = cot::deserialize<std::string>(buf);
+        assert(val == orig);
+    }
+    // Empty string
+    {
+        std::string orig;
+        auto buf = cot::serialize<std::string>(orig);
+        auto val = cot::deserialize<std::string>(buf);
+        assert(val.empty());
+    }
+    // Float and double
+    {
+        auto buf = cot::serialize<float>(3.14f);
+        auto val = cot::deserialize<float>(buf);
+        assert(val == 3.14f);
+    }
+    {
+        auto buf = cot::serialize<double>(2.718281828);
+        auto val = cot::deserialize<double>(buf);
+        assert(val == 2.718281828);
+    }
+    // Bool
+    {
+        auto buf = cot::serialize<bool>(true);
+        assert(cot::deserialize<bool>(buf) == true);
+        buf = cot::serialize<bool>(false);
+        assert(cot::deserialize<bool>(buf) == false);
+    }
+    // Composite: manual writer/reader
+    {
+        cot::serial_writer w;
+        w.write_i32(100);
+        w.write_string("test");
+        w.write_u8(7);
+        cot::serial_reader r(w.data(), w.size());
+        assert(r.read_i32() == 100);
+        assert(r.read_string() == "test");
+        assert(r.read_u8() == 7);
+        assert(!r.error());
+        assert(r.remaining() == 0);
+    }
+
+    std::cerr << "serialization: ok\n";
+    co_return;
+}
+
+
+// TEST: TCP framed message exchange, multiple frames
+cot::task<> test_tcp_multi_frame() {
+    uint16_t port = 19877;
+
+    auto server = [&]() -> cot::task<> {
+        int lfd = cot::tcp_listen("127.0.0.1", port);
+        auto stream = co_await cot::tcp_accept(lfd);
+        // Receive 3 frames and send them back reversed
+        std::vector<std::vector<char>> frames;
+        for (int i = 0; i < 3; ++i) {
+            frames.push_back(co_await stream.recv_frame());
+        }
+        for (int i = 2; i >= 0; --i) {
+            co_await stream.send_frame(frames[i].data(), frames[i].size());
+        }
+        close(lfd);
+    };
+    server().detach();
+
+    co_await cot::asap();
+
+    auto client = [&]() -> cot::task<> {
+        auto stream = co_await cot::tcp_connect("127.0.0.1", port);
+        const char* msgs[] = {"first", "second", "third"};
+        for (int i = 0; i < 3; ++i) {
+            co_await stream.send_frame(msgs[i], strlen(msgs[i]));
+        }
+        // Should receive in reverse order
+        for (int i = 2; i >= 0; --i) {
+            auto frame = co_await stream.recv_frame();
+            assert(std::string(frame.data(), frame.size()) == msgs[i]);
+        }
+        std::cerr << "tcp_multi_frame: ok\n";
+    };
+    co_await client();
+}
+
+
+// TEST: Dup-then-close: demonstrates the file descriptor vs. file description
+// issue. kqueue tracks file descriptors, so closing pipefd[0] fires events
+// even though dupfd still references the same file description. epoll tracks
+// file descriptions, so closing pipefd[0] does nothing — the file description
+// is still alive via dupfd and the events never fire.
+cot::task<> test_dup_close_fd() {
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+    cot::set_nonblocking(pipefd[0]);
+    cot::set_nonblocking(pipefd[1]);
+
+    // Register readable and closed events on the read end
+    cot::event readable_ev = cot::readable(pipefd[0]);
+    cot::event closed_ev = cot::closed(pipefd[0]);
+
+    // Let the loop register the fd with the poller
+    co_await cot::after(10ms);
+
+    assert(!readable_ev.triggered() && !closed_ev.triggered());
+    ssize_t nw = ::write(pipefd[1], "!", 1);
+    assert(nw == 1);
+
+    // This should not block
+    auto time = cot::now();
+    co_await cot::any(readable_ev, cot::after(1s));
+    assert(cot::now() - time < 10ms);
+    assert(readable_ev.triggered());
+    assert(!closed_ev.triggered());
+    char buf[100];
+    nw = ::read(pipefd[0], buf, sizeof(buf));
+    assert(nw == 1);
+
+    // Re-register interest in readable_ev
+    readable_ev = cot::readable(pipefd[0]);
+
+    // Dup the read end, then close the original descriptor
+    int dupfd = dup(pipefd[0]);
+    assert(dupfd >= 0);
+    close(pipefd[0]);
+    nw = ::write(pipefd[1], "!", 1);
+    assert(nw == 1);
+
+    // Wait to see if the close fires the events.
+    co_await cot::any(readable_ev, closed_ev, cot::after(100ms));
+
+    bool triggered = readable_ev.triggered() || closed_ev.triggered();
+    std::cerr << "dup_close_fd: triggered=" << triggered << "\n";
+
+    // Clean up stale poller state so loop() can exit.
+    // On epoll, the file description is still alive via dupfd and
+    // nfdctl_ > 0; forget_fd drops the event handles and decrements
+    // nfdctl_ even though the epoll_ctl DEL will fail (fd is closed).
+    cot::forget_fd(pipefd[0]);
+
+    close(dupfd);
+    close(pipefd[1]);
+}
+
+
+// TEST: forget_fd cleanup: verify that a coroutine suspended on a forgotten fd
+// is properly cleaned up when its owning task is destroyed.
+//
+// Reference count trace for `co_await readable(fd)`:
+//   - fdi.ev[0] in fd_event_set: 1 ref
+//   - task_event_awaiter::eh_ in the suspended coroutine frame: 1 ref
+//   Total: 2
+//
+// After forget_fd clears fdi.ev[0], refcount drops to 1. The event_body
+// survives (the awaiter holds it), but it has no poller registration and
+// will never trigger. The coroutine is stranded.
+//
+// When the owning task<> goes out of scope, ~task destroys the coroutine
+// frame. The awaiter destructor removes the coroutine from the event's
+// listener list and drops the last event_handle reference. Everything is
+// cleaned up — no leaked event_body, no leaked coroutine frame.
+cot::task<> test_forget_fd_cleanup() {
+    int pipefd[2];
+    assert(pipe(pipefd) == 0);
+    cot::set_nonblocking(pipefd[0]);
+    cot::set_nonblocking(pipefd[1]);
+
+    // Lifecycle tracker: 0=init, 1=suspended, 2=resumed, 3=frame destroyed
+    int state = 0;
+
+    auto waiter = [&]() -> cot::task<> {
+        struct guard {
+            int& s;
+            ~guard() { s = 3; }
+        };
+        guard g{state};
+        state = 1;
+        co_await cot::readable(pipefd[0]);
+        state = 2;
+    };
+
+    // The inner coroutine is NOT resumed by forget_fd ...
+    {
+        auto t = waiter();
+        assert(state == 1);              // suspended at co_await readable
+
+        co_await cot::asap();            // let loop register the fd
+        cot::forget_fd(pipefd[0]);
+        co_await cot::asap();            // give loop a chance
+
+        assert(state == 1 && "coroutine should still be suspended after forget_fd");
+        assert(!t.done());
+    }
+    // ... but IS cleaned up when the owning task is destroyed
+    assert(state == 3 && "coroutine frame should be destroyed by ~task");
+
+    std::cerr << "forget_fd_cleanup: ok\n";
+    close(pipefd[0]);
+    close(pipefd[1]);
+}
+
+
+// TEST: Peer close wakes a blocked reader.
+// Thread A awaits async_read on one end of a socketpair. Thread B closes the
+// other end. The kernel reports EOF (kqueue EV_EOF / epoll EPOLLHUP), which
+// fires the readable event, resumes the coroutine (read returns 0), and lets
+// loop() exit cleanly — no forget_fd or close_fd needed, because the event
+// was consumed normally via take().
+void test_close_wakes_reader() {
+    constexpr int ROUNDS = 100;
+
+    for (int round = 0; round < ROUNDS; ++round) {
+        std::atomic<int> phase{0};
+
+        int sockfd[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockfd) == 0);
+        cot::set_nonblocking(sockfd[0]);
+
+        std::thread reader([&] {
+            cot::set_real_time(true);
+
+            ssize_t result = -99;
+            auto fn = [&]() -> cot::task<> {
+                char buf[64];
+                result = co_await cot::async_read(sockfd[0], buf, sizeof(buf));
+            };
+            auto t = fn();
+
+            phase.store(1, std::memory_order_release);
+
+            auto start = std::chrono::steady_clock::now();
+            cot::loop();
+            auto elapsed = std::chrono::steady_clock::now() - start;
+
+            assert(t.done());
+            assert(result == 0 && "expected EOF from peer close");
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            assert(ms < 2000 && "peer close wake too slow");
+        });
+
+        std::thread closer([&] {
+            while (phase.load(std::memory_order_acquire) < 1) {
+                std::this_thread::yield();
+            }
+            // Give the reader time to enter watch_fds
+            std::this_thread::sleep_for(5ms);
+            ::close(sockfd[1]);
+        });
+
+        reader.join();
+        closer.join();
+        close(sockfd[0]);
+    }
+    std::cerr << "close_wakes_reader: ok\n";
+}
+
+
+// TEST: Cross-thread shutdown wakes a blocked reader.
+// Thread A awaits async_read on sockfd[0]. Thread B calls
+// shutdown(sockfd[0], SHUT_RDWR) from another thread. Unlike ::close(),
+// shutdown() does not remove the fd from kqueue/epoll — it signals EOF/error
+// on the socket, which the kernel reports as a readable event. The reader
+// wakes up, read() returns 0 (EOF), and loop() exits cleanly.
+// This is the correct cross-thread teardown mechanism for sockets.
+void test_shutdown_wakes_reader() {
+    constexpr int ROUNDS = 100;
+
+    for (int round = 0; round < ROUNDS; ++round) {
+        std::atomic<int> phase{0};
+
+        int sockfd[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockfd) == 0);
+        cot::set_nonblocking(sockfd[0]);
+
+        std::thread reader([&] {
+            cot::set_real_time(true);
+
+            ssize_t result = -99;
+            auto fn = [&]() -> cot::task<> {
+                char buf[64];
+                result = co_await cot::async_read(sockfd[0], buf, sizeof(buf));
+            };
+            auto t = fn();
+
+            phase.store(1, std::memory_order_release);
+
+            auto start = std::chrono::steady_clock::now();
+            cot::loop();
+            auto elapsed = std::chrono::steady_clock::now() - start;
+
+            assert(t.done());
+            assert(result == 0 && "expected EOF from shutdown");
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            assert(ms < 2000 && "shutdown wake too slow");
+        });
+
+        std::thread closer([&] {
+            while (phase.load(std::memory_order_acquire) < 1) {
+                std::this_thread::yield();
+            }
+            // Give the reader time to enter watch_fds
+            std::this_thread::sleep_for(5ms);
+            // shutdown() signals EOF without closing the fd — the poller
+            // still has the fd registered, so it reports the state change.
+            ::shutdown(sockfd[0], SHUT_RDWR);
+        });
+
+        reader.join();
+        closer.join();
+        close(sockfd[0]);
+        close(sockfd[1]);
+    }
+    std::cerr << "shutdown_wakes_reader: ok\n";
+}
+
+
+// --- Cross-thread wake torture tests ---
+//
+// These tests exercise the wakefd_ mechanism: when thread B triggers an event
+// whose listener coroutine lives on thread A's driver, and thread A is blocked
+// in watch_fds() (kevent/epoll_wait), thread B must interrupt the blocking
+// call via EVFILT_USER (kqueue) or eventfd (Linux). Without the wake, thread A
+// would sleep for the 1-hour fallback timeout.
+//
+// Each test registers a pipe fd on thread A's driver to force it through the
+// watch_fds() path (rather than the nfdctl_==0 sleep_for path). A "keeper"
+// coroutine watches the pipe's read end; the last event coroutine writes a
+// byte to the pipe to let the keeper fire, nfdctl_ drop to 0, and loop() exit.
+
+
+// TEST: Cross-thread wake: exercises the wakefd_ path.
+// Thread A blocks in watch_fds(); thread B triggers after a delay that is
+// long enough for thread A to always be blocked when the trigger arrives.
+void test_cross_thread_wake() {
+    constexpr int ROUNDS = 200;
+
+    for (int round = 0; round < ROUNDS; ++round) {
+        std::atomic<int> phase{0};
+        cot::event* ev_ptr = nullptr;
+
+        int pipefd[2];
+        assert(pipe(pipefd) == 0);
+        cot::set_nonblocking(pipefd[0]);
+        cot::set_nonblocking(pipefd[1]);
+
+        std::thread thread_a([&] {
+            cot::set_real_time(true);
+
+            cot::event ev;
+            ev_ptr = &ev;
+
+            auto fn = [&]() -> cot::task<> {
+                // Register the pipe read end so the driver enters watch_fds()
+                auto readable_ev = cot::readable(pipefd[0]);
+                // Block until thread B triggers ev
+                co_await ev;
+                // Consume the fd registration so loop() can exit cleanly
+                ssize_t nw = ::write(pipefd[1], "x", 1);
+                assert(nw == 1);
+                co_await readable_ev;
+            };
+            auto t = fn();
+
+            phase.store(1, std::memory_order_release);
+
+            auto start = std::chrono::steady_clock::now();
+            cot::loop();
+            auto elapsed = std::chrono::steady_clock::now() - start;
+
+            assert(t.done());
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            assert(ms < 2000 && "cross-thread wake too slow");
+        });
+
+        std::thread thread_b([&] {
+            while (phase.load(std::memory_order_acquire) < 1) {
+                std::this_thread::yield();
+            }
+            // Give thread A time to enter watch_fds() and block
+            std::this_thread::sleep_for(5ms);
+            ev_ptr->trigger();
+        });
+
+        thread_a.join();
+        thread_b.join();
+        close(pipefd[0]);
+        close(pipefd[1]);
+    }
+    std::cerr << "cross_thread_wake: ok\n";
+}
+
+
+// TEST: Cross-thread wake hammer.
+// 4 trigger threads fire 40 events at a single fd-blocked driver with
+// staggered delays, so triggers arrive both while the driver is blocked
+// and while it is processing previous wakes.
+void test_cross_thread_wake_hammer() {
+    constexpr int NTHREADS = 4;
+    constexpr int EVENTS = 40;
+    constexpr int ROUNDS = 50;
+
+    for (int round = 0; round < ROUNDS; ++round) {
+        std::atomic<bool> go{false};
+        cot::event* ev_ptrs[EVENTS];
+
+        int pipefd[2];
+        assert(pipe(pipefd) == 0);
+        cot::set_nonblocking(pipefd[0]);
+        cot::set_nonblocking(pipefd[1]);
+
+        std::thread thread_a([&] {
+            cot::set_real_time(true);
+            int resume_count = 0;
+
+            cot::event events[EVENTS];
+            std::optional<cot::task<>> tasks[EVENTS];
+
+            auto fn = [&](int i) -> cot::task<> {
+                co_await events[i];
+                ++resume_count;
+                if (resume_count == EVENTS) {
+                    // All events processed — let the keeper coroutine fire
+                    ssize_t nw = ::write(pipefd[1], "x", 1);
+                    assert(nw == 1);
+                }
+            };
+
+            for (int i = 0; i < EVENTS; ++i) {
+                ev_ptrs[i] = &events[i];
+                tasks[i] = fn(i);
+            }
+
+            // Keeper: holds the fd registration alive until all events fire
+            auto keeper = [&]() -> cot::task<> {
+                co_await cot::readable(pipefd[0]);
+            };
+            auto kt = keeper();
+
+            go.store(true, std::memory_order_release);
+
+            auto start = std::chrono::steady_clock::now();
+            cot::loop();
+            auto elapsed = std::chrono::steady_clock::now() - start;
+
+            assert(kt.done());
+            for (int i = 0; i < EVENTS; ++i) {
+                assert(tasks[i]->done());
+            }
+            assert(resume_count == EVENTS);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            assert(ms < 5000 && "cross-thread wake hammer too slow");
+        });
+
+        std::vector<std::thread> triggers;
+        for (int t = 0; t < NTHREADS; ++t) {
+            triggers.emplace_back([&, t] {
+                while (!go.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                for (int i = t; i < EVENTS; i += NTHREADS) {
+                    // Stagger: some triggers arrive while thread A is blocked,
+                    // others while it processes the previous batch
+                    if (i % 5 == 0) {
+                        std::this_thread::sleep_for(1ms);
+                    }
+                    ev_ptrs[i]->trigger();
+                }
+            });
+        }
+
+        thread_a.join();
+        for (auto& t : triggers) {
+            t.join();
+        }
+        close(pipefd[0]);
+        close(pipefd[1]);
+    }
+    std::cerr << "cross_thread_wake_hammer: ok\n";
+}
+
+
+// TEST: Cross-thread wake, repeated sequential.
+// Thread A awaits events one at a time in a loop, blocking in watch_fds()
+// between each. Thread B triggers each event after thread A signals readiness.
+// This tests that the wake mechanism works correctly across many block/wake
+// cycles on the same driver.
+void test_cross_thread_wake_repeated() {
+    constexpr int EVENTS = 20;
+    constexpr int ROUNDS = 50;
+
+    for (int round = 0; round < ROUNDS; ++round) {
+        std::atomic<int> phase{0};
+        cot::event* ev_ptrs[EVENTS];
+
+        int pipefd[2];
+        assert(pipe(pipefd) == 0);
+        cot::set_nonblocking(pipefd[0]);
+        cot::set_nonblocking(pipefd[1]);
+
+        std::thread thread_a([&] {
+            cot::set_real_time(true);
+
+            cot::event events[EVENTS];
+            for (int i = 0; i < EVENTS; ++i) {
+                ev_ptrs[i] = &events[i];
+            }
+
+            auto fn = [&]() -> cot::task<> {
+                auto readable_ev = cot::readable(pipefd[0]);
+                for (int i = 0; i < EVENTS; ++i) {
+                    // Signal thread B: ready for event i
+                    phase.store(i + 1, std::memory_order_release);
+                    co_await events[i];
+                }
+                ssize_t nw = ::write(pipefd[1], "x", 1);
+                assert(nw == 1);
+                co_await readable_ev;
+            };
+            auto t = fn();
+
+            auto start = std::chrono::steady_clock::now();
+            cot::loop();
+            auto elapsed = std::chrono::steady_clock::now() - start;
+
+            assert(t.done());
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+            assert(ms < 5000 && "cross-thread wake repeated too slow");
+        });
+
+        std::thread thread_b([&] {
+            for (int i = 0; i < EVENTS; ++i) {
+                while (phase.load(std::memory_order_acquire) < i + 1) {
+                    std::this_thread::yield();
+                }
+                // Give thread A time to reach watch_fds()
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+                ev_ptrs[i]->trigger();
+            }
+        });
+
+        thread_a.join();
+        thread_b.join();
+        close(pipefd[0]);
+        close(pipefd[1]);
+    }
+    std::cerr << "cross_thread_wake_repeated: ok\n";
+}
+
+
+// TEST: Cross-thread wake race: exercises the lock_ path.
+// Thread B triggers with zero delay so the event lands while thread A is
+// still in the loop body (processing fd updates, checking exit conditions,
+// computing timeout) — before it stores wakefd_ and blocks in watch_fds().
+// In that case, migrate_asap() sees wakefd_ == -1 and does NOT send a wake
+// signal; thread A must catch the work via its lock_ check before blocking.
+//
+// The delay is varied across rounds:
+//   - No delay: trigger almost certainly arrives before thread A blocks
+//   - 1 yield: very short delay, right at the boundary
+//   - ~50us: might land in either window depending on scheduling
+// Over 2000 rounds this exercises the critical store-load ordering between
+// wakefd_ and lock_ that seq_cst is supposed to guarantee. If the ordering
+// is wrong, thread A will block with a 1-hour timeout despite pending work
+// in migrate_, and the timing assertion will fire.
+void test_cross_thread_wake_race() {
+    constexpr int ROUNDS = 2000;
+
+    for (int round = 0; round < ROUNDS; ++round) {
+        std::atomic<int> phase{0};
+        cot::event* ev_ptr = nullptr;
+
+        int pipefd[2];
+        assert(pipe(pipefd) == 0);
+        cot::set_nonblocking(pipefd[0]);
+        cot::set_nonblocking(pipefd[1]);
+
+        std::thread thread_a([&] {
+            cot::set_real_time(true);
+
+            cot::event ev;
+            ev_ptr = &ev;
+
+            auto fn = [&]() -> cot::task<> {
+                auto readable_ev = cot::readable(pipefd[0]);
+                co_await ev;
+                ssize_t nw = ::write(pipefd[1], "x", 1);
+                assert(nw == 1);
+                co_await readable_ev;
+            };
+            auto t = fn();
+
+            // Signal and immediately enter loop — no waiting
+            phase.store(1, std::memory_order_release);
+            cot::loop();
+            assert(t.done());
+        });
+
+        std::thread thread_b([&, round] {
+            while (phase.load(std::memory_order_acquire) < 1) {
+                std::this_thread::yield();
+            }
+            // Vary the delay to probe different points in thread A's loop:
+            switch (round % 3) {
+            case 0:
+                // No delay — trigger fires before thread A reaches watch_fds
+                break;
+            case 1:
+                // Single yield — minimal delay, right at the boundary
+                std::this_thread::yield();
+                break;
+            case 2:
+                // ~50us — short enough to sometimes beat watch_fds
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                break;
+            }
+            ev_ptr->trigger();
+        });
+
+        thread_a.join();
+        thread_b.join();
+        close(pipefd[0]);
+        close(pipefd[1]);
+    }
+    std::cerr << "cross_thread_wake_race: ok\n";
+}
+
+
+int main(int argc, char* argv[]) {
+    unsigned ran = 0;
+    cot::set_real_time(true);
+
+    auto run = [&](const char* name, auto fn) {
+        bool found = argc == 1;
+        for (int argi = 1; !found && argi < argc; ++argi) {
+            found = strcmp(name, argv[argi]) == 0;
+        }
+        if (!found) {
+            return;
+        }
+        ++ran;
+        std::cerr << "=== " << name << " ===\n";
+        cot::reset();
+        auto t = fn();
+        cot::loop();
+        assert(t.done() && "test did not complete");
+    };
+
+    run("pipe_readwrite", test_pipe_readwrite);
+    run("readable_event", test_readable_event);
+    run("realtime_timer", test_realtime_timer);
+    run("tcp_echo", test_tcp_echo);
+    run("serialization", test_serialization);
+    run("tcp_multi_frame", test_tcp_multi_frame);
+    run("dup_close_fd", test_dup_close_fd);
+    run("forget_fd_cleanup", test_forget_fd_cleanup);
+
+    // Cross-thread wake tests use their own threads and drivers
+    auto run_threaded = [&](const char* name, auto fn) {
+        bool found = argc == 1;
+        for (int argi = 1; !found && argi < argc; ++argi) {
+            found = strcmp(name, argv[argi]) == 0;
+        }
+        if (!found) {
+            return;
+        }
+        ++ran;
+        std::cerr << "=== " << name << " ===\n";
+        fn();
+    };
+
+    run_threaded("close_wakes_reader", test_close_wakes_reader);
+    run_threaded("shutdown_wakes_reader", test_shutdown_wakes_reader);
+    run_threaded("cross_thread_wake", test_cross_thread_wake);
+    run_threaded("cross_thread_wake_hammer", test_cross_thread_wake_hammer);
+    run_threaded("cross_thread_wake_repeated", test_cross_thread_wake_repeated);
+    run_threaded("cross_thread_wake_race", test_cross_thread_wake_race);
+
+    if (ran == 0) {
+        std::print(std::cerr, "No matching tests\n");
+        exit(1);
+    } else {
+        std::print(std::cerr, "*** done ***\n");
+        exit(0);
+    }
+}

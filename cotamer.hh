@@ -116,20 +116,6 @@ template <typename... Es>
 [[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
 
 
-// Time and scheduling functions (operate on driver::main).
-using clock = std::chrono::system_clock;
-inline clock::time_point now();
-inline void step_time();
-
-inline event asap();                   // triggers before next time step
-inline event after(clock::duration);   // triggers after a delay
-inline event at(clock::time_point);    // triggers at an absolute time
-
-inline void loop();                    // run event loop until quiescent
-inline void clear();                   // cancel all pending events
-void reset();                          // destroy and recreate driver
-
-
 // driver
 //    The event loop. Maintains a queue of ready coroutines, a queue of
 //    “asap” events (triggered before the next time step), and a timer heap.
@@ -138,6 +124,10 @@ void reset();                          // destroy and recreate driver
 //
 //    A single global driver is stored in `driver::main`. The free functions
 //    `now()`, `after()`, `loop()`, etc. delegate to it.
+
+using clock = std::chrono::system_clock;
+
+enum class fdi { read = 0, write = 1, close = 2 };
 
 class driver {
 public:
@@ -148,6 +138,8 @@ public:
     driver& operator=(const driver&) = delete;
     driver& operator=(driver&&) = delete;
 
+    inline void set_real_time(bool real_time);
+
     inline clock::time_point now();
     inline void step_time();
 
@@ -157,6 +149,10 @@ public:
     inline event at(clock::time_point t);
     inline void after(clock::duration d, event);
     inline event after(clock::duration d);
+    inline event fd(int fd, fdi type);
+
+    int close_fd(int fd);
+    void forget_fd(int fd);
 
     void loop();
     void clear();
@@ -170,20 +166,58 @@ public:
 private:
     friend struct detail::event_body;
     template <typename T> friend struct detail::task_final_awaiter;
+    friend void set_real_time(bool);
 
+    clock::time_point now_;
     bool clearing_ = false;
+    bool real_time_ = false;
     std::deque<detail::event_handle> asap_;
     timer_heap<detail::event_handle> timed_;
-    clock::time_point now_;
 
     static constexpr uint32_t df_lock = 1;
     static constexpr uint32_t df_nonempty = 2;
     std::atomic<uint32_t> lock_ = 0;
+    std::atomic<int> wakefd_ = -1;
     std::deque<detail::event_handle> migrate_;
+
+    int pollfd_ = -1;
+    int epoll_wakefd_ = -1;
+    unsigned nfdctl_ = 0;
+    std::vector<uint64_t> fdctl_;
+    detail::fd_event_set fds_;
+
+    static std::atomic<bool> real_time;
 
     inline uint32_t lock();
     inline void unlock(uint32_t flags);
+    void migrate_asap(detail::event_handle eh);
+
+    inline int pollfd();
+    void apply_fd_update(detail::fd_batch&, const detail::fd_update&);
+    bool watch_fds(detail::fd_batch&, clock::duration timeout);
 };
+
+
+// Time and scheduling functions (operate on driver::main).
+
+inline void set_real_time(bool real_time);
+
+inline clock::time_point now();
+inline void step_time();
+
+inline event asap();                   // triggers before next time step
+inline event after(clock::duration);   // triggers after a delay
+inline event at(clock::time_point);    // triggers at an absolute time
+
+inline event readable(int fd);         // triggers when `read(fd)` won't block
+inline event writable(int fd);         // triggers when `write(fd)` won't block
+inline event closed(int fd);           // triggers when `fd` errors or closes
+
+inline void loop();                    // run event loop until quiescent
+inline int close_fd(int fd);           // close `fd` and trigger all events
+inline void forget_fd(int fd);         // drop any events on `fd`
+inline void clear();                   // cancel all pending events
+void reset();                          // destroy and recreate driver
 
 
 // mutex, mutex_event, unique_lock, shared_lock
@@ -199,7 +233,7 @@ class mutex;
 
 template <bool shared>
 struct locked_mutex_t {
-    mutex* mutex;
+    mutex* m;
 };
 
 template <bool shared>
