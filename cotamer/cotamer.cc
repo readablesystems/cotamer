@@ -240,9 +240,14 @@ inline int driver::pollfd() {
     if (pollfd_ >= 0) {
         return pollfd_;
     }
-    if ((pollfd_ = epoll_create1(EPOLL_CLOEXEC)) < 0
-        || (epoll_wakefd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0) {
+    if ((pollfd_ = epoll_create1(EPOLL_CLOEXEC)) < 0) {
         throw std::system_error(errno, std::generic_category());
+    }
+    if ((epoll_wakefd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0) {
+        int saved = errno;
+        ::close(pollfd_);
+        pollfd_ = -1;
+        throw std::system_error(saved, std::generic_category());
     }
     epoll_event epev;
     epev.events = EPOLLIN;
@@ -308,6 +313,9 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     // of EVFILT_USER or eventfd). Cross-thread triggers will be delayed
     // until the poll timeout expires. This is an acceptable tradeoff for a
     // portability fallback; kqueue/epoll should be used on production systems.
+    //
+    // NB: rebuilds the entire pollfd array on every call (O(max_fd) scan).
+    // kqueue/epoll maintain kernel-side state and avoid this cost.
     batch.ev.clear();
     int fd = -1;
     while (auto fdu = fds_.next_nonempty(fd)) {
@@ -405,11 +413,11 @@ void driver::migrate_asap(detail::event_handle eh) {
 // driver methods
 
 thread_local std::unique_ptr<driver> driver::main{new driver};
-std::atomic<bool> driver::real_time;
+std::atomic<bool> driver::global_real_time;
 
 driver::driver()
     : virtual_epoch_(std::chrono::system_clock::from_time_t(1634070069)),
-      real_time_(real_time.load(std::memory_order_relaxed)) {
+      real_time_(global_real_time.load(std::memory_order_relaxed)) {
 }
 
 driver::~driver() {

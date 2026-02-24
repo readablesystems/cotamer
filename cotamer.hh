@@ -140,6 +140,7 @@ public:
     driver& operator=(const driver&) = delete;
     driver& operator=(driver&&) = delete;
 
+    inline bool real_time() const noexcept;
     inline void set_real_time(bool real_time);
 
     inline system_time_point now() noexcept;        // current system time (might go backwards)
@@ -196,7 +197,7 @@ private:
     std::vector<uint64_t> fdctl_;
     detail::fd_event_set fds_;
 
-    static std::atomic<bool> real_time;
+    static std::atomic<bool> global_real_time;
 
     inline uint32_t lock();
     inline void unlock(uint32_t flags);

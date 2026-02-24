@@ -75,10 +75,15 @@ public:
 private:
     static constexpr unsigned first_capacity = 128;
     static constexpr unsigned block_capacity = 1024;
+
+    // Intrusive singly-linked update list. Link values are fd+1
+    // (so fd 0 maps to 1); update_clean means not in list,
+    // update_sentinel means end of list or empty list head.
+    static constexpr unsigned update_sentinel = -1;
+    static constexpr unsigned update_clean = 0;
     struct fdrec {
         event_handle ev[3];         // 0: readable, 1: writable, 2: closed
-        unsigned update_link = 0;   // 0: not updated, -1: end of update list,
-                                    // > 0: next updated fd + 1
+        unsigned update_link_ = update_clean;
         unsigned epoch = 0;         // used to avoid epoll API difficulties
 
         inline int mask() const noexcept {
@@ -88,7 +93,7 @@ private:
 
     fdrec* fdrs_ = nullptr;
     unsigned capacity_ = 0;
-    unsigned update_link_ = -1;   // -1: no updates, > 0: first updated fd + 1
+    unsigned update_link_ = -1;   // head of update list; see encoding above
 
     void hard_ensure(unsigned fd);
 };

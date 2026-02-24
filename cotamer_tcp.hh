@@ -105,6 +105,7 @@ public:
 
     void close() {
         if (fd_ >= 0) {
+            forget_fd(fd_);
             ::close(fd_);
             fd_ = -1;
         }

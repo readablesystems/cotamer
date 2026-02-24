@@ -965,6 +965,10 @@ inline detail::task_awaiter<T> task<T>::operator co_await() const noexcept {
 
 // driver methods
 
+inline bool driver::real_time() const noexcept {
+    return real_time_;
+}
+
 inline void driver::set_real_time(bool real_time) {
     real_time_ = real_time;
 }
@@ -1046,7 +1050,7 @@ inline event driver::fd(int fd, fdi type) {
 // free functions
 
 inline void set_real_time(bool real_time) {
-    driver::real_time = real_time;
+    driver::global_real_time = real_time;
     driver::main->set_real_time(real_time);
 }
 
@@ -1248,8 +1252,8 @@ inline event_handle fd_event_set::watch(int fd, int interest) {
     }
     fdrec& fdi = fdrs_[ufd];
     if (!fdi.ev[interest]) {
-        if (fdi.update_link == 0) {
-            fdi.update_link = update_link_;
+        if (fdi.update_link_ == update_clean) {
+            fdi.update_link_ = update_link_;
             update_link_ = ufd + 1;
         }
         fdi.ev[interest] = event_handle{new event_body};
@@ -1268,8 +1272,8 @@ inline event_handle fd_event_set::take(int fd, int interest, unsigned epoch) {
         || (epoch && epoch != fdi.epoch)) {
         return event_handle();
     }
-    if (fdi.update_link == 0) {
-        fdi.update_link = update_link_;
+    if (fdi.update_link_ == update_clean) {
+        fdi.update_link_ = update_link_;
         update_link_ = ufd + 1;
     }
     return std::exchange(fdi.ev[interest], nullptr);
@@ -1292,17 +1296,17 @@ inline std::optional<fd_update> fd_event_set::forget(int fd) noexcept {
 }
 
 inline bool fd_event_set::has_update() const noexcept {
-    return update_link_ != unsigned(-1);
+    return update_link_ != update_sentinel;
 }
 
 inline std::optional<fd_update> fd_event_set::pop_update() noexcept {
-    if (update_link_ == unsigned(-1)) {
+    if (update_link_ == update_sentinel) {
         return std::nullopt;
     }
     unsigned ufd = update_link_ - 1;
     fdrec& fdi = fdrs_[ufd];
-    update_link_ = fdi.update_link;
-    fdi.update_link = 0;
+    update_link_ = fdi.update_link_;
+    fdi.update_link_ = update_clean;
     auto mask = fdi.mask();
     unsigned epoch = fdi.epoch;
     if (!mask) {
