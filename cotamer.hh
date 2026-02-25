@@ -116,6 +116,34 @@ template <typename... Es>
 [[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
 
 
+// fd
+//    A reference-counted file descriptor with RAII close semantics. When
+//    the last strong reference is dropped, the underlying fd is closed and
+//    all associated events (readable, writable, closed) are triggered.
+//    Copies share ownership (like shared_ptr). Use close() to close early.
+
+class fd {
+public:
+    fd() = default;
+    explicit inline fd(int rawfd);
+    inline fd(const fd&) noexcept;
+    inline fd(fd&&) noexcept;
+    inline fd& operator=(const fd&);
+    inline fd& operator=(fd&&) noexcept;
+    inline ~fd();
+
+    int fileno() const noexcept;
+    bool valid() const noexcept;
+    explicit operator bool() const noexcept;
+    void close();
+
+    detail::fd_body* body() const noexcept { return body_; }
+
+private:
+    detail::fd_body* body_ = nullptr;
+};
+
+
 // driver
 //    The event loop. Maintains a queue of ready coroutines, a queue of
 //    “asap” events (triggered before the next time step), and a timer heap.
@@ -159,10 +187,8 @@ public:
     inline void after(const std::chrono::duration<Rep, Period>&, event);
     template <typename Rep, typename Period>
     inline event after(const std::chrono::duration<Rep, Period>&);
-    inline event fd(int fd, fdi type);
-
-    int close_fd(int fd);
-    void forget_fd(int fd);
+    inline event file_event(const cotamer::fd& f, fdi type);
+    inline void notify_close(int base_fileno);
 
     void loop();
     void clear();
@@ -175,6 +201,7 @@ public:
 
 private:
     friend struct detail::event_body;
+    friend struct detail::fd_body;
     template <typename T> friend struct detail::task_final_awaiter;
     friend void set_real_time(bool);
 
@@ -189,7 +216,8 @@ private:
     static constexpr uint32_t df_nonempty = 2;
     std::atomic<uint32_t> lock_ = 0;
     std::atomic<int> wakefd_ = -1;
-    std::deque<detail::event_handle> migrate_;
+    std::vector<detail::event_handle> migrate_;
+    std::vector<int> migrate_fd_close_;
 
     int pollfd_ = -1;
     int epoll_wakefd_ = -1;
@@ -202,6 +230,9 @@ private:
     inline uint32_t lock();
     inline void unlock(uint32_t flags);
     void migrate_asap(detail::event_handle eh);
+    void migrate_fd_close(int base_fd);
+    inline void migrate_wake();
+    void finish_migrate();
 
     inline int pollfd();
     void apply_fd_update(detail::fd_batch&, const detail::fd_update&);
@@ -224,13 +255,11 @@ inline event after(const std::chrono::duration<Rep, Period>&);
 inline event at(steady_time_point);    // triggers at an absolute time
 inline event at(system_time_point);    // triggers at an absolute system time
 
-inline event readable(int fd);         // triggers when `read(fd)` won't block
-inline event writable(int fd);         // triggers when `write(fd)` won't block
-inline event closed(int fd);           // triggers when `fd` errors or closes
+inline event readable(const fd&);      // triggers when `read(fd)` won't block
+inline event writable(const fd&);      // triggers when `write(fd)` won't block
+inline event closed(const fd&);        // triggers when `fd` errors or closes
 
 inline void loop();                    // run event loop until quiescent
-inline int close_fd(int fd);           // close `fd` and trigger all events
-inline void forget_fd(int fd);         // drop any events on `fd`
 inline void clear();                   // cancel all pending events
 void reset();                          // destroy and recreate driver
 

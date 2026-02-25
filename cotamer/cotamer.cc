@@ -49,6 +49,26 @@ int duration_milliseconds(duration d) {
 
 namespace detail {
 
+void fd_event_set::deref_all(driver* drv) {
+    // must be called before destroying `fd_event_set`
+    if (!capacity_) {
+        return;
+    }
+    for (fdrec* fdr = fdrs_; fdr != fdrs_ + capacity_; ++fdr) {
+        if (fdr->body) {
+            fdr->body->remove_listener(drv);
+        }
+    }
+}
+
+inline fd_event_set::~fd_event_set() {
+    if (capacity_ != 0) {
+        std::destroy(fdrs_, fdrs_ + capacity_);
+        std::allocator<fdrec>().deallocate(fdrs_, capacity_);
+    }
+}
+
+
 void fd_event_set::hard_ensure(unsigned ufd) {
     assert(ufd >= capacity_);
     // choose new capacity to fit; double up to `block_capacity`
@@ -74,16 +94,45 @@ void fd_event_set::hard_ensure(unsigned ufd) {
     capacity_ = ncapacity;
 }
 
-void fd_event_set::clear() {
-    if (capacity_ != 0) {
-        std::destroy(fdrs_, fdrs_ + capacity_);
-        std::allocator<fdrec>().deallocate(fdrs_, capacity_);
+void fd_body::deref_close(bool deref) {
+    lock();
+    // obtain local copies of `drivers_` and `base_fd_` (cannot refer to `this`
+    // after unlock, because another thread might delete this)
+    small_vector<driver*, 4> local_drivers;
+    for (auto dx : drivers_) {
+        local_drivers.push_back(dx);
     }
-    fdrs_ = nullptr;
-    capacity_ = 0;
-    update_link_ = -1;
+    int local_base_fd = base_fd_;
+    // mark as closed, but only once
+    bool need_close = fd_.load(std::memory_order_relaxed) >= 0;
+    if (need_close) {
+        fd_.store(-1, std::memory_order_relaxed);
+    }
+    // actually dereference
+    if (deref) {
+        ref_.fetch_sub(1, std::memory_order_release);
+    }
+    unlock();
+
+    // notify drivers
+    if (local_drivers.empty() && deref) {
+        delete this;
+    } else if (need_close) {
+        driver* my_driver = driver::main.get();
+        for (auto dx : local_drivers) {
+            if (dx == my_driver) {
+                dx->notify_close(local_base_fd);
+            } else {
+                dx->migrate_fd_close(local_base_fd);
+            }
+        }
+    }
 }
 
+}
+
+
+namespace detail {
 
 struct fd_batch {
 #if COTAMER_USE_KQUEUE
@@ -261,7 +310,8 @@ inline int driver::pollfd() {
 #endif
 }
 
-void driver::apply_fd_update(detail::fd_batch& batch, const detail::fd_update& fdu) {
+void driver::apply_fd_update(detail::fd_batch& batch,
+                             const detail::fd_update& fdu) {
     // look up events currently registered on our event notification fd
     // for file `fdu.fd`; we store them in `fdctl_` in bit-packed form
     unsigned fdci = unsigned(fdu.fd) / 16,
@@ -269,14 +319,17 @@ void driver::apply_fd_update(detail::fd_batch& batch, const detail::fd_update& f
     if (fdci >= fdctl_.size()) {
         fdctl_.resize(fdci + 1, uint64_t(0));
     }
+
     // return if no change (e.g., firing a read event removed the readable
     // watch, but application code re-installed that watch)
     int old_mask = (fdctl_[fdci] >> fdcs) & 15;
     if (old_mask == fdu.mask) {
         return;
     }
+
     // add to the batch of event notification fd updates
     batch.add(pollfd(), fdu, old_mask);
+
     // record the new notification state in `fdctl_`
     fdctl_[fdci] ^= (old_mask ^ fdu.mask) << fdcs;
     if (old_mask == 0) {
@@ -287,27 +340,20 @@ void driver::apply_fd_update(detail::fd_batch& batch, const detail::fd_update& f
 }
 
 bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
-    // block in kernel
-#if COTAMER_USE_KQUEUE
+#if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
     wakefd_.store(pollfd_, std::memory_order_seq_cst);
     if (lock_.load(std::memory_order_seq_cst)) {
         timeout = duration::zero();
     }
+#endif
 
+#if COTAMER_USE_KQUEUE
+    // block in kernel
     struct timespec ts = duration_timespec(timeout);
     batch.size = kevent(pollfd_, batch.ev, batch.changes, batch.ev, batch.capacity, &ts);
     batch.changes = 0;
-
-    wakefd_.store(-1, std::memory_order_relaxed);
 #elif COTAMER_USE_EPOLL
-    wakefd_.store(epoll_wakefd_, std::memory_order_seq_cst);
-    if (lock_.load(std::memory_order_seq_cst)) {
-        timeout = duration::zero();
-    }
-
     batch.size = epoll_wait(pollfd_, batch.ev, batch.capacity, duration_milliseconds(timeout));
-
-    wakefd_.store(-1, std::memory_order_relaxed);
 #else
     // The poll() fallback has no cross-thread wake mechanism (no equivalent
     // of EVFILT_USER or eventfd). Cross-thread triggers will be delayed
@@ -326,6 +372,10 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     batch.size = batch.ev.size();
 #endif
     batch.index = 0;
+
+#if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
+    wakefd_.store(-1, std::memory_order_relaxed);
+#endif
 
     // process returned events
     while (auto fdu = batch.pop()) {
@@ -367,46 +417,45 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     return batch.size > 0;
 }
 
-int driver::close_fd(int fd) {
-    int r = ::close(fd);
-    if (auto eh = fds_.take(fd, 0, 0)) {
-        eh->trigger(); // NB: not driver_trigger -- delay unblocked coroutines
+void driver::notify_close(int base_fd) {
+    if (auto pair = fds_.check_fd_close(base_fd)) {
+        detail::fd_batch batch;
+        apply_fd_update(batch, {base_fd, 0, pair->second});
+        batch.clear(pollfd());
+        pair->first->remove_listener(this);
     }
-    if (auto eh = fds_.take(fd, 1, 0)) {
-        eh->trigger();
-    }
-    if (auto eh = fds_.take(fd, 2, 0)) {
-        eh->trigger();
-    }
-    forget_fd(fd);
-    return r;
 }
 
-void driver::forget_fd(int fd) {
-    if (auto fdu = fds_.forget(fd)) {
-        detail::fd_batch fdb;
-        apply_fd_update(fdb, *fdu);
-        fdb.clear(pollfd_);
+
+inline void driver::migrate_wake() {
+#if !COTAMER_USE_POLL
+    int wakefd = wakefd_.load(std::memory_order_seq_cst);
+    if (wakefd >= 0) {
+# if COTAMER_USE_KQUEUE
+        struct kevent ev;
+        EV_SET(&ev, -1, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
+        kevent(wakefd, &ev, 1, nullptr, 0, nullptr);
+# elif COTAMER_USE_EPOLL
+        uint64_t val = 1;
+        ssize_t nw = ::write(wakefd, &val, sizeof(val));
+        (void) nw;
+# endif
     }
+#endif
 }
 
 void driver::migrate_asap(detail::event_handle eh) {
     auto df = lock();
     migrate_.emplace_back(std::move(eh));
     unlock(df | driver::df_nonempty);
+    migrate_wake();
+}
 
-    int wakefd = wakefd_.load(std::memory_order_seq_cst);
-    if (wakefd >= 0) {
-#if COTAMER_USE_KQUEUE
-        struct kevent ev;
-        EV_SET(&ev, -1, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
-        kevent(wakefd, &ev, 1, nullptr, 0, nullptr);
-#elif COTAMER_USE_EPOLL
-        uint64_t val = 1;
-        ssize_t nw = ::write(wakefd, &val, sizeof(val));
-        (void) nw;
-#endif
-    }
+void driver::migrate_fd_close(int base_fd) {
+    auto df = lock();
+    migrate_fd_close_.emplace_back(base_fd);
+    unlock(df | driver::df_nonempty);
+    migrate_wake();
 }
 
 
@@ -430,6 +479,7 @@ driver::~driver() {
         clear();
         loop();
     }
+    fds_.deref_all(this);
     if (epoll_wakefd_ >= 0) {
         ::close(epoll_wakefd_);
     }
@@ -442,13 +492,9 @@ void driver::loop() {
     detail::fd_batch fdb;
 
     while (true) {
-        // import migrated tasks
+        // import migrated tasks and fd close events
         if (lock_.load(std::memory_order_relaxed) != 0) {
-            uint32_t flags = lock();
-            std::deque<detail::event_handle> migrate;
-            migrate_.swap(migrate);
-            unlock(flags & ~df_nonempty);
-            std::move(migrate.begin(), migrate.end(), std::back_inserter(asap_));
+            finish_migrate();
         }
 
         // process asap tasks
@@ -516,6 +562,21 @@ void driver::loop() {
         }
     }
     clearing_ = false;
+}
+
+void driver::finish_migrate() {
+    std::vector<detail::event_handle> migrate;
+    std::vector<int> migrate_fd_close;
+
+    uint32_t flags = lock();
+    migrate_.swap(migrate);
+    migrate_fd_close_.swap(migrate_fd_close);
+    unlock(flags & ~df_nonempty);
+
+    std::move(migrate.begin(), migrate.end(), std::back_inserter(asap_));
+    for (auto base_fd : migrate_fd_close) {
+        notify_close(base_fd);
+    }
 }
 
 void driver::clear() {

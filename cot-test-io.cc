@@ -19,22 +19,23 @@ using namespace std::chrono_literals;
 
 // TEST: Pipe read/write: basic test of readable() and async I/O
 cot::task<> test_pipe_readwrite() {
-    int pipefd[2];
-    assert(pipe(pipefd) == 0);
-    cot::set_nonblocking(pipefd[0]);
-    cot::set_nonblocking(pipefd[1]);
+    int piperaw[2];
+    assert(pipe(piperaw) == 0);
+    cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
+    cot::set_nonblocking(rfd.fileno());
+    cot::set_nonblocking(wfd.fileno());
 
     // Writer: write to the pipe
     auto writer = [&]() -> cot::task<> {
         const char* msg = "hello from pipe";
-        auto r = co_await cot::async_write(pipefd[1], msg, strlen(msg));
+        auto r = co_await cot::async_write(wfd, msg, strlen(msg));
         assert(r == static_cast<ssize_t>(strlen(msg)));
     };
 
     // Reader: read from the pipe
     auto reader = [&]() -> cot::task<> {
         char buf[64] = {};
-        auto r = co_await cot::async_read(pipefd[0], buf, sizeof(buf));
+        auto r = co_await cot::async_read(rfd, buf, sizeof(buf));
         assert(r > 0);
         assert(std::string(buf, r) == "hello from pipe");
         std::cerr << "pipe_readwrite: read \"" << std::string(buf, r) << "\"\n";
@@ -42,38 +43,33 @@ cot::task<> test_pipe_readwrite() {
 
     writer().detach();
     co_await reader();
-
-    close(pipefd[0]);
-    close(pipefd[1]);
 }
 
 
 // TEST: Readable event triggers correctly
 cot::task<> test_readable_event() {
-    int pipefd[2];
-    assert(pipe(pipefd) == 0);
-    cot::set_nonblocking(pipefd[0]);
-    cot::set_nonblocking(pipefd[1]);
+    int piperaw[2];
+    assert(pipe(piperaw) == 0);
+    cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
+    cot::set_nonblocking(rfd.fileno());
+    cot::set_nonblocking(wfd.fileno());
 
     // Write something to make the read end readable
     auto writer = [&]() -> cot::task<> {
         co_await cot::asap(); // let the reader set up first
         const char data[] = "test";
-        ssize_t nw = ::write(pipefd[1], data, 4);
+        ssize_t nw = ::write(wfd.fileno(), data, 4);
         assert(nw == 4);
     };
     writer().detach();
 
     // Wait for readable
-    co_await cot::readable(pipefd[0]);
+    co_await cot::readable(rfd);
     char buf[16] = {};
-    ssize_t r = ::read(pipefd[0], buf, sizeof(buf));
+    ssize_t r = ::read(rfd.fileno(), buf, sizeof(buf));
     assert(r == 4);
     assert(std::string(buf, 4) == "test");
     std::cerr << "readable_event: ok\n";
-
-    close(pipefd[0]);
-    close(pipefd[1]);
 }
 
 
@@ -95,11 +91,10 @@ cot::task<> test_tcp_echo() {
 
     // Echo server: accept one connection, echo back one frame, then close
     auto server = [&]() -> cot::task<> {
-        int lfd = cot::tcp_listen("127.0.0.1", port);
+        auto lfd = cot::tcp_listen("127.0.0.1", port);
         auto stream = co_await cot::tcp_accept(lfd);
         auto frame = co_await stream.recv_frame();
         co_await stream.send_frame(frame.data(), frame.size());
-        close(lfd);
     };
     server().detach();
 
@@ -189,7 +184,7 @@ cot::task<> test_tcp_multi_frame() {
     uint16_t port = 19877;
 
     auto server = [&]() -> cot::task<> {
-        int lfd = cot::tcp_listen("127.0.0.1", port);
+        auto lfd = cot::tcp_listen("127.0.0.1", port);
         auto stream = co_await cot::tcp_accept(lfd);
         // Receive 3 frames and send them back reversed
         std::vector<std::vector<char>> frames;
@@ -199,7 +194,6 @@ cot::task<> test_tcp_multi_frame() {
         for (int i = 2; i >= 0; --i) {
             co_await stream.send_frame(frames[i].data(), frames[i].size());
         }
-        close(lfd);
     };
     server().detach();
 
@@ -227,21 +221,25 @@ cot::task<> test_tcp_multi_frame() {
 // even though dupfd still references the same file description. epoll tracks
 // file descriptions, so closing pipefd[0] does nothing — the file description
 // is still alive via dupfd and the events never fire.
+//
+// With cotamer::fd, closing the fd object triggers all events and cleans up
+// poller state automatically.
 cot::task<> test_dup_close_fd() {
-    int pipefd[2];
-    assert(pipe(pipefd) == 0);
-    cot::set_nonblocking(pipefd[0]);
-    cot::set_nonblocking(pipefd[1]);
+    int piperaw[2];
+    assert(pipe(piperaw) == 0);
+    cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
+    cot::set_nonblocking(rfd.fileno());
+    cot::set_nonblocking(wfd.fileno());
 
     // Register readable and closed events on the read end
-    cot::event readable_ev = cot::readable(pipefd[0]);
-    cot::event closed_ev = cot::closed(pipefd[0]);
+    cot::event readable_ev = cot::readable(rfd);
+    cot::event closed_ev = cot::closed(rfd);
 
     // Let the loop register the fd with the poller
     co_await cot::after(10ms);
 
     assert(!readable_ev.triggered() && !closed_ev.triggered());
-    ssize_t nw = ::write(pipefd[1], "!", 1);
+    ssize_t nw = ::write(wfd.fileno(), "!", 1);
     assert(nw == 1);
 
     // This should not block
@@ -251,57 +249,42 @@ cot::task<> test_dup_close_fd() {
     assert(readable_ev.triggered());
     assert(!closed_ev.triggered());
     char buf[100];
-    nw = ::read(pipefd[0], buf, sizeof(buf));
+    nw = ::read(rfd.fileno(), buf, sizeof(buf));
     assert(nw == 1);
 
     // Re-register interest in readable_ev
-    readable_ev = cot::readable(pipefd[0]);
+    readable_ev = cot::readable(rfd);
 
-    // Dup the read end, then close the original descriptor
-    int dupfd = dup(pipefd[0]);
-    assert(dupfd >= 0);
-    close(pipefd[0]);
-    nw = ::write(pipefd[1], "!", 1);
+    // Dup the read end, then close the original via cot::fd::close()
+    int dupraw = dup(rfd.fileno());
+    assert(dupraw >= 0);
+    rfd.close();   // triggers events and cleans up poller state
+    nw = ::write(wfd.fileno(), "!", 1);
     assert(nw == 1);
 
-    // Wait to see if the close fires the events.
+    // The close should have fired the events.
     co_await cot::any(readable_ev, closed_ev, cot::after(100ms));
 
     bool triggered = readable_ev.triggered() || closed_ev.triggered();
     std::cerr << "dup_close_fd: triggered=" << triggered << "\n";
 
-    // Clean up stale poller state so loop() can exit.
-    // On epoll, the file description is still alive via dupfd and
-    // nfdctl_ > 0; forget_fd drops the event handles and decrements
-    // nfdctl_ even though the epoll_ctl DEL will fail (fd is closed).
-    cot::forget_fd(pipefd[0]);
-
-    close(dupfd);
-    close(pipefd[1]);
+    ::close(dupraw);
 }
 
 
-// TEST: forget_fd cleanup: verify that a coroutine suspended on a forgotten fd
+// TEST: fd close cleanup: verify that a coroutine suspended on a closed fd
 // is properly cleaned up when its owning task is destroyed.
 //
-// Reference count trace for `co_await readable(fd)`:
-//   - fdi.ev[0] in fd_event_set: 1 ref
-//   - task_event_awaiter::eh_ in the suspended coroutine frame: 1 ref
-//   Total: 2
-//
-// After forget_fd clears fdi.ev[0], refcount drops to 1. The event_body
-// survives (the awaiter holds it), but it has no poller registration and
-// will never trigger. The coroutine is stranded.
-//
-// When the owning task<> goes out of scope, ~task destroys the coroutine
-// frame. The awaiter destructor removes the coroutine from the event's
-// listener list and drops the last event_handle reference. Everything is
-// cleaned up — no leaked event_body, no leaked coroutine frame.
+// When fd.close() is called, all fd events are triggered. The triggered events
+// go through migrate_asap (since close() uses bare trigger(), not
+// driver_trigger()). The suspended coroutine is eventually resumed or cleaned
+// up when its owning task is destroyed.
 cot::task<> test_forget_fd_cleanup() {
-    int pipefd[2];
-    assert(pipe(pipefd) == 0);
-    cot::set_nonblocking(pipefd[0]);
-    cot::set_nonblocking(pipefd[1]);
+    int piperaw[2];
+    assert(pipe(piperaw) == 0);
+    cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
+    cot::set_nonblocking(rfd.fileno());
+    cot::set_nonblocking(wfd.fileno());
 
     // Lifecycle tracker: 0=init, 1=suspended, 2=resumed, 3=frame destroyed
     int state = 0;
@@ -313,28 +296,26 @@ cot::task<> test_forget_fd_cleanup() {
         };
         guard g{state};
         state = 1;
-        co_await cot::readable(pipefd[0]);
+        co_await cot::readable(rfd);
         state = 2;
     };
 
-    // The inner coroutine is NOT resumed by forget_fd ...
+    // Close the fd — this triggers fd events, which will resume the coroutine
     {
         auto t = waiter();
         assert(state == 1);              // suspended at co_await readable
 
-        co_await cot::asap();            // let loop register the fd
-        cot::forget_fd(pipefd[0]);
-        co_await cot::asap();            // give loop a chance
+        co_await cot::after(5ms);        // let loop register the fd
+        rfd.close();                     // triggers events and cleans up
+        co_await cot::after(5ms);        // let triggered coroutine run
 
-        assert(state == 1 && "coroutine should still be suspended after forget_fd");
-        assert(!t.done());
+        // The close triggers the readable event, so the coroutine resumes
+        assert(state == 2 || state == 3);
     }
-    // ... but IS cleaned up when the owning task is destroyed
+    // The task is now out of scope, so the coroutine frame is destroyed
     assert(state == 3 && "coroutine frame should be destroyed by ~task");
 
     std::cerr << "forget_fd_cleanup: ok\n";
-    close(pipefd[0]);
-    close(pipefd[1]);
 }
 
 
@@ -342,25 +323,29 @@ cot::task<> test_forget_fd_cleanup() {
 // Thread A awaits async_read on one end of a socketpair. Thread B closes the
 // other end. The kernel reports EOF (kqueue EV_EOF / epoll EPOLLHUP), which
 // fires the readable event, resumes the coroutine (read returns 0), and lets
-// loop() exit cleanly — no forget_fd or close_fd needed, because the event
-// was consumed normally via take().
+// loop() exit cleanly.
 void test_close_wakes_reader() {
     constexpr int ROUNDS = 100;
 
     for (int round = 0; round < ROUNDS; ++round) {
         std::atomic<int> phase{0};
 
-        int sockfd[2];
-        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockfd) == 0);
-        cot::set_nonblocking(sockfd[0]);
+        int sockraw[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockraw) == 0);
+        cot::set_nonblocking(sockraw[0]);
 
-        std::thread reader([&] {
+        // sockfd[0] is owned by the reader thread's cot::fd
+        // sockfd[1] is closed by the closer thread directly
+        int raw1 = sockraw[1];
+
+        std::thread reader([&, raw0 = sockraw[0]] {
             cot::set_real_time(true);
 
+            cot::fd sfd(raw0);
             ssize_t result = -99;
             auto fn = [&]() -> cot::task<> {
                 char buf[64];
-                result = co_await cot::async_read(sockfd[0], buf, sizeof(buf));
+                result = co_await cot::async_read(sfd, buf, sizeof(buf));
             };
             auto t = fn();
 
@@ -376,18 +361,17 @@ void test_close_wakes_reader() {
             assert(ms < 2000 && "peer close wake too slow");
         });
 
-        std::thread closer([&] {
+        std::thread closer([&, raw1] {
             while (phase.load(std::memory_order_acquire) < 1) {
                 std::this_thread::yield();
             }
             // Give the reader time to enter watch_fds
             std::this_thread::sleep_for(5ms);
-            ::close(sockfd[1]);
+            ::close(raw1);
         });
 
         reader.join();
         closer.join();
-        close(sockfd[0]);
     }
     std::cerr << "close_wakes_reader: ok\n";
 }
@@ -406,17 +390,20 @@ void test_shutdown_wakes_reader() {
     for (int round = 0; round < ROUNDS; ++round) {
         std::atomic<int> phase{0};
 
-        int sockfd[2];
-        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockfd) == 0);
-        cot::set_nonblocking(sockfd[0]);
+        int sockraw[2];
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockraw) == 0);
+        cot::set_nonblocking(sockraw[0]);
 
-        std::thread reader([&] {
+        int raw0 = sockraw[0], raw1 = sockraw[1];
+
+        std::thread reader([&, raw0] {
             cot::set_real_time(true);
 
+            cot::fd sfd(raw0);
             ssize_t result = -99;
             auto fn = [&]() -> cot::task<> {
                 char buf[64];
-                result = co_await cot::async_read(sockfd[0], buf, sizeof(buf));
+                result = co_await cot::async_read(sfd, buf, sizeof(buf));
             };
             auto t = fn();
 
@@ -432,7 +419,7 @@ void test_shutdown_wakes_reader() {
             assert(ms < 2000 && "shutdown wake too slow");
         });
 
-        std::thread closer([&] {
+        std::thread closer([&, raw0] {
             while (phase.load(std::memory_order_acquire) < 1) {
                 std::this_thread::yield();
             }
@@ -440,13 +427,12 @@ void test_shutdown_wakes_reader() {
             std::this_thread::sleep_for(5ms);
             // shutdown() signals EOF without closing the fd — the poller
             // still has the fd registered, so it reports the state change.
-            ::shutdown(sockfd[0], SHUT_RDWR);
+            ::shutdown(raw0, SHUT_RDWR);
         });
 
         reader.join();
         closer.join();
-        close(sockfd[0]);
-        close(sockfd[1]);
+        ::close(raw1);
     }
     std::cerr << "shutdown_wakes_reader: ok\n";
 }
@@ -476,24 +462,25 @@ void test_cross_thread_wake() {
         std::atomic<int> phase{0};
         cot::event* ev_ptr = nullptr;
 
-        int pipefd[2];
-        assert(pipe(pipefd) == 0);
-        cot::set_nonblocking(pipefd[0]);
-        cot::set_nonblocking(pipefd[1]);
+        int piperaw[2];
+        assert(pipe(piperaw) == 0);
+        cot::set_nonblocking(piperaw[0]);
+        cot::set_nonblocking(piperaw[1]);
 
-        std::thread thread_a([&] {
+        std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
             cot::set_real_time(true);
 
+            cot::fd rfd(r), wfd(w);
             cot::event ev;
             ev_ptr = &ev;
 
             auto fn = [&]() -> cot::task<> {
                 // Register the pipe read end so the driver enters watch_fds()
-                auto readable_ev = cot::readable(pipefd[0]);
+                auto readable_ev = cot::readable(rfd);
                 // Block until thread B triggers ev
                 co_await ev;
                 // Consume the fd registration so loop() can exit cleanly
-                ssize_t nw = ::write(pipefd[1], "x", 1);
+                ssize_t nw = ::write(wfd.fileno(), "x", 1);
                 assert(nw == 1);
                 co_await readable_ev;
             };
@@ -521,8 +508,6 @@ void test_cross_thread_wake() {
 
         thread_a.join();
         thread_b.join();
-        close(pipefd[0]);
-        close(pipefd[1]);
     }
     std::cerr << "cross_thread_wake: ok\n";
 }
@@ -541,15 +526,16 @@ void test_cross_thread_wake_hammer() {
         std::atomic<bool> go{false};
         cot::event* ev_ptrs[EVENTS];
 
-        int pipefd[2];
-        assert(pipe(pipefd) == 0);
-        cot::set_nonblocking(pipefd[0]);
-        cot::set_nonblocking(pipefd[1]);
+        int piperaw[2];
+        assert(pipe(piperaw) == 0);
+        cot::set_nonblocking(piperaw[0]);
+        cot::set_nonblocking(piperaw[1]);
 
-        std::thread thread_a([&] {
+        std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
             cot::set_real_time(true);
             int resume_count = 0;
 
+            cot::fd rfd(r), wfd(w);
             cot::event events[EVENTS];
             std::optional<cot::task<>> tasks[EVENTS];
 
@@ -558,7 +544,7 @@ void test_cross_thread_wake_hammer() {
                 ++resume_count;
                 if (resume_count == EVENTS) {
                     // All events processed — let the keeper coroutine fire
-                    ssize_t nw = ::write(pipefd[1], "x", 1);
+                    ssize_t nw = ::write(wfd.fileno(), "x", 1);
                     assert(nw == 1);
                 }
             };
@@ -570,7 +556,7 @@ void test_cross_thread_wake_hammer() {
 
             // Keeper: holds the fd registration alive until all events fire
             auto keeper = [&]() -> cot::task<> {
-                co_await cot::readable(pipefd[0]);
+                co_await cot::readable(rfd);
             };
             auto kt = keeper();
 
@@ -610,8 +596,6 @@ void test_cross_thread_wake_hammer() {
         for (auto& t : triggers) {
             t.join();
         }
-        close(pipefd[0]);
-        close(pipefd[1]);
     }
     std::cerr << "cross_thread_wake_hammer: ok\n";
 }
@@ -630,27 +614,28 @@ void test_cross_thread_wake_repeated() {
         std::atomic<int> phase{0};
         cot::event* ev_ptrs[EVENTS];
 
-        int pipefd[2];
-        assert(pipe(pipefd) == 0);
-        cot::set_nonblocking(pipefd[0]);
-        cot::set_nonblocking(pipefd[1]);
+        int piperaw[2];
+        assert(pipe(piperaw) == 0);
+        cot::set_nonblocking(piperaw[0]);
+        cot::set_nonblocking(piperaw[1]);
 
-        std::thread thread_a([&] {
+        std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
             cot::set_real_time(true);
 
+            cot::fd rfd(r), wfd(w);
             cot::event events[EVENTS];
             for (int i = 0; i < EVENTS; ++i) {
                 ev_ptrs[i] = &events[i];
             }
 
             auto fn = [&]() -> cot::task<> {
-                auto readable_ev = cot::readable(pipefd[0]);
+                auto readable_ev = cot::readable(rfd);
                 for (int i = 0; i < EVENTS; ++i) {
                     // Signal thread B: ready for event i
                     phase.store(i + 1, std::memory_order_release);
                     co_await events[i];
                 }
-                ssize_t nw = ::write(pipefd[1], "x", 1);
+                ssize_t nw = ::write(wfd.fileno(), "x", 1);
                 assert(nw == 1);
                 co_await readable_ev;
             };
@@ -678,8 +663,6 @@ void test_cross_thread_wake_repeated() {
 
         thread_a.join();
         thread_b.join();
-        close(pipefd[0]);
-        close(pipefd[1]);
     }
     std::cerr << "cross_thread_wake_repeated: ok\n";
 }
@@ -707,21 +690,22 @@ void test_cross_thread_wake_race() {
         std::atomic<int> phase{0};
         cot::event* ev_ptr = nullptr;
 
-        int pipefd[2];
-        assert(pipe(pipefd) == 0);
-        cot::set_nonblocking(pipefd[0]);
-        cot::set_nonblocking(pipefd[1]);
+        int piperaw[2];
+        assert(pipe(piperaw) == 0);
+        cot::set_nonblocking(piperaw[0]);
+        cot::set_nonblocking(piperaw[1]);
 
-        std::thread thread_a([&] {
+        std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
             cot::set_real_time(true);
 
+            cot::fd rfd(r), wfd(w);
             cot::event ev;
             ev_ptr = &ev;
 
             auto fn = [&]() -> cot::task<> {
-                auto readable_ev = cot::readable(pipefd[0]);
+                auto readable_ev = cot::readable(rfd);
                 co_await ev;
-                ssize_t nw = ::write(pipefd[1], "x", 1);
+                ssize_t nw = ::write(wfd.fileno(), "x", 1);
                 assert(nw == 1);
                 co_await readable_ev;
             };
@@ -756,8 +740,6 @@ void test_cross_thread_wake_race() {
 
         thread_a.join();
         thread_b.join();
-        close(pipefd[0]);
-        close(pipefd[1]);
     }
     std::cerr << "cross_thread_wake_race: ok\n";
 }

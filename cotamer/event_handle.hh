@@ -7,8 +7,10 @@
 //    required in order to declare the public cotamer::event class.
 
 namespace cotamer {
+class driver;
 namespace detail {
 struct event_body;
+struct fd_body;
 struct quorum_event_body;
 template <typename T> struct task_promise;
 template <typename T> struct task_awaiter;
@@ -52,39 +54,41 @@ struct fd_update {
 class fd_event_set {
 public:
     fd_event_set() = default;
-    ~fd_event_set();
     fd_event_set(const fd_event_set&) = delete;
     fd_event_set(fd_event_set&&) = delete;
     fd_event_set& operator=(const fd_event_set&) = delete;
     fd_event_set& operator=(fd_event_set&&) = delete;
+    void deref_all(driver*);
+    ~fd_event_set();
 
     static constexpr unsigned empty_epoch = 0;
     static constexpr unsigned internal_epoch = 1;
     static constexpr unsigned user_epoch = 2;
 
-    inline event_handle watch(int fd, int type);
+    inline event_handle watch(int fd, int type, fd_body* body, driver*);
     inline event_handle take(int fd, int type, unsigned epoch);
-    inline std::optional<fd_update> forget(int fd) noexcept;
+    inline std::optional<std::pair<fd_body*, unsigned>> check_fd_close(int fd);
 
     inline bool has_update() const noexcept;
     inline std::optional<fd_update> pop_update() noexcept;
     inline std::optional<fd_update> next_nonempty(int fd) const noexcept;
 
-    void clear();
-
 private:
     static constexpr unsigned first_capacity = 128;
     static constexpr unsigned block_capacity = 1024;
 
-    // Intrusive singly-linked update list. Link values are fd+1
-    // (so fd 0 maps to 1); update_clean means not in list,
+    // update_link_ values: singly-linked list of fdrecs with interest
+    // potentially updated relative to the OS kernel event notifier. Link values
+    // are fd+1 (so fd 0 maps to 1); update_clean means not in list,
     // update_sentinel means end of list or empty list head.
     static constexpr unsigned update_sentinel = -1;
     static constexpr unsigned update_clean = 0;
+
     struct fdrec {
         event_handle ev[3];         // 0: readable, 1: writable, 2: closed
+        fd_body* body = nullptr;    // weak ref to owning fd_body
         unsigned update_link_ = update_clean;
-        unsigned epoch = 0;         // used to avoid epoll API difficulties
+        unsigned epoch = 0;
 
         inline int mask() const noexcept {
             return (ev[0] ? 1 : 0) | (ev[1] ? 2 : 0) | (ev[2] ? 4 : 0);

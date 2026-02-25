@@ -30,28 +30,19 @@ inline void set_nonblocking(int fd) {
 
 class tcp_stream {
 public:
-    explicit tcp_stream(int fd) : fd_(fd) {
-        set_nonblocking(fd_);
+    explicit tcp_stream(cotamer::fd f) : fd_(std::move(f)) {
+        set_nonblocking(fd_.fileno());
         int flag = 1;
-        setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(fd_.fileno(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     }
 
-    tcp_stream(tcp_stream&& x) noexcept : fd_(std::exchange(x.fd_, -1)) {}
-
-    tcp_stream& operator=(tcp_stream&& x) noexcept {
-        if (this != &x) {
-            close();
-            fd_ = std::exchange(x.fd_, -1);
-        }
-        return *this;
-    }
+    tcp_stream(tcp_stream&& x) noexcept = default;
+    tcp_stream& operator=(tcp_stream&& x) noexcept = default;
 
     tcp_stream(const tcp_stream&) = delete;
     tcp_stream& operator=(const tcp_stream&) = delete;
 
-    ~tcp_stream() {
-        close();
-    }
+    ~tcp_stream() = default;
 
     // Send a length-prefixed message.
     task<> send_frame(const void* data, size_t len) {
@@ -101,23 +92,19 @@ public:
         co_return buf;
     }
 
-    int fd() const { return fd_; }
+    const cotamer::fd& fd() const { return fd_; }
 
     void close() {
-        if (fd_ >= 0) {
-            forget_fd(fd_);
-            ::close(fd_);
-            fd_ = -1;
-        }
+        fd_.close();
     }
 
 private:
-    int fd_ = -1;
+    cotamer::fd fd_;
 };
 
 
 // Create a non-blocking listening socket bound to host:port.
-inline int tcp_listen(const char* host, uint16_t port, int backlog = 128) {
+inline cotamer::fd tcp_listen(const char* host, uint16_t port, int backlog = 128) {
     struct addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -128,37 +115,37 @@ inline int tcp_listen(const char* host, uint16_t port, int backlog = 128) {
         throw std::runtime_error("tcp_listen: getaddrinfo failed");
     }
 
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
+    int raw = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (raw < 0) {
         freeaddrinfo(res);
         throw std::runtime_error("tcp_listen: socket failed");
     }
     int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(raw, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    if (bind(fd, res->ai_addr, res->ai_addrlen) < 0) {
+    if (bind(raw, res->ai_addr, res->ai_addrlen) < 0) {
         freeaddrinfo(res);
-        ::close(fd);
+        ::close(raw);
         throw std::runtime_error(std::string("tcp_listen: bind failed: ") + strerror(errno));
     }
     freeaddrinfo(res);
 
-    if (listen(fd, backlog) < 0) {
-        ::close(fd);
+    if (listen(raw, backlog) < 0) {
+        ::close(raw);
         throw std::runtime_error("tcp_listen: listen failed");
     }
-    set_nonblocking(fd);
-    return fd;
+    set_nonblocking(raw);
+    return cotamer::fd(raw);
 }
 
 
 // Accept a connection and return a tcp_stream.
-inline task<tcp_stream> tcp_accept(int listen_fd) {
-    int fd = co_await async_accept(listen_fd);
-    if (fd < 0) {
+inline task<tcp_stream> tcp_accept(const cotamer::fd& listen_fd) {
+    auto f = co_await async_accept(listen_fd);
+    if (!f) {
         throw std::runtime_error("tcp_accept failed");
     }
-    co_return tcp_stream(fd);
+    co_return tcp_stream(std::move(f));
 }
 
 
@@ -173,20 +160,20 @@ inline task<tcp_stream> tcp_connect(const char* host, uint16_t port) {
         throw std::runtime_error("tcp_connect: getaddrinfo failed");
     }
 
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) {
+    int raw = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (raw < 0) {
         freeaddrinfo(res);
         throw std::runtime_error("tcp_connect: socket failed");
     }
-    set_nonblocking(fd);
+    set_nonblocking(raw);
 
-    int r = co_await async_connect(fd, res->ai_addr, res->ai_addrlen);
+    cotamer::fd f(raw);
+    int r = co_await async_connect(f, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     if (r < 0) {
-        ::close(fd);
         throw std::runtime_error("tcp_connect: connect failed");
     }
-    co_return tcp_stream(fd);
+    co_return tcp_stream(std::move(f));
 }
 
 } // namespace cotamer

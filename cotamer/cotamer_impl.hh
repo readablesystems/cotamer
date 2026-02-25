@@ -1,5 +1,6 @@
 #pragma once
 #include "cotamer/small_vector.hh"
+#include <unistd.h>
 #if defined(__x86_64__)
 #include <xmmintrin.h>
 #endif
@@ -39,6 +40,84 @@ inline void spinlock_hint() {
     asm volatile("yield");
 #endif
 }
+
+// fd_body
+//    Reference-counted body for cotamer::fd. Strong refs represent ownership;
+//    weak refs are held by fd_event_set::fdrec entries. When the last strong
+//    ref drops, the fd is closed and all associated events are triggered.
+
+struct fd_body {
+    std::atomic<int> fd_;
+    int base_fd_;
+    std::atomic<uint32_t> ref_ = 1;
+    std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
+    small_vector<driver*, 1> drivers_;
+
+    static constexpr uint32_t wr_lock = 1;
+
+    explicit fd_body(int raw) : fd_(raw), base_fd_(raw) {}
+    fd_body(const fd_body&) = delete;
+    fd_body(fd_body&&) = delete;
+    fd_body& operator=(const fd_body&) = delete;
+    fd_body& operator=(fd_body&&) = delete;
+    ~fd_body() { ::close(base_fd_); }
+
+    inline int base_fileno() const noexcept {
+        return base_fd_;
+    }
+
+    inline int fileno() const noexcept {
+        return fd_.load(std::memory_order_relaxed);
+    }
+
+    inline void ref() noexcept {
+        ref_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inline void add_listener(driver* d) noexcept {
+        lock();
+        drivers_.push_back(d);
+        unlock();
+    }
+
+    inline void remove_listener(driver* d) noexcept {
+        lock();
+        for (auto& dx : drivers_) {
+            if (dx == d) {
+                dx = drivers_.back();
+                drivers_.pop_back();
+                break;
+            }
+        }
+        bool del = drivers_.empty()
+            && ref_.load(std::memory_order_acquire) == 0;
+        unlock();
+        if (del) {
+            delete this;
+        }
+    }
+
+    inline void deref() noexcept {
+        if (ref_.load(std::memory_order_acquire) == 1) {
+            deref_close(true);
+        } else {
+            ref_.fetch_sub(1, std::memory_order_release);
+        }
+    }
+
+    void deref_close(bool deref);         // non-inline, in cotamer.cc
+
+    inline void lock() {
+        while (lock_.test_and_set(std::memory_order_acquire)) {
+            spinlock_hint();
+        }
+    }
+
+    inline void unlock() {
+        lock_.clear(std::memory_order_release);
+    }
+};
+
 
 // task_promise<T>
 //    This structure is part of the C++ coroutine machinery. Coroutines don’t
@@ -1042,8 +1121,8 @@ inline void driver::after(const std::chrono::duration<Rep, Period>& d, event e) 
     at(steady_now() + std::chrono::duration_cast<duration>(d), std::move(e));
 }
 
-inline event driver::fd(int fd, fdi type) {
-    return fds_.watch(fd, int(type));
+inline event driver::file_event(const cotamer::fd& f, fdi type) {
+    return fds_.watch(f.fileno(), int(type), f.body(), this);
 }
 
 
@@ -1087,16 +1166,16 @@ inline event after(const std::chrono::duration<Rep, Period>& d) {
     return driver::main->after(d);
 }
 
-inline event readable(int fd) {
-    return driver::main->fd(fd, fdi::read);
+inline event readable(const fd& f) {
+    return driver::main->file_event(f, fdi::read);
 }
 
-inline event writable(int fd) {
-    return driver::main->fd(fd, fdi::write);
+inline event writable(const fd& f) {
+    return driver::main->file_event(f, fdi::write);
 }
 
-inline event closed(int fd) {
-    return driver::main->fd(fd, fdi::close);
+inline event closed(const fd& f) {
+    return driver::main->file_event(f, fdi::close);
 }
 
 
@@ -1206,14 +1285,6 @@ inline void clear() {
     driver::main->clear();
 }
 
-inline void forget_fd(int fd) {
-    driver::main->forget_fd(fd);
-}
-
-inline int close_fd(int fd) {
-    return driver::main->close_fd(fd);
-}
-
 inline uint32_t driver::lock() {
     while (true) {
         uint32_t flags = lock_.load(std::memory_order_relaxed);
@@ -1238,11 +1309,8 @@ inline size_t driver::timer_size() const {
 
 namespace detail {
 
-inline fd_event_set::~fd_event_set() {
-    clear();
-}
-
-inline event_handle fd_event_set::watch(int fd, int interest) {
+inline event_handle fd_event_set::watch(int fd, int interest, fd_body* body,
+                                        driver* drv) {
     if (fd < 0) {
         return event_handle();
     }
@@ -1251,6 +1319,19 @@ inline event_handle fd_event_set::watch(int fd, int interest) {
         hard_ensure(ufd);
     }
     fdrec& fdi = fdrs_[ufd];
+    if (fdi.body != body) {
+        if (fdi.body) {
+            for (int ix = 0; ix != 3; ++ix) {
+                if (fdi.ev[ix]) {
+                    fdi.ev[ix]->trigger();
+                    fdi.ev[ix] = nullptr;
+                }
+            }
+            fdi.body->remove_listener(drv);
+        }
+        fdi.body = body;
+        body->add_listener(drv);
+    }
     if (!fdi.ev[interest]) {
         if (fdi.update_link_ == update_clean) {
             fdi.update_link_ = update_link_;
@@ -1279,20 +1360,23 @@ inline event_handle fd_event_set::take(int fd, int interest, unsigned epoch) {
     return std::exchange(fdi.ev[interest], nullptr);
 }
 
-inline std::optional<fd_update> fd_event_set::forget(int fd) noexcept {
+inline std::optional<std::pair<fd_body*, unsigned>> fd_event_set::check_fd_close(int fd) {
     unsigned ufd = fd;
     if (ufd >= capacity_) {
         return std::nullopt;
     }
     fdrec& fdi = fdrs_[ufd];
-    int mask = fdi.mask();
-    if (mask == 0) {
+    if (!fdi.body || fdi.body->fileno() >= 0) {
         return std::nullopt;
     }
-    unsigned epoch = fdi.epoch;
-    fdi.ev[0] = fdi.ev[1] = fdi.ev[2] = nullptr;
+    for (int ix = 0; ix != 3; ++ix) {
+        if (fdi.ev[ix]) {
+            fdi.ev[ix]->trigger();
+            fdi.ev[ix] = nullptr;
+        }
+    }
     ++fdi.epoch;
-    return {{fd, 0, epoch}};
+    return {{std::exchange(fdi.body, nullptr), fdi.epoch - 1}};
 }
 
 inline bool fd_event_set::has_update() const noexcept {
@@ -1334,6 +1418,71 @@ inline std::optional<fd_update> fd_event_set::next_nonempty(int fd) const noexce
     }
 }
 
+}
+
+
+// fd methods
+
+inline fd::fd(int rawfd)
+    : body_(rawfd >= 0 ? new detail::fd_body(rawfd) : nullptr) {
+}
+
+inline fd::fd(const fd& x) noexcept
+    : body_(x.body_) {
+    if (body_) {
+        body_->ref();
+    }
+}
+
+inline fd::fd(fd&& x) noexcept
+    : body_(std::exchange(x.body_, nullptr)) {
+}
+
+inline fd& fd::operator=(const fd& x) {
+    if (body_ != x.body_) {
+        if (x.body_) {
+            x.body_->ref();
+        }
+        if (body_) {
+            body_->deref();
+        }
+        body_ = x.body_;
+    }
+    return *this;
+}
+
+inline fd& fd::operator=(fd&& x) noexcept {
+    if (this != &x) {
+        if (body_) {
+            body_->deref();
+        }
+        body_ = std::exchange(x.body_, nullptr);
+    }
+    return *this;
+}
+
+inline fd::~fd() {
+    if (body_) {
+        body_->deref();
+    }
+}
+
+inline int fd::fileno() const noexcept {
+    return body_ ? body_->fileno() : -1;
+}
+
+inline bool fd::valid() const noexcept {
+    return fileno() >= 0;
+}
+
+inline fd::operator bool() const noexcept {
+    return fileno() >= 0;
+}
+
+inline void fd::close() {
+    if (body_) {
+        body_->deref_close(false);
+    }
 }
 
 
