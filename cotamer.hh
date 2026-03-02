@@ -116,34 +116,6 @@ template <typename... Es>
 [[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
 
 
-// fd
-//    A reference-counted file descriptor with RAII close semantics. When
-//    the last strong reference is dropped, the underlying fd is closed and
-//    all associated events (readable, writable, closed) are triggered.
-//    Copies share ownership (like shared_ptr). Use close() to close early.
-
-class fd {
-public:
-    fd() = default;
-    explicit inline fd(int rawfd);
-    inline fd(const fd&) noexcept;
-    inline fd(fd&&) noexcept;
-    inline fd& operator=(const fd&);
-    inline fd& operator=(fd&&) noexcept;
-    inline ~fd();
-
-    int fileno() const noexcept;
-    bool valid() const noexcept;
-    explicit operator bool() const noexcept;
-    void close();
-
-    detail::fd_body* body() const noexcept { return body_; }
-
-private:
-    detail::fd_body* body_ = nullptr;
-};
-
-
 // driver
 //    The event loop. Maintains a queue of ready coroutines, a queue of
 //    “asap” events (triggered before the next time step), and a timer heap.
@@ -157,7 +129,8 @@ using system_time_point = std::chrono::system_clock::time_point;
 using steady_time_point = std::chrono::steady_clock::time_point;
 using duration = std::chrono::steady_clock::duration;
 
-enum class fdi { read = 0, write = 1, close = 2 };
+enum class clock { virtual_time = 0, real_time = 0 };
+enum class fdevent { read = 0, write = 1, close = 2 };
 
 class driver {
 public:
@@ -168,8 +141,8 @@ public:
     driver& operator=(const driver&) = delete;
     driver& operator=(driver&&) = delete;
 
-    inline bool real_time() const noexcept;
-    inline void set_real_time(bool real_time);
+    inline cotamer::clock clock() const noexcept;
+    inline void set_clock(cotamer::clock);
 
     inline system_time_point now() noexcept;        // current system time (might go backwards)
     inline steady_time_point steady_now() noexcept; // time since boot (monotonic)
@@ -187,7 +160,7 @@ public:
     inline void after(const std::chrono::duration<Rep, Period>&, event);
     template <typename Rep, typename Period>
     inline event after(const std::chrono::duration<Rep, Period>&);
-    inline event file_event(const cotamer::fd& f, fdi type);
+    inline event file_event(const cotamer::fd& f, fdevent type);
     inline void notify_close(int base_fileno);
 
     void loop();
@@ -203,7 +176,7 @@ private:
     friend struct detail::event_body;
     friend struct detail::fd_body;
     template <typename T> friend struct detail::task_final_awaiter;
-    friend void set_real_time(bool);
+    friend void set_clock(cotamer::clock);
 
     system_time_point virtual_epoch_;
     steady_time_point snow_;
@@ -240,9 +213,12 @@ private:
 };
 
 
-// Time and scheduling functions (operate on driver::main).
+// Time and scheduling functions (operate on driver::main)
 
-inline void set_real_time(bool real_time);
+inline void set_clock(clock);
+inline void loop();                    // run event loop until quiescent
+inline void clear();                   // cancel all pending events
+void reset();                          // destroy and recreate driver
 
 inline system_time_point now() noexcept;
 inline steady_time_point steady_now() noexcept;
@@ -255,13 +231,37 @@ inline event after(const std::chrono::duration<Rep, Period>&);
 inline event at(steady_time_point);    // triggers at an absolute time
 inline event at(system_time_point);    // triggers at an absolute system time
 
+
+// fd
+//    A reference-counted file descriptor with RAII close semantics. When
+//    the last strong reference is dropped, the underlying fd is closed and
+//    all associated events (readable, writable, closed) are triggered.
+//    Use close() to close early.
+
+class fd {
+public:
+    fd() = default;
+    explicit inline fd(int rawfd);
+    inline fd(const fd&) noexcept;
+    inline fd(fd&&) noexcept;
+    inline fd& operator=(const fd&);
+    inline fd& operator=(fd&&) noexcept;
+    inline ~fd();
+
+    int fileno() const noexcept;
+    bool valid() const noexcept;
+    explicit operator bool() const noexcept;
+    void close();
+
+    detail::fd_body* body() const noexcept { return body_; }
+
+private:
+    detail::fd_body* body_ = nullptr;
+};
+
 inline event readable(const fd&);      // triggers when `read(fd)` won't block
 inline event writable(const fd&);      // triggers when `write(fd)` won't block
 inline event closed(const fd&);        // triggers when `fd` errors or closes
-
-inline void loop();                    // run event loop until quiescent
-inline void clear();                   // cancel all pending events
-void reset();                          // destroy and recreate driver
 
 
 // mutex, mutex_event, unique_lock, shared_lock

@@ -8,6 +8,7 @@
 
 namespace cotamer {
 class driver;
+class fd;
 namespace detail {
 struct event_body;
 struct fd_body;

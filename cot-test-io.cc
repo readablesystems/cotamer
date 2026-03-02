@@ -28,14 +28,14 @@ cot::task<> test_pipe_readwrite() {
     // Writer: write to the pipe
     auto writer = [&]() -> cot::task<> {
         const char* msg = "hello from pipe";
-        auto r = co_await cot::async_write(wfd, msg, strlen(msg));
+        auto r = co_await cot::write(wfd, msg, strlen(msg));
         assert(r == static_cast<ssize_t>(strlen(msg)));
     };
 
     // Reader: read from the pipe
     auto reader = [&]() -> cot::task<> {
         char buf[64] = {};
-        auto r = co_await cot::async_read(rfd, buf, sizeof(buf));
+        auto r = co_await cot::read_once(rfd, buf, sizeof(buf));
         assert(r > 0);
         assert(std::string(buf, r) == "hello from pipe");
         std::cerr << "pipe_readwrite: read \"" << std::string(buf, r) << "\"\n";
@@ -339,13 +339,13 @@ void test_close_wakes_reader() {
         int raw1 = sockraw[1];
 
         std::thread reader([&, raw0 = sockraw[0]] {
-            cot::set_real_time(true);
+            cot::set_clock(cot::clock::virtual_time);
 
             cot::fd sfd(raw0);
             ssize_t result = -99;
             auto fn = [&]() -> cot::task<> {
                 char buf[64];
-                result = co_await cot::async_read(sfd, buf, sizeof(buf));
+                result = co_await cot::read_once(sfd, buf, sizeof(buf));
             };
             auto t = fn();
 
@@ -397,13 +397,13 @@ void test_shutdown_wakes_reader() {
         int raw0 = sockraw[0], raw1 = sockraw[1];
 
         std::thread reader([&, raw0] {
-            cot::set_real_time(true);
+            cot::set_clock(cot::clock::real_time);
 
             cot::fd sfd(raw0);
             ssize_t result = -99;
             auto fn = [&]() -> cot::task<> {
                 char buf[64];
-                result = co_await cot::async_read(sfd, buf, sizeof(buf));
+                result = co_await cot::read_once(sfd, buf, sizeof(buf));
             };
             auto t = fn();
 
@@ -468,7 +468,7 @@ void test_cross_thread_wake() {
         cot::set_nonblocking(piperaw[1]);
 
         std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
-            cot::set_real_time(true);
+            cot::set_clock(cot::clock::real_time);
 
             cot::fd rfd(r), wfd(w);
             cot::event ev;
@@ -532,7 +532,7 @@ void test_cross_thread_wake_hammer() {
         cot::set_nonblocking(piperaw[1]);
 
         std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
-            cot::set_real_time(true);
+            cot::set_clock(cot::clock::real_time);
             int resume_count = 0;
 
             cot::fd rfd(r), wfd(w);
@@ -620,7 +620,7 @@ void test_cross_thread_wake_repeated() {
         cot::set_nonblocking(piperaw[1]);
 
         std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
-            cot::set_real_time(true);
+            cot::set_clock(cot::clock::real_time);
 
             cot::fd rfd(r), wfd(w);
             cot::event events[EVENTS];
@@ -696,7 +696,7 @@ void test_cross_thread_wake_race() {
         cot::set_nonblocking(piperaw[1]);
 
         std::thread thread_a([&, r = piperaw[0], w = piperaw[1]] {
-            cot::set_real_time(true);
+            cot::set_clock(cot::clock::real_time);
 
             cot::fd rfd(r), wfd(w);
             cot::event ev;
@@ -747,7 +747,7 @@ void test_cross_thread_wake_race() {
 
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
-    cot::set_real_time(true);
+    cot::set_clock(cot::clock::real_time);
 
     auto run = [&](const char* name, auto fn) {
         bool found = argc == 1;

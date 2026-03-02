@@ -47,12 +47,12 @@ public:
     // Send a length-prefixed message.
     task<> send_frame(const void* data, size_t len) {
         uint32_t net_len = htonl(static_cast<uint32_t>(len));
-        auto r = co_await async_write(fd_, &net_len, sizeof(net_len));
+        auto r = co_await write(fd_, &net_len, sizeof(net_len));
         if (r != sizeof(net_len)) {
             throw std::runtime_error("tcp_stream: send_frame header failed");
         }
         if (len > 0) {
-            r = co_await async_write(fd_, data, len);
+            r = co_await write(fd_, data, len);
             if (r != static_cast<ssize_t>(len)) {
                 throw std::runtime_error("tcp_stream: send_frame payload failed");
             }
@@ -66,7 +66,7 @@ public:
         size_t hdr_read = 0;
         char* hdr_buf = reinterpret_cast<char*>(&net_len);
         while (hdr_read < sizeof(net_len)) {
-            auto r = co_await async_read(fd_, hdr_buf + hdr_read,
+            auto r = co_await read_once(fd_, hdr_buf + hdr_read,
                                          sizeof(net_len) - hdr_read);
             if (r <= 0) {
                 co_return std::vector<char>{};
@@ -82,7 +82,7 @@ public:
         std::vector<char> buf(len);
         size_t payload_read = 0;
         while (payload_read < len) {
-            auto r = co_await async_read(fd_, buf.data() + payload_read,
+            auto r = co_await read_once(fd_, buf.data() + payload_read,
                                          len - payload_read);
             if (r <= 0) {
                 co_return std::vector<char>{};
@@ -141,7 +141,7 @@ inline cotamer::fd tcp_listen(const char* host, uint16_t port, int backlog = 128
 
 // Accept a connection and return a tcp_stream.
 inline task<tcp_stream> tcp_accept(const cotamer::fd& listen_fd) {
-    auto f = co_await async_accept(listen_fd);
+    auto f = co_await accept(listen_fd);
     if (!f) {
         throw std::runtime_error("tcp_accept failed");
     }
@@ -168,7 +168,7 @@ inline task<tcp_stream> tcp_connect(const char* host, uint16_t port) {
     set_nonblocking(raw);
 
     cotamer::fd f(raw);
-    int r = co_await async_connect(f, res->ai_addr, res->ai_addrlen);
+    int r = co_await connect(f, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     if (r < 0) {
         throw std::runtime_error("tcp_connect: connect failed");

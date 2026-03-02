@@ -1,10 +1,10 @@
 #pragma once
 #include "cotamer/small_vector.hh"
 #include <unistd.h>
-#if defined(__x86_64__)
-#include <xmmintrin.h>
-#endif
 #include <system_error>
+#if defined(__x86_64__)
+# include <xmmintrin.h>
+#endif
 
 
 // cotamer_impl.hh
@@ -60,7 +60,11 @@ struct fd_body {
     fd_body(fd_body&&) = delete;
     fd_body& operator=(const fd_body&) = delete;
     fd_body& operator=(fd_body&&) = delete;
-    ~fd_body() { ::close(base_fd_); }
+    ~fd_body() {
+        if (base_fd_ >= 0) {
+            ::close(base_fd_);
+        }
+    }
 
     inline int base_fileno() const noexcept {
         return base_fd_;
@@ -1044,12 +1048,12 @@ inline detail::task_awaiter<T> task<T>::operator co_await() const noexcept {
 
 // driver methods
 
-inline bool driver::real_time() const noexcept {
-    return real_time_;
+inline clock driver::clock() const noexcept {
+    return real_time_ ? cotamer::clock::real_time : cotamer::clock::virtual_time;
 }
 
-inline void driver::set_real_time(bool real_time) {
-    real_time_ = real_time;
+inline void driver::set_clock(cotamer::clock ct) {
+    real_time_ = (ct == cotamer::clock::real_time);
 }
 
 inline system_time_point driver::now() noexcept {
@@ -1121,16 +1125,17 @@ inline void driver::after(const std::chrono::duration<Rep, Period>& d, event e) 
     at(steady_now() + std::chrono::duration_cast<duration>(d), std::move(e));
 }
 
-inline event driver::file_event(const cotamer::fd& f, fdi type) {
+inline event driver::file_event(const cotamer::fd& f, fdevent type) {
     return fds_.watch(f.fileno(), int(type), f.body(), this);
 }
 
 
 // free functions
 
-inline void set_real_time(bool real_time) {
-    driver::global_real_time = real_time;
-    driver::main->set_real_time(real_time);
+inline void set_clock(cotamer::clock ct) {
+    bool is_real = ct == cotamer::clock::real_time;
+    driver::global_real_time = is_real;
+    driver::main->set_clock(ct);
 }
 
 inline system_time_point now() noexcept {
@@ -1167,15 +1172,15 @@ inline event after(const std::chrono::duration<Rep, Period>& d) {
 }
 
 inline event readable(const fd& f) {
-    return driver::main->file_event(f, fdi::read);
+    return driver::main->file_event(f, fdevent::read);
 }
 
 inline event writable(const fd& f) {
-    return driver::main->file_event(f, fdi::write);
+    return driver::main->file_event(f, fdevent::write);
 }
 
 inline event closed(const fd& f) {
-    return driver::main->file_event(f, fdi::close);
+    return driver::main->file_event(f, fdevent::close);
 }
 
 
