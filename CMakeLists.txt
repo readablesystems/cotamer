@@ -28,6 +28,7 @@ endif()
 
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
+    cotamer/io.cc
 )
 
 add_executable(cot-test
@@ -37,6 +38,11 @@ add_executable(cot-test
 
 add_executable(cot-test-threads
     test/cot-test-threads.cc
+    $<TARGET_OBJECTS:Cotamer>
+)
+
+add_executable(cot-test-io
+    test/cot-test-io.cc
     $<TARGET_OBJECTS:Cotamer>
 )
 

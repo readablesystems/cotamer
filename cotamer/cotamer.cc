@@ -1,7 +1,11 @@
 #include "cotamer.hh"
 #include <iterator>
 #include <memory>
+#include <fcntl.h>
 #include <thread>
+#include <unistd.h>
+
+using namespace std::chrono_literals;
 
 namespace cotamer {
 
@@ -11,7 +15,20 @@ statistics stats;
 
 
 inline void driver::migrate_wake() {
-    // to be added
+#if !COTAMER_USE_POLL
+    int wakefd = wakefd_.load(std::memory_order_seq_cst);
+    if (wakefd >= 0) {
+# if COTAMER_USE_KQUEUE
+        struct kevent ev;
+        EV_SET(&ev, -1, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
+        kevent(wakefd, &ev, 1, nullptr, 0, nullptr);
+# elif COTAMER_USE_EPOLL
+        uint64_t val = 1;
+        ssize_t nw = ::write(wakefd, &val, sizeof(val));
+        (void) nw;
+# endif
+    }
+#endif
 }
 
 void driver::migrate_asap(detail::event_handle eh) {
@@ -21,18 +38,29 @@ void driver::migrate_asap(detail::event_handle eh) {
     migrate_wake();
 }
 
+void driver::migrate_fd_close(int base_fd) {
+    auto df = lock();
+    migrate_fd_close_.emplace_back(base_fd);
+    unlock(df | driver::df_nonempty);
+    migrate_wake();
+}
+
 
 // driver methods
 
 thread_local std::unique_ptr<driver> driver::current{new driver};
+std::atomic<bool> driver::global_real_time;
 
 driver::driver()
-    : virtual_epoch_(std::chrono::system_clock::from_time_t(1634070069)) {
+    : virtual_epoch_(std::chrono::system_clock::from_time_t(1634070069)),
+      real_time_(global_real_time.load(std::memory_order_relaxed)) {
 }
 
 driver::~driver() {
     if (!asap_.empty()
         || !timed_.empty()
+        || fds_.has_update()
+        || nfdctl_ != 0
         || lock_.load(std::memory_order_relaxed)
         || guard_count_ > 0
         || !keepalives_.empty()) {
@@ -40,9 +68,18 @@ driver::~driver() {
         clear();
         loop();
     }
+    fds_.deref_all(this);
+    if (epoll_wakefd_ >= 0) {
+        ::close(epoll_wakefd_);
+    }
+    if (pollfd_ >= 0) {
+        ::close(pollfd_);
+    }
 }
 
 void driver::loop(looptype lt) {
+    detail::fd_batch fdb;
+
     while (true) {
         // import migrated tasks and fd close events
         if (lock_.load(std::memory_order_relaxed) != 0) {
@@ -59,6 +96,11 @@ void driver::loop(looptype lt) {
             }
         }
 
+        // register changes in interested file descriptor set
+        while (auto fdu = fds_.pop_update()) {
+            apply_fd_update(fdb, *fdu);
+        }
+
         // remove dead keepalives
         while (!keepalives_.empty() && keepalives_.back()->triggered()) {
             keepalives_.pop_back();
@@ -67,15 +109,41 @@ void driver::loop(looptype lt) {
         // exit if nothing to do
         timed_.cull();
         if (timed_.empty()
+            && nfdctl_ == 0
             && !lock_.load(std::memory_order_relaxed)
             && guard_count_ == 0
             && keepalives_.empty()) {
             break;
         }
 
+        // compute timeout
+        duration timeout;
+        if (!asap_.empty()
+            || !real_time_
+            || lock_.load(std::memory_order_relaxed)
+            || lt == looptype::poll) {
+            timeout = duration::zero();
+        } else if (!timed_.empty()) {
+            timeout = timed_.top_time() - steady_now();
+        } else {
+            timeout = duration(1h);
+        }
+
+        // block or poll for file descriptor events
+        bool had_fd_event = false;
+        if (nfdctl_ == 0 && timeout <= duration::zero()) {
+            fdb.clear(pollfd_);
+        } else {
+            // call kqueue/epoll/poll, process batch of returned events
+            had_fd_event = watch_fds(fdb, timeout);
+        }
+
         // update time
-        if (!timed_.empty()
-            && asap_.empty()) {
+        if (real_time_) {
+            snow_ = steady_now();
+        } else if (!timed_.empty()
+                   && asap_.empty()
+                   && !had_fd_event) {
             snow_ = timed_.top_time();
         }
 
@@ -100,12 +168,17 @@ void driver::loop(looptype lt) {
 
 void driver::finish_migrate() {
     std::vector<detail::event_handle> migrate;
+    std::vector<int> migrate_fd_close;
 
     uint32_t flags = lock();
     migrate_.swap(migrate);
+    migrate_fd_close_.swap(migrate_fd_close);
     unlock(flags & ~df_nonempty);
 
     std::move(migrate.begin(), migrate.end(), std::back_inserter(asap_));
+    for (auto base_fd : migrate_fd_close) {
+        notify_close(base_fd);
+    }
 }
 
 void driver::clear() {

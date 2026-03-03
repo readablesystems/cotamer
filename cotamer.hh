@@ -12,6 +12,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include "cotamer/timer_heap.hh"
 #include "cotamer/event_handle.hh"
 
@@ -132,6 +134,9 @@ using system_time_point = std::chrono::system_clock::time_point;
 using steady_time_point = std::chrono::steady_clock::time_point;
 using duration = std::chrono::steady_clock::duration;
 
+enum class clock { virtual_time = 0, real_time = 0 };
+enum class fdevent { read = 0, write = 1, close = 2 };
+
 class driver {
 public:
     driver();
@@ -140,6 +145,9 @@ public:
     driver(driver&&) = delete;
     driver& operator=(const driver&) = delete;
     driver& operator=(driver&&) = delete;
+
+    inline cotamer::clock clock() const noexcept;
+    inline void set_clock(cotamer::clock);
 
     inline system_time_point now() noexcept;        // current system time (might go backwards)
     inline steady_time_point steady_now() noexcept; // time since boot (monotonic)
@@ -161,6 +169,9 @@ public:
     template <typename Rep, typename Period>
     inline event after(const std::chrono::duration<Rep, Period>&);
 
+    inline event file_event(const cotamer::fd& f, fdevent type);
+    inline void notify_close(int base_fileno);
+
     inline void loop();
     inline void poll();
     void clear();
@@ -173,12 +184,15 @@ public:
 
 private:
     friend struct detail::event_body;
+    friend struct detail::fd_body;
     friend class driver_guard;
     template <typename T> friend struct detail::task_final_awaiter;
+    friend void set_clock(cotamer::clock);
 
     system_time_point virtual_epoch_;
     steady_time_point snow_;
     bool clearing_ = false;
+    bool real_time_ = false;
     int guard_count_ = 0;
     std::deque<detail::event_handle> asap_;
     timer_heap<detail::event_handle> timed_;
@@ -187,15 +201,31 @@ private:
     static constexpr uint32_t df_lock = 1;
     static constexpr uint32_t df_nonempty = 2;
     std::atomic<uint32_t> lock_ = 0;
+    std::atomic<int> wakefd_ = -1;
     std::vector<detail::event_handle> migrate_;
+    std::vector<int> migrate_fd_close_;
+
+    int pollfd_ = -1;
+    int epoll_wakefd_ = -1;
+    unsigned nfdctl_ = 0;
+    std::vector<uint64_t> fdctl_;
+    detail::fd_event_set fds_;
+
+    static std::atomic<bool> global_real_time;
 
     static constexpr size_t asap_quota = 0x1000; // run at most 4096 ASAP tasks per poll()
 
     inline uint32_t lock();
     inline void unlock(uint32_t flags);
     void migrate_asap(detail::event_handle eh);
+    void migrate_fd_close(int base_fd);
     inline void migrate_wake();
     void finish_migrate();
+
+    inline int pollfd();
+    void hard_pollfd();
+    void apply_fd_update(detail::fd_batch&, const detail::fd_update&);
+    bool watch_fds(detail::fd_batch&, duration timeout);
 
     enum class looptype { complete, poll };
     void loop(looptype);
@@ -204,6 +234,7 @@ private:
 
 // Time and scheduling functions (operate on driver::current)
 
+inline void set_clock(clock);
 inline void loop();                    // run event loop until quiescent
 inline void poll();                    // run event loop once without blocking
 inline void clear();                   // cancel all pending events
@@ -243,6 +274,54 @@ private:
 };
 
 
+// fd
+//    A reference-counted file descriptor with RAII close semantics. When
+//    the last strong reference is dropped, the underlying fd is closed and
+//    all associated events (readable, writable, closed) are triggered.
+//    Use close() to close early.
+
+class fd {
+public:
+    fd() = default;
+    explicit inline fd(int rawfd);
+    inline fd(const fd&) noexcept;
+    inline fd(fd&&) noexcept;
+    inline fd& operator=(const fd&);
+    inline fd& operator=(fd&&) noexcept;
+    inline ~fd();
+
+    int fileno() const noexcept;
+    bool valid() const noexcept;
+    explicit operator bool() const noexcept;
+    void close();
+
+    detail::fd_body* body() const noexcept { return body_; }
+
+private:
+    detail::fd_body* body_ = nullptr;
+};
+
+inline event readable(const fd&);      // triggers when `read(fd)` won't block
+inline event writable(const fd&);      // triggers when `write(fd)` won't block
+inline event closed(const fd&);        // triggers when `fd` errors or closes
+
+
+// File-related functions
+
+inline void set_nonblocking(int rawfd);
+inline task<ssize_t> read_once(const fd& f, void* buf, size_t n);
+inline task<ssize_t> write_once(const fd& f, const void* buf, size_t n);
+inline task<ssize_t> write(const fd& f, const void* buf, size_t n);
+
+inline task<int> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
+inline task<fd> accept(const fd& listen_fd);
+
+task<fd> tcp_listen(std::string address, int backlog = 128);
+task<fd> tcp_connect(std::string address);
+inline task<fd> tcp_accept(const fd& listen_fd);
+
+
+
 // Error codes and exception type.
 
 enum class cotamer_errc {
@@ -274,3 +353,4 @@ extern statistics stats;
 }
 
 #include "cotamer/cotamer_impl.hh"
+#include "cotamer/io.hh"
