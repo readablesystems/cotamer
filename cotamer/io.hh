@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 
 #if !COTAMER_USE_KQUEUE && !COTAMER_USE_EPOLL && !COTAMER_USE_POLL
@@ -115,6 +117,14 @@ inline task<fd> accept(const fd& listen_fd) {
         }
         co_await readable(listen_fd);
     }
+}
+
+inline task<fd> tcp_accept(const fd& listen_fd) {
+    auto f = co_await accept(listen_fd);
+    // disable Nagle’s algorithm
+    int flag = 1;
+    setsockopt(f.fileno(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    co_return std::move(f);
 }
 
 

@@ -422,8 +422,8 @@ task<cotamer::fd> tcp_listen(std::string address, int backlog) {
 
     // allow port number reuse
     if (rv >= 0) {
-        int opt = 1;
-        setsockopt(rawfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        int flag = 1;
+        setsockopt(rawfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
     }
 
     // bind
@@ -475,7 +475,11 @@ task<cotamer::fd> tcp_connect(std::string address) {
         freeaddrinfo(res);
         throw std::system_error(errno, std::generic_category());
     }
+
+    // nonblocking, disable Nagle’s algorithm
     set_nonblocking(rawfd);
+    int flag = 1;
+    setsockopt(rawfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     // associate with cotamer::fd container
     cotamer::fd f(rawfd);
@@ -487,7 +491,6 @@ task<cotamer::fd> tcp_connect(std::string address) {
         throw std::system_error(-rv, std::generic_category());
     }
 
-    // set nonblocking and return
     co_return std::move(f);
 }
 

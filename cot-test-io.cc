@@ -91,7 +91,7 @@ cot::task<> test_tcp_echo() {
     // Echo server: accept one connection, echo back one frame, then close
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         message_buffer readbuf(cfd, message_buffer::receiver);
         message_buffer writebuf(cfd, message_buffer::sender);
         auto frame = co_await readbuf.recv();
@@ -188,7 +188,7 @@ cot::task<> test_tcp_multi_frame() {
 
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         // Receive 3 messages and send them back reversed
         std::vector<std::string> frames;
         message_buffer readbuf(cfd, message_buffer::receiver);
