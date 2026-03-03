@@ -32,7 +32,7 @@ public:
                 co_await handle_try(m);
             }
         }
-        sender_.send(client_checksum() + " " + server_checksum());
+        co_await sender_.send(client_checksum() + " " + server_checksum());
         co_await cot::after(100ms);
         cot::clear();
     }

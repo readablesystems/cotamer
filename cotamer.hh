@@ -20,6 +20,9 @@
 // cotamer.hh
 //    Public interface to the Cotamer coroutine library.
 
+// Define COTAMER_STATS to 1 to collect statistics.
+#define COTAMER_STATS 1
+
 namespace cotamer {
 
 // event
@@ -80,12 +83,10 @@ public:
     task& operator=(const task&) = delete;
     inline ~task();
 
-    inline void detach();
-
-    inline event completion();
-    inline bool done();
-
-    inline void start();
+    inline void start();            // start a task waiting for interest{}
+    inline void detach();           // coroutine survives task<> deletion
+    inline bool done();             // has coroutine completed?
+    inline event completion();      // event that triggers on done()
 
     detail::task_awaiter<T> operator co_await() const noexcept;
 
@@ -483,6 +484,20 @@ private:
     cotamer_errc errc_;
     static constexpr const char* message(cotamer_errc ec) noexcept;
 };
+
+
+// Statistics.
+
+#if COTAMER_STATS
+struct stats {
+    std::atomic<size_t> promises_allocated;
+    std::atomic<size_t> promises_destroyed;
+    std::atomic<size_t> events_allocated;
+    std::atomic<size_t> events_destroyed;
+
+    static stats s;
+};
+#endif
 
 }
 

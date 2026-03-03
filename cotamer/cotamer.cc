@@ -9,6 +9,11 @@ using namespace std::chrono_literals;
 
 namespace cotamer {
 
+#if COTAMER_STATS
+stats stats::s;
+#endif
+
+
 inline void driver::migrate_wake() {
 #if !COTAMER_USE_POLL
     int wakefd = wakefd_.load(std::memory_order_seq_cst);

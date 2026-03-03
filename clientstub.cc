@@ -1,6 +1,7 @@
 #include "rpcgame.hh"
 #include "cotamer.hh"
 #include "message_stream.hh"
+size_t sent = 0, received = 0;
 
 namespace cot = cotamer;
 
@@ -22,7 +23,9 @@ public:
         memcpy(buf + 16, name, name_len);
         ++_serial;
         co_await sender_.send({buf, buf + 16 + name_len});
+        ++sent;
         auto m = co_await recver_.recv();
+        ++received;
         assert(m.size() == 8);
         uint64_t value;
         memcpy(&value, m.data(), 8);

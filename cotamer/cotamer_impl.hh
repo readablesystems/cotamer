@@ -14,6 +14,12 @@
 namespace cotamer {
 namespace detail {
 
+#if COTAMER_STATS
+# define COTAMER_STAT_INCR(x) cotamer::stats::s.x.fetch_add(1, std::memory_order_relaxed)
+#else
+# define COTAMER_STAT_INCR(x)
+#endif
+
 // mark a listener as a quorum
 constexpr uintptr_t lf_quorum = uintptr_t(1);
 
@@ -143,7 +149,12 @@ struct task_promise_base {
 
     inline task_promise_base()
         : home_(driver::current.get()) {
+        COTAMER_STAT_INCR(promises_allocated);
     }
+    inline ~task_promise_base() {
+        COTAMER_STAT_INCR(promises_destroyed);
+    }
+
     inline event_handle& make_interest();
 };
 
@@ -349,12 +360,12 @@ inline event make_event(interest);
 //    reference counts ensures everything works out.
 
 struct event_body {
-    event_body() = default;
+    inline event_body()    { COTAMER_STAT_INCR(events_allocated); }
+    inline ~event_body()   { COTAMER_STAT_INCR(events_destroyed); }
     event_body(const event_body&) = delete;
     event_body(event_body&&) = delete;
     event_body& operator=(const event_body&) = delete;
     event_body& operator=(event_body&&) = delete;
-    ~event_body() = default;
 
     void ref(uint32_t n = 1) noexcept {
         refcount_.fetch_add(n, std::memory_order_relaxed);

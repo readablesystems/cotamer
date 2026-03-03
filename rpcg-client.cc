@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "rpcgame.hh"
+#include "cotamer.hh"
+extern size_t sent, received;
 
 using steady_time_point = std::chrono::time_point<std::chrono::steady_clock>;
 
@@ -133,6 +135,10 @@ void rpc_client::run(uint64_t n, steady_time_point timestamp) {
             const std::chrono::duration<double> diff = next_timestamp - timestamp;
             std::cerr << std::format("sent {} RPCs, recently {:.0f} RPCs/sec...\n",
                                      i, 10000 / diff.count());
+            std::cerr << std::format("events {}, promises {}, sent {}, received {}\n",
+                cotamer::stats::s.events_allocated - cotamer::stats::s.events_destroyed,
+                cotamer::stats::s.promises_allocated - cotamer::stats::s.promises_destroyed,
+                sent, received);
             timestamp = next_timestamp;
         }
     }
@@ -199,4 +205,7 @@ int main(int argc, char* const argv[]) {
     const std::chrono::duration<double> diff = end_time - start_time;
     std::cerr << std::format("sent {} RPCs in {:.09f} sec\n", n, diff.count())
         << std::format("sent {:.0f} RPCs per sec\n", n / diff.count());
+    std::cerr << std::format("events {}, promises {}\n",
+        cotamer::stats::s.events_allocated - cotamer::stats::s.events_destroyed,
+        cotamer::stats::s.promises_allocated - cotamer::stats::s.promises_destroyed);
 }

@@ -79,7 +79,7 @@ inline T from_str_chars(const std::string& s, int base = 10) {
     T value;
     auto ec = from_str_chars(s, value, base);
     if (ec != std::errc()) {
-        throw new std::invalid_argument(std::make_error_code(ec).message());
+        throw std::invalid_argument(std::make_error_code(ec).message());
     }
     return value;
 }
