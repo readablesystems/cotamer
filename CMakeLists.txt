@@ -26,9 +26,21 @@ if(TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
+# Find xxhash
+find_path(XXHASH_INCLUDE_DIR xxhash.h HINTS /opt/homebrew/include)
+find_library(XXHASH_LIBRARY xxhash HINTS /opt/homebrew/lib)
+
+if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
+    message(FATAL_ERROR "xxhash not found. Install with: brew install xxhash")
+endif()
+
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
     cotamer/io.cc
+)
+
+add_library(CotamerExamples OBJECT
+    examples/utils.cc
 )
 
 add_executable(cot-test
@@ -48,6 +60,32 @@ add_executable(cot-test-io
 
 add_executable(ctconsensus
     examples/ctconsensus.cc
-    examples/utils.cc
     $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerExamples>
+)
+
+add_executable(rpcg-server
+    examples/rpcg-server.cc
+    examples/serverstub.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerExamples>
+)
+target_include_directories(rpcg-server PRIVATE
+    ${XXHASH_INCLUDE_DIR}
+)
+target_link_libraries(rpcg-server PRIVATE
+    ${XXHASH_LIBRARY}
+)
+
+add_executable(rpcg-client
+    examples/rpcg-client.cc
+    examples/clientstub.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerExamples>
+)
+target_include_directories(rpcg-client PRIVATE
+    ${XXHASH_INCLUDE_DIR}
+)
+target_link_libraries(rpcg-client PRIVATE
+    ${XXHASH_LIBRARY}
 )
