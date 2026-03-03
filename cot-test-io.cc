@@ -282,11 +282,6 @@ cot::task<> test_dup_close_fd() {
 
 // TEST: fd close cleanup: verify that a coroutine suspended on a closed fd
 // is properly cleaned up when its owning task is destroyed.
-//
-// When fd.close() is called, all fd events are triggered. The triggered events
-// go through migrate_asap (since close() uses bare trigger(), not
-// driver_trigger()). The suspended coroutine is eventually resumed or cleaned
-// up when its owning task is destroyed.
 cot::task<> test_forget_fd_cleanup() {
     int piperaw[2];
     assert(pipe(piperaw) == 0);

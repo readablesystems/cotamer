@@ -669,8 +669,15 @@ inline bool event_body::trigger_unlock(uint32_t f, driver* drv,
     // the relevant coroutines.
     if (!drivers.empty()) {
         ref(drivers.size());
+        if (!drv) {
+            drv = driver::current.get();
+        }
         for (auto* d : drivers) {
-            d->migrate_asap(event_handle{this});
+            if (d == drv) {
+                d->asap_.emplace_back(this);
+            } else {
+                d->migrate_asap(event_handle{this});
+            }
         }
     }
     if (f & ef_quorum) {
