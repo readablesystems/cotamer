@@ -213,6 +213,8 @@ private:
 
     static std::atomic<bool> global_real_time;
 
+    static constexpr size_t asap_quota = 0x1000; // run at most 4096 ASAP tasks per poll()
+
     inline uint32_t lock();
     inline void unlock(uint32_t flags);
     void migrate_asap(detail::event_handle eh);

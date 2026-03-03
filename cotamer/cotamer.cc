@@ -81,13 +81,17 @@ void driver::loop(looptype lt) {
     detail::fd_batch fdb;
 
     while (true) {
-        // import migrated tasks and fd close events
-        if (lock_.load(std::memory_order_relaxed) != 0) {
-            finish_migrate();
-        }
-
-        // process asap tasks
-        while (!asap_.empty()) {
+        // process an aliquot of asap and migrated tasks
+        for (size_t n = asap_quota; n != 0; --n) {
+            // import migrated tasks and fd close events
+            if (lock_.load(std::memory_order_relaxed) != 0) {
+                finish_migrate();
+            }
+            // exit if nothing to do
+            if (asap_.empty()) {
+                break;
+            }
+            // pop and process task
             auto eh = std::move(asap_.front());
             asap_.pop_front();
             while (auto coh = eh->driver_trigger(this)) {
