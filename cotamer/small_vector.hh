@@ -15,7 +15,15 @@ struct small_vector {
 
     small_vector() = default;
     small_vector(const small_vector<T, N>&) = delete;
-    small_vector(small_vector<T, N>&&) = delete;
+    small_vector(small_vector<T, N>&& x)
+        : sz_(x.sz_), cap_(x.cap_) {
+        if (x.cap_ > N) {
+            u_.out = x.u_.out;
+            x.sz_ = x.cap_ = 0;
+        } else {
+            std::uninitialized_move_n(x.begin(), x.sz_, begin());
+        }
+    }
     small_vector<T, N>& operator=(const small_vector<T, N>&) = delete;
     small_vector<T, N>& operator=(small_vector<T, N>&&) = delete;
     ~small_vector() {
@@ -28,9 +36,6 @@ struct small_vector {
     bool empty() const {
         return size() == 0;
     }
-    bool empty_capacity() const {
-        return cap_ == 0;
-    }
     void clear() {
         std::destroy_n(begin(), sz_);
         sz_ = 0;
@@ -42,6 +47,19 @@ struct small_vector {
             alloc.deallocate(u_.out, cap_);
         }
         sz_ = cap_ = 0;
+    }
+    iterator erase(const_iterator first, const_iterator last) {
+        if (first != last) {
+            auto eit = end(), delsz = last - first;
+            std::move(const_cast<iterator>(last), eit, const_cast<iterator>(first));
+            sz_ -= delsz;
+            std::destroy(end(), eit);
+        }
+        return const_cast<iterator>(first);
+    }
+    void truncate(const_iterator first) {
+        std::destroy(const_cast<iterator>(first), end());
+        sz_ = first - begin();
     }
 
     T* begin() {
@@ -88,6 +106,12 @@ struct small_vector {
     const T& back() const {
         return *(end() - 1);
     }
+    T& operator[](size_type i) {
+        return begin()[i];
+    }
+    const T& operator[](size_type i) const {
+        return begin()[i];
+    }
 
     void push_back(const T& v) {
         std::construct_at(push_space(), v);
@@ -96,6 +120,13 @@ struct small_vector {
     void push_back(T&& v) {
         std::construct_at(push_space(), std::move(v));
         ++sz_;
+    }
+    template <typename... Args>
+    T& emplace_back(Args&&... args) {
+        auto sp = push_space();
+        std::construct_at(sp, std::forward<Args>(args)...);
+        ++sz_;
+        return *sp;
     }
     void pop_back() {
         std::destroy_at(end() - 1);

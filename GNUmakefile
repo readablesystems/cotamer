@@ -13,7 +13,7 @@ ifeq ($(V),1)
 cmake_verbose := --verbose
 endif
 
-targets = cot-test ctconsensus
+targets = cot-test cot-test-threads ctconsensus
 
 all:
 	cmake -B $(BUILD) $(cmake_build)
@@ -30,8 +30,9 @@ $(targets:%=$(BUILD)/%): $(BUILD)/%:
 	cmake -B $(BUILD) $(cmake_build)
 	cmake --build $(BUILD) --target $* $(cmake_verbose)
 
-test: cot-test ctconsensus
+test: cot-test cot-test-threads ctconsensus
 	$(BUILD)/cot-test
+	$(BUILD)/cot-test-threads
 	$(BUILD)/ctconsensus -q -R 10000
 
 .PHONY: all clean test $(targets) $(targets:%=$(BUILD)/%)

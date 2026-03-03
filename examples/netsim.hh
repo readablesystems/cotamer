@@ -59,10 +59,10 @@ private:
     bool verbose_;
     network<T>& net_;
 
-    cot::clock::duration link_delay_ = 20ms; // time for message to arrive
-    cot::clock::duration send_delay_ = 1ms;  // time before sender can continue
+    cot::duration link_delay_ = 20ms; // time for message to arrive
+    cot::duration send_delay_ = 1ms;  // time before sender can continue
 
-    cot::task<> send_after(cot::clock::duration, message_type);
+    cot::task<> send_after(cot::duration, message_type);
 };
 
 
@@ -135,7 +135,7 @@ cot::task<> channel<T>::send(message_type m) {
 //    Delay for `delay`, then enqueue `m` on the destination port.
 
 template <typename T>
-cot::task<> channel<T>::send_after(cot::clock::duration delay, message_type m) {
+cot::task<> channel<T>::send_after(cot::duration delay, message_type m) {
     co_await cot::after(delay);
 
     // record this message in the destination message queue
@@ -155,7 +155,7 @@ cot::task<T> port<T>::receive() {
     while (messageq_.empty()) {
         // Register an event that senders will trigger on delivery.
         // Need a new one every time because events are one-shot.
-        co_await (receiver_event_ = cot::event());
+        co_await receiver_event_.arm();
     }
 
     auto m = std::move(messageq_.front());
@@ -223,19 +223,19 @@ struct network {
     inline I uniform(I min, I max);
     template <std::floating_point FP>
     inline FP uniform(FP min, FP max);
-    inline cot::clock::duration uniform(cot::clock::duration min,
-                                        cot::clock::duration max);
+    inline cot::duration uniform(cot::duration min,
+                                 cot::duration max);
     // - exponential distributions: useful for network delay, which can have
     //   occasional long tails
     template <std::floating_point FP>
     inline FP exponential(FP mean);
-    inline cot::clock::duration exponential(cot::clock::duration mean);
+    inline cot::duration exponential(cot::duration mean);
     // - normal (Gaussian) distributions: useful for jitter around a mean
     //   delay; the duration overload clamps negative results to zero
     template <std::floating_point FP>
     inline FP normal(FP mean, FP stddev);
-    inline cot::clock::duration normal(cot::clock::duration mean,
-                                       cot::clock::duration stddev);
+    inline cot::duration normal(cot::duration mean,
+                                cot::duration stddev);
 
 
     // - erase network state
@@ -332,12 +332,12 @@ inline FP network<T>::uniform(FP min, FP max) {
 }
 
 template <typename T>
-inline cot::clock::duration network<T>::uniform(
-    cot::clock::duration min, cot::clock::duration max
+inline cot::duration network<T>::uniform(
+    cot::duration min, cot::duration max
 ) {
-    using rep = cot::clock::duration::rep;
+    using rep = cot::duration::rep;
     std::uniform_int_distribution<rep> dist(min.count(), max.count());
-    return cot::clock::duration(dist(randomness_));
+    return cot::duration(dist(randomness_));
 }
 
 template <typename T>
@@ -347,10 +347,10 @@ inline FP network<T>::exponential(FP mean) {
 }
 
 template <typename T>
-inline cot::clock::duration network<T>::exponential(cot::clock::duration mean) {
-    using rep = cot::clock::duration::rep;
+inline cot::duration network<T>::exponential(cot::duration mean) {
+    using rep = cot::duration::rep;
     std::exponential_distribution<double> dist(1.0 / mean.count());
-    return cot::clock::duration(static_cast<rep>(dist(randomness_)));
+    return cot::duration(static_cast<rep>(dist(randomness_)));
 }
 
 template <typename T>
@@ -360,12 +360,12 @@ inline FP network<T>::normal(FP mean, FP stddev) {
 }
 
 template <typename T>
-inline cot::clock::duration network<T>::normal(
-    cot::clock::duration mean, cot::clock::duration stddev
+inline cot::duration network<T>::normal(
+    cot::duration mean, cot::duration stddev
 ) {
-    using rep = cot::clock::duration::rep;
+    using rep = cot::duration::rep;
     std::normal_distribution<double> dist(mean.count(), stddev.count());
-    return cot::clock::duration(static_cast<rep>(std::max(dist(randomness_), 0.0)));
+    return cot::duration(static_cast<rep>(std::max(dist(randomness_), 0.0)));
 }
 
 

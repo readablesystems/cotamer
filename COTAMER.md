@@ -212,6 +212,40 @@ behavior—as long as you built your system right.
 
 ## Advanced topics
 
+### Event rearming
+
+Since events are one-shot, a long-lived coroutine that repeatedly waits for
+notifications needs a fresh event each time. The `event& event::arm()`
+convenience function handles this: if `e` has already triggered, `e.arm()`
+replaces it with a fresh untriggered event; otherwise it leaves `e` unchanged.
+In both cases it returns `e`.
+
+In this example, a producer enqueues work and calls `trigger()` on a notifier
+event; a consumer background routine uses `work_queue_wakeup.arm()` to ensure
+that it always `co_await`s an untriggered event.
+
+```cpp
+cot::event work_queue_wakeup;
+std::deque<Item> work_queue;
+
+cot::task<> background_worker() {
+    while (true) {
+        while (work_queue.empty()) {
+            co_await work_queue_wakeup.arm();
+        }
+        auto item = std::move(work_queue.front());
+        work_queue.pop_front();
+        // ... process item ...
+    }
+}
+
+void enqueue_work(Item item) {
+    work_queue.push_back(std::move(item));
+    work_queue_wakeup.trigger();   // does nothing unless background_worker is waiting
+}
+```
+
+
 ### Lazy tasks
 
 A *lazy* task waits to execute until its value is needed. Place

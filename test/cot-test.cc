@@ -309,17 +309,17 @@ cot::task<> test_lazy_attempt() {
 
 // TEST: Lazy task with internal timeout — any(interest, after(...)) auto-starts
 bool lazy_timeout_ran = false;
-cot::clock::time_point lazy_timeout_time;
+cot::steady_time_point lazy_timeout_time;
 cot::task<int> lazy_timeout_task() {
     co_await cot::any(cot::interest{}, cot::after(5h));
     lazy_timeout_ran = true;
-    lazy_timeout_time = cot::now();
+    lazy_timeout_time = cot::steady_now();
     co_await cot::after(1h);
     co_return 33;
 }
 cot::task<> test_lazy_internal_timeout() {
     lazy_timeout_ran = false;
-    auto start = cot::now();
+    auto start = cot::steady_now();
     auto t = lazy_timeout_task();
     // Don't co_await t — let the internal timeout fire
     co_await cot::after(10h);
@@ -546,7 +546,7 @@ cot::task<> test_timer_heap_cull() {
     // entries, the first emplace should cull down to ~32 (the autocull loop
     // threshold).
     co_await cot::after(1ms);
-    size_t sz = cot::driver::main->timer_size();
+    size_t sz = cot::driver::current->timer_size();
     std::cerr << "timer_heap_cull: timer_size=" << sz << "\n";
     assert(sz < 80 && "timer heap should have autoculled stale 300ms entries");
 }
@@ -636,6 +636,33 @@ cot::task<> test_duplicate_event_in_quorum() {
     co_return;
 }
 
+// TEST: keepalive — loop stays alive until keepalive event triggers
+cot::task<> test_keepalive() {
+    auto done = cot::event();
+    cot::keepalive(done);
+    bool detached_ran = false;
+
+    auto worker = [&]() -> cot::task<> {
+        co_await cot::after(5h);
+        detached_ran = true;
+        done.trigger();
+    };
+    worker().detach();
+
+    co_await done;
+    assert(detached_ran && "keepalive should have kept loop alive for detached task");
+    std::cerr << "keepalive: ok\n";
+}
+
+// TEST: keepalive with already-triggered event — no effect on loop
+cot::task<> test_keepalive_triggered() {
+    auto e = cot::event();
+    e.trigger();
+    cot::keepalive(e);
+    std::cerr << "keepalive_triggered: ok\n";
+    co_return;
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -694,6 +721,8 @@ int main(int argc, char* argv[]) {
     run("timer_heap_cull", test_timer_heap_cull);
     run("any_default_event", test_any_default_event);
     run("duplicate_event_in_quorum", test_duplicate_event_in_quorum);
+    run("keepalive", test_keepalive);
+    run("keepalive_triggered", test_keepalive_triggered);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");

@@ -3,16 +3,13 @@
 #include <chrono>
 
 template <typename T>
-struct empty {
-    bool operator()(const T& x) const {
-        return x.empty();
-    }
-};
-
-template <typename T>
 struct timer_heap_traits {
-    using empty_type = empty<T>;
-    using time_point_type = std::chrono::system_clock::time_point;
+    struct empty_type {
+        bool operator()(const T& x) const {
+            return x.empty();
+        }
+    };
+    using time_point_type = std::chrono::steady_clock::time_point;
     static constexpr int arity = 4;
 };
 
@@ -160,6 +157,19 @@ template <typename T>
 void timer_heap<T>::emplace(time_point_type when, T&& value) {
     using std::swap;
 
+    // If heap is largish, check to see if a random element is empty.
+    // If it's empty, remove it, and look for another empty element.
+    // This should help keep the timer heap small even if we set many
+    // more timers than get a chance to fire.
+    while (size_ >= 32) {
+        unsigned pos = cull_rand_ % size_;
+        cull_rand_ = cull_rand_ * 1664525 + 1013904223U; // Numerical Recipes LCG
+        if (!empty_type{}(es_[pos].value)) {
+            break;
+        }
+        hard_cull(pos);
+    }
+
     // Append new trec
     unsigned pos = size_;
     if (pos == capacity_) {
@@ -176,19 +186,6 @@ void timer_heap<T>::emplace(time_point_type when, T&& value) {
         }
         swap(es_[pos], es_[p]);
         pos = p;
-    }
-
-    // If heap is largish, check to see if a random element is empty.
-    // If it's empty, remove it, and look for another empty element.
-    // This should help keep the timer heap small even if we set many
-    // more timers than get a chance to fire.
-    while (size_ >= 32) {
-        pos = cull_rand_ % size_;
-        cull_rand_ = cull_rand_ * 1664525 + 1013904223U; // Numerical Recipes LCG
-        if (!empty_type{}(es_[pos].value)) {
-            break;
-        }
-        hard_cull(pos);
     }
 }
 

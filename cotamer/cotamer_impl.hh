@@ -1,5 +1,10 @@
 #pragma once
 #include "cotamer/small_vector.hh"
+#include <system_error>
+#if defined(__x86_64__)
+# include <xmmintrin.h>
+#endif
+
 
 // cotamer_impl.hh
 //    This file defines the gory details of the Cotamer implementation,
@@ -8,15 +13,38 @@
 namespace cotamer {
 namespace detail {
 
+#if COTAMER_STATS
+# define COTAMER_STAT_INCR(x) cotamer::stats.x.fetch_add(1, std::memory_order_relaxed)
+#else
+# define COTAMER_STAT_INCR(x)
+#endif
+
 // mark a listener as a quorum
 constexpr uintptr_t lf_quorum = uintptr_t(1);
 
 // event_body::flags_
-constexpr uint32_t f_quorum = 1;        // this is a quorum_event_body
-constexpr uint32_t f_want_interest = 2; // a transitive quorum member needs interest{}
-constexpr uint32_t f_interest = 16;     // this quorum has 1 interest{}
-                                        // (added once per interest{})
+constexpr uint32_t ef_quorum = 1;         // this is a quorum_event_body
+constexpr uint32_t ef_lock = 2;           // locked
+constexpr uint32_t ef_empty = 4;          // has no listeners
+constexpr uint32_t ef_empty_members = 8;  // has no members
+constexpr uint32_t ef_triggered = 16;     // has been triggered
+constexpr uint32_t ef_want_interest = 32; // transitive quorum member has interest{}
+constexpr uint32_t ef_user = 64;          // first user flag
+constexpr uint32_t ef_nuser = 4;          // number of user flags
+constexpr uint32_t efm_user = 0x3C0;      // mask of user flags
+constexpr uint32_t ef_interest = 1024;    // this quorum has 1 interest{}
+                                          // (added once per interest{})
 
+// exception thrown during driver::clearing()
+struct clearing_exception {};
+
+inline void spinlock_hint() {
+#if defined(__x86_64__)
+    _mm_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
 
 // task_promise<T>
 //    This structure is part of the C++ coroutine machinery. Coroutines don’t
@@ -27,8 +55,28 @@ constexpr uint32_t f_interest = 16;     // this quorum has 1 interest{}
 //    defined by the C++ language standard; the runtime calls its methods in
 //    specific situations, such as when a `co_await` expression is evaluated.
 
+struct task_promise_base {
+    bool detached_ = false;                // is this task detached?
+    bool has_interest_ = false;            // has interest been requested?
+    driver* home_;                         // coroutine home driver
+    event_handle completion_;              // completion event (lazily created)
+    event_handle interest_;                // interest event (lazily created)
+    // coroutine awaiting me, if any
+    std::coroutine_handle<task_promise_base> continuation_;
+
+    inline task_promise_base()
+        : home_(driver::current.get()) {
+        COTAMER_STAT_INCR(promises_allocated);
+    }
+    inline ~task_promise_base() {
+        COTAMER_STAT_INCR(promises_destroyed);
+    }
+
+    inline event_handle& make_interest();
+};
+
 template <typename T>
-struct task_promise {
+struct task_promise : public task_promise_base {
     // Functions required by the C++ runtime
     // - Initialize the task<T> return value that manages the coroutine:
     inline task<T> get_return_object() noexcept;
@@ -48,18 +96,18 @@ struct task_promise {
     // - Export coroutine return value to `co_await`er:
     inline T result();
 
-    // Our own additions
-    inline event_handle& make_interest();
-    bool detached_ = false;
-    bool has_interest_ = false;
-    event_handle completion_;
-    event_handle interest_;
     std::variant<std::monostate, T, std::exception_ptr> result_;
-    std::coroutine_handle<> continuation_;
 };
 
 template <typename T>
 inline task<T> task_promise<T>::get_return_object() noexcept {
+    // When an event schedules a task_promise, it needs the task's home driver.
+    // It uses coroutine_handle<task_promise_base>::from_address() to get it.
+    // That is strictly speaking UB -- one can only call
+    // coroutine_handle<T>::from_address() if T is the actual promise type or
+    // void -- but it works on GCC and Clang when the actual promise type
+    // and the base type have the same alignment.
+    static_assert(alignof(task_promise<T>) == alignof(task_promise_base));
     return task<T>{std::coroutine_handle<task_promise<T>>::from_promise(*this)};
 }
 
@@ -76,7 +124,7 @@ T task_promise<T>::result() {
 //    Similar, but no value is returned.
 
 template <>
-struct task_promise<void> {
+struct task_promise<void> : public task_promise_base {
     inline task<void> get_return_object() noexcept;
     std::suspend_never initial_suspend() noexcept { return {}; }
     task_event_awaiter<void> await_transform(event ev);
@@ -93,16 +141,12 @@ struct task_promise<void> {
     }
     inline task_final_awaiter<void> final_suspend() noexcept;
 
-    inline event_handle& make_interest();
-    bool detached_ = false;
-    bool has_interest_ = false;
-    std::coroutine_handle<> continuation_;
-    event_handle completion_;
-    event_handle interest_;
     std::exception_ptr exception_;
 };
 
 inline task<void> task_promise<void>::get_return_object() noexcept {
+    // See comment in task_promise<T>::get_return_object.
+    static_assert(alignof(task_promise<void>) == alignof(task_promise_base));
     return task<void>{std::coroutine_handle<task_promise<void>>::from_promise(*this)};
 }
 
@@ -124,8 +168,15 @@ struct task_awaiter {
         return self_.done();
     }
     // - Suspend this coroutine and return the next coroutine to execute
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) noexcept {
-        self_.promise().continuation_ = awaiting;
+    template <typename U>
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiting) {
+        if (awaiting.promise().home_ != self_.promise().home_) {
+            throw cotamer_error(cotamer_errc::cross_driver_await);
+        }
+        // XXX UB, but see task_promise<T>::get_return_object
+        std::coroutine_handle<task_promise_base> base_awaiting =
+            std::coroutine_handle<task_promise_base>::from_address(awaiting.address());
+        self_.promise().continuation_ = base_awaiting;
         if (self_.promise().interest_) {
             self_.promise().interest_->trigger();
         }
@@ -152,7 +203,9 @@ struct task_final_awaiter {
         if (promise.completion_) {
             promise.completion_->trigger();
         }
-        // if another coroutine wants this task’s result, run them immediately
+        // if another coroutine wants this task's result, resume it directly
+        // (cross-driver awaits are rejected at co_await time, so the
+        // continuation is always on the same driver)
         if (promise.continuation_) {
             return std::exchange(promise.continuation_, nullptr);
         }
@@ -198,68 +251,152 @@ inline event make_event(interest);
 //    The heap-allocated state behind an event. Managed by reference-counted
 //    event_handle smart pointers. Each event_body has a list of *listeners*
 //    (coroutines or quorum bodies) that are notified when the event triggers.
+//
+//    Event bodies can be accessed concurrently from multiple threads. The lock
+//    is a bit in `flags_`. Difficulties arise with quorum events (coroutines
+//    are naturally linear). Sometimes a member of a quorum event needs to lock
+//    its quorum, and sometimes a quorum needs to lock its members; deadlock is
+//    avoided because when a quorum locks its members, it gives up trying as
+//    soon as member becomes triggered. Logic in trigger_unlock() and around
+//    reference counts ensures everything works out.
 
 struct event_body {
-    event_body() = default;
+    inline event_body()    { COTAMER_STAT_INCR(events_allocated); }
+    inline ~event_body()   { COTAMER_STAT_INCR(events_destroyed); }
     event_body(const event_body&) = delete;
     event_body(event_body&&) = delete;
     event_body& operator=(const event_body&) = delete;
     event_body& operator=(event_body&&) = delete;
-    ~event_body() {
-        if (!idle()) {
-            trigger();
+
+    void ref(uint32_t n = 1) noexcept {
+        refcount_.fetch_add(n, std::memory_order_relaxed);
+    }
+
+    uint32_t relaxed_flags() const noexcept {
+        return flags_.load(std::memory_order_relaxed);
+    }
+
+    void set_user_flags(uint32_t userf) {
+        assert((userf & ~efm_user) == 0);
+        while (true) {
+            uint32_t flags = relaxed_flags();
+            if (flags_.compare_exchange_weak(flags, (flags & ~efm_user) | userf, std::memory_order_relaxed)) {
+                return;
+            }
+            spinlock_hint();
         }
     }
 
     // This event can be garbage collected: it has triggered, or it has no
     // listeners and no other references.
     bool empty() const noexcept {
-        return listeners_.empty_capacity()
-            || (listeners_.empty() && refcount_.load(std::memory_order_relaxed) == 1);
+        auto f = relaxed_flags();
+        return (f & ef_triggered)
+            || ((f & ef_empty) && refcount_.load(std::memory_order_relaxed) == 1);
     }
 
     // This event has no listeners.
     bool idle() const noexcept {
-        return listeners_.empty();
+        return (relaxed_flags() & ef_empty) != 0;
     }
 
     // The event has triggered.
     bool triggered() const noexcept {
-        return listeners_.empty_capacity();
-        // In its initial state, listeners_ has nonzero capacity; we set its
-        // capacity to 0 only in triggered().
+        return (relaxed_flags() & ef_triggered) != 0;
     }
 
-    void add_listener(uintptr_t listener) {
+    inline uint32_t lock() {
+        while (true) {
+            uint32_t flags = relaxed_flags();
+            if ((flags & ef_lock) == 0
+                && flags_.compare_exchange_weak(flags, flags | ef_lock, std::memory_order_acquire, std::memory_order_relaxed)) {
+                return flags;
+            }
+            spinlock_hint();
+        }
+    }
+
+    inline uint32_t untriggered_lock() {
+        while (true) {
+            uint32_t flags = relaxed_flags();
+            if ((flags & ef_triggered)
+                || ((flags & ef_lock) == 0
+                    && flags_.compare_exchange_weak(flags, flags | ef_lock, std::memory_order_acquire, std::memory_order_relaxed))) {
+                return flags;
+            }
+            spinlock_hint();
+        }
+    }
+
+    inline void unlock(uint32_t flags) {
+        flags_.store(flags, std::memory_order_release);
+    }
+
+    template <typename T>
+    inline void add_listener_unlock(std::coroutine_handle<task_promise<T>> coroutine,
+                                    uint32_t flags) {
+        add_listener_unlock(reinterpret_cast<uintptr_t>(coroutine.address()), flags);
+    }
+
+    inline void add_listener_unlock(quorum_event_body* qb, uint32_t flags) {
+        add_listener_unlock(reinterpret_cast<uintptr_t>(qb) | lf_quorum, flags);
+    }
+
+    template <typename T>
+    inline void remove_listener(std::coroutine_handle<task_promise<T>> coroutine) {
+        remove_listener_unlock(reinterpret_cast<uintptr_t>(coroutine.address()), lock());
+    }
+
+    inline void remove_listener_unlock(quorum_event_body* qb, uint32_t flags) {
+        remove_listener_unlock(reinterpret_cast<uintptr_t>(qb) | lf_quorum, flags);
+    }
+
+    inline bool trigger() {
+        auto f = untriggered_lock();
+        return !(f & ef_triggered) && trigger_unlock(f);
+    }
+
+    inline std::coroutine_handle<> driver_trigger(driver* drv);
+
+    inline bool trigger_unlock(uint32_t flags, driver* drv = nullptr,
+                               std::coroutine_handle<>* cot = nullptr);
+
+
+    std::atomic<uint32_t> refcount_ = 1;
+    std::atomic<uint32_t> flags_ = ef_empty;
+    small_vector<uintptr_t, 3> listeners_;
+
+private:
+    void add_listener_unlock(uintptr_t listener, uint32_t flags) {
         // A listener is either a `coroutine_handle<T>::address()` or the
         // address of a `quorum_event_body`. Quorum bodies are distinguished by
         // setting the `lf_quorum` bit, bit 1; this is safe because coroutines
         // and quorum bodies are both aligned.
-        assert(listener && !triggered());
+        assert(listener && (flags & ef_triggered) == 0);
         listeners_.push_back(listener);
+        unlock(flags & ~ef_empty);
     }
 
-    bool remove_listener(uintptr_t listener) {
-        // Remove a listener (which might have been added multiple times).
-        bool found = false;
-        for (auto it = listeners_.begin(); it != listeners_.end(); ) {
-            if (*it == listener) {
-                *it = listeners_.back();
+    void remove_listener_unlock(uintptr_t listener, uint32_t flags) {
+        // Remove a listener. It might have been added multiple times;
+        // `remove_listener_unlock` will be called the same number of times.
+        for (auto& l : listeners_) {
+            if (l == listener) {
+                l = listeners_.back();
                 listeners_.pop_back();
-                found = true;
-            } else {
-                ++it;
+                break;
             }
         }
-        return found;
+        unlock(flags | (listeners_.empty() ? ef_empty : 0));
     }
 
-    inline void trigger();
+    static std::coroutine_handle<task_promise_base> listener_coroutine(uintptr_t l) noexcept {
+        return std::coroutine_handle<task_promise_base>::from_address(reinterpret_cast<void*>(l));
+    }
 
-
-    std::atomic<uint32_t> refcount_ = 1;
-    uint32_t flags_ = 0;
-    small_vector<uintptr_t, 3> listeners_;
+    static quorum_event_body* listener_quorum(uintptr_t l) noexcept {
+        return reinterpret_cast<quorum_event_body*>(l & ~lf_quorum);
+    }
 };
 
 
@@ -268,71 +405,108 @@ struct event_body {
 //    member events, counting the number that have triggered, and triggering its
 //    own event (the event_body base type) once a quorum is reached.
 //
-//    The `f_interest` and `f_want_interest` flags implement an optimization
+//    The `ef_interest` and `ef_want_interest` flags implement an optimization
 //    that avoids allocating separate memory for `interest{}`.
 
 struct quorum_event_body : event_body {
     template<typename... Es>
     quorum_event_body(size_t quorum, Es&&... es)
         : quorum_(quorum) {
-        flags_ |= f_quorum;
-        (add_member(std::forward<Es>(es)), ...);
+        uint32_t qf = ef_quorum | ef_empty | ef_empty_members;
+        flags_.store(qf | ef_lock, std::memory_order_release);
+        ((qf = add_member(qf, std::forward<Es>(es))), ...);
         if (triggered_ >= quorum_) {
-            trigger();
+            trigger_unlock(qf);
+        } else {
+            unlock(qf);
         }
     }
 
-    ~quorum_event_body() {
-        for (auto& mem : members_) {
-            mem->remove_listener(listener_id());
-        }
-    }
-
-    uintptr_t listener_id() const {
-        return reinterpret_cast<uintptr_t>(this) | lf_quorum;
-    }
-
-    void add_member(event_handle eh) {
-        if (!eh || eh->triggered()) {
+    uint32_t add_member(uint32_t qf, event_handle eh) {
+        uint32_t ef;
+        if (!eh || ((ef = eh->untriggered_lock()) & ef_triggered)) {
             ++triggered_;
-            return;
+            return qf;
         }
-        eh->add_listener(listener_id());
-        if (eh->flags_ & f_want_interest) {
-            flags_ |= f_want_interest;
+        eh->add_listener_unlock(this, ef);
+        if (ef & ef_want_interest) {
+            qf |= ef_want_interest;
         }
         members_.push_back(std::move(eh));
+        return qf & ~ef_empty_members;
     }
 
     template <typename E>
-    inline void add_member(E&& e) {
-        add_member(make_event(std::forward<E>(e)).handle());
+    inline uint32_t add_member(uint32_t qf, E&& e) {
+        return add_member(qf, make_event(std::forward<E>(e)).handle());
     }
 
-    inline void add_member(interest) {
-        flags_ = (flags_ + f_interest) | f_want_interest;
+    inline uint32_t add_member(uint32_t qf, interest) {
+        return (qf | ef_want_interest) + ef_interest;
     }
 
-    // Called by a member event when it triggers.
-    void trigger_member(event_body* e) {
-        if (triggered()) {
-            return;
-        }
-        for (auto it = members_.begin(); it != members_.end(); ) {
-            if (it->get() == e) {
+    // Called by a member event when it triggers. Removes that event from
+    // members_ (once), increases the triggered_ count, and potentially triggers
+    // this event.
+    void trigger_member(event_body* e, driver* drv, std::coroutine_handle<>* coh) {
+        auto qf = lock();
+        for (auto& mem : members_) {
+            if (mem.get() == e) {
                 ++triggered_;
-                *it = std::move(members_.back());
+                mem.swap(members_.back());
                 members_.pop_back();
-            } else {
-                ++it;
+                if (members_.empty()) {
+                    qf |= ef_empty_members;
+                }
+                break;
             }
         }
-        if (triggered_ >= quorum_) {
-            trigger();
+        if (!(qf & ef_triggered) && triggered_ >= quorum_) {
+            trigger_unlock(qf, drv, coh);
+        } else if ((qf & ef_empty_members)
+                   && refcount_.load(std::memory_order_relaxed) == 0) {
+            delete this;
+        } else {
+            unlock(qf);
         }
     }
 
     inline void fix_want_interest(event_handle& ievent);
+
+    uint32_t cull_members(uint32_t qf) {
+        for (auto it = members_.begin(); it != members_.end(); ) {
+            auto f = (*it)->untriggered_lock();
+            if (f & ef_triggered) {
+                // The triggered event `*it` is still in our members list. This
+                // only happens when the event is still triggering & hasn't yet
+                // gotten around to removing itself from our members list. We
+                // must wait for them to remove themselves.
+                ++it;
+            } else {
+                (*it)->remove_listener_unlock(this, f);
+                it->swap(members_.back());
+                members_.pop_back();
+            }
+        }
+        return members_.empty() ? qf | ef_empty_members : qf;
+    }
+
+    void hard_deref() {
+        // This may not actually delete!
+        auto f = lock();
+        if (refcount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+            unlock(f);
+            return;
+        }
+        if (!(f & ef_triggered)) {
+            f = cull_members(f);
+        }
+        if (f & ef_empty_members) {
+            delete this;
+        } else {
+            unlock(f); // One of the concurrent trigger()s will delete us.
+        }
+    }
 
 
     small_vector<event_handle, 3> members_;
@@ -340,38 +514,101 @@ struct quorum_event_body : event_body {
     uint32_t quorum_;
 };
 
+// event_body::trigger_unlock: the key trigger machinery
 
-inline void event_body::trigger() {
-    // Triggering a quorum erases its member list.
-    if (flags_ & f_quorum) {
+inline bool event_body::trigger_unlock(uint32_t f, driver* drv,
+                                       std::coroutine_handle<>* coh) {
+    bool result = !(f & ef_empty)
+        || refcount_.load(std::memory_order_acquire) > 1;
+    // Triggering a quorum removes it from its members' listener lists, but that
+    // might cause recursive triggers and eventually drop the last remaining
+    // reference to `this`. Add a temporary reference so the quorum survives
+    // until the end.
+    if (f & ef_quorum) {
+        ref();
         auto qbody = static_cast<quorum_event_body*>(this);
-        for (auto& mem : qbody->members_) {
-            mem->remove_listener(qbody->listener_id());
+        f = qbody->cull_members(f);
+    }
+    // Process listeners: remove quorums, maybe claim 1 `drv` coroutine,
+    // and collect all other interested drivers with interested coroutines.
+    small_vector<uintptr_t, 3> quorums;
+    small_vector<driver*, 3> drivers;
+    auto lit = listeners_.begin(), oit = lit, eit = listeners_.end();
+    for (; lit != eit; ++lit) {
+        if (*lit & lf_quorum) {
+            quorums.push_back(*lit);
+            continue;
         }
-        qbody->members_.clear();
+        auto lcoh = listener_coroutine(*lit);
+        driver* ldrv = lcoh.promise().home_;
+        if (ldrv == drv) {
+            // The coroutine `lcoh` should run on driver `drv`, which called
+            // us via `driver_trigger`. No need to post this event to
+            // `drivers`: our caller will run it to completion.
+            if (!*coh) {
+                *coh = lcoh;
+                continue;
+            }
+        } else if (std::find(drivers.begin(), drivers.end(), ldrv) == drivers.end()) {
+            drivers.push_back(ldrv);
+        }
+        if (oit != lit) {
+            *oit = *lit;
+        }
+        ++oit;
     }
-    // Activate listeners: schedule coroutines and inform quorum events.
-    // But we can’t actually inform quorum events directly! It may be that
-    // the last reference to this event is held by one of its quorum listeners;
-    // when we call `trigger_member` on that listener, its quorum might be
-    // satisfied, which would drop that reference and `delete this`.
-    // So save a stack copy of the quorum listeners that will survive our
-    // own deletion.
-    small_vector<quorum_event_body*, 2> qe;
-    for (auto listener : listeners_) {
-        if (listener & lf_quorum) {
-            qe.push_back(reinterpret_cast<quorum_event_body*>(listener & ~lf_quorum));
-        } else {
-            driver::main->ready_.push_back(std::coroutine_handle<>::from_address(reinterpret_cast<void*>(listener)));
+    listeners_.truncate(oit);
+    // Unlock before triggering quorums to avoid deadlock with quorum
+    // trigger_member (which acquires our lock).
+    unlock(f | ef_triggered | (listeners_.empty() ? ef_empty : 0));
+    // Inform quorums.
+    for (auto listener : quorums) {
+        auto qb = listener_quorum(listener);
+        qb->trigger_member(this, drv, coh);
+    }
+    // Store references on the `migrate_` lists of remote drivers so they run
+    // the relevant coroutines.
+    if (!drivers.empty()) {
+        ref(drivers.size());
+        if (!drv) {
+            drv = driver::current.get();
+        }
+        for (auto* d : drivers) {
+            if (d == drv) {
+                d->asap_.emplace_back(this);
+            } else {
+                d->migrate_asap(event_handle{this});
+            }
         }
     }
-    // Mark this event as triggered (not just empty).
-    listeners_.clear_capacity();
-    // Finally, inform our quorum listeners. During this loop `this` might
-    // be freed.
-    for (auto listener : qe) {
-        listener->trigger_member(this);
+    if (f & ef_quorum) {
+        event_handle{this}; // release temporary reference
     }
+    return result;
+}
+
+inline std::coroutine_handle<> event_body::driver_trigger(driver* drv) {
+    std::coroutine_handle<> coh(nullptr);
+    if ((flags_.load(std::memory_order_relaxed) & (ef_empty | ef_triggered)) == (ef_empty | ef_triggered)) {
+        // definitely nothing left to do, don't bother locking
+        return coh;
+    }
+    auto f = lock();
+    if (!(f & ef_triggered)) {
+        trigger_unlock(f, drv, &coh);
+        return coh;
+    }
+    // Already triggered; search for a coroutine on this driver.
+    for (auto& l : listeners_) {
+        if (listener_coroutine(l).promise().home_ == drv) {
+            coh = listener_coroutine(l);
+            l = listeners_.back();
+            listeners_.pop_back();
+            break;
+        }
+    }
+    unlock(f | (listeners_.empty() ? ef_empty : 0));
+    return coh;
 }
 
 
@@ -385,7 +622,7 @@ inline event_handle::event_handle(event_body* eb) noexcept
 inline event_handle::event_handle(const event_handle& x) noexcept
     : eb_(x.eb_) {
     if (eb_) {
-        eb_->refcount_.fetch_add(1, std::memory_order_relaxed);
+        eb_->ref();
     }
 }
 
@@ -416,13 +653,18 @@ inline event_handle& event_handle::operator=(event_handle&& x) noexcept {
 }
 
 inline event_handle::~event_handle() {
-    if (eb_ && eb_->refcount_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        // Check if this event_body is a quorum_event_body
-        if (eb_->flags_ & f_quorum) {
-            delete static_cast<quorum_event_body*>(eb_);
-        } else {
-            delete eb_;
-        }
+    if (!eb_) {
+        return;
+    }
+    auto f = eb_->relaxed_flags();
+    if ((f & (ef_quorum | ef_empty_members)) == ef_quorum) {
+        static_cast<quorum_event_body*>(eb_)->hard_deref();
+    } else if (eb_->refcount_.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+        // do nothing
+    } else if (f & ef_quorum) {
+        delete static_cast<quorum_event_body*>(eb_);
+    } else {
+        delete eb_;
     }
 }
 
@@ -444,16 +686,11 @@ inline bool event_handle::empty() const noexcept {
 template <typename T>
 struct task_event_awaiter {
     event_handle eh_;
-    uintptr_t coroutine_;
+    std::coroutine_handle<task_promise<T>> coroutine_;
 
     ~task_event_awaiter() {
-        if (coroutine_ && !eh_->remove_listener(coroutine_)) {
-            // Our containing coroutine is being destroyed while suspended, but
-            // `eh_` has already triggered and scheduled our coroutine_handle on
-            // the driver's ready queue. Avoid use-after-free by removing the
-            // coroutine from the driver's queue.
-            auto coh = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(coroutine_));
-            std::erase(driver::main->ready_, coh);
+        if (coroutine_) {
+            eh_->remove_listener(coroutine_);
         }
     }
     bool await_ready() noexcept {
@@ -461,55 +698,49 @@ struct task_event_awaiter {
     }
     bool await_suspend(std::coroutine_handle<task_promise<T>> awaiting) noexcept {
         event_body* eb = eh_.get();
-        // We’re about to suspend on `eb`. Optimization: Apply interest{} here,
-        // just before suspending. That application might trigger `eb`.
-        if (eb->flags_ & f_want_interest) {
+        // apply interest{} if necessary, which might trigger `eb`
+        if (eb->relaxed_flags() & ef_want_interest) {
             static_cast<quorum_event_body*>(eb)->fix_want_interest(awaiting.promise().make_interest());
-            if (eb->triggered()) {
-                return false;
-            }
         }
-        coroutine_ = reinterpret_cast<uintptr_t>(awaiting.address());
-        eb->add_listener(coroutine_);
+        uint32_t ef = eb->untriggered_lock();
+        if (ef & ef_triggered) {
+            return false;
+        }
+        coroutine_ = awaiting;
+        eb->add_listener_unlock(coroutine_, ef);
         return true;
     }
     void await_resume() {
-        coroutine_ = 0;
-        // This code helps recover memory when clearing a driver (for instance,
-        // if a test exits early). The clearing process triggers all
-        // outstanding events and unblocks their waiting coroutines, but those
-        // might have other coroutines waiting for their results, rather than
-        // events. We destroy the whole chain by forcing the event-unblocked
-        // coroutines to throw an exception; that exception is propagated
-        // through their awaiters.
-        if (driver::clearing) {
-            throw clearing_error{};
+        // Check if our driver is being cleared, which can only happen if we
+        // suspended ((bool) coroutine_).
+        bool clearing = coroutine_ && coroutine_.promise().home_->clearing();
+        // Optimization: Don't call remove_listener, which will do nothing
+        coroutine_ = nullptr;
+        // Recover memory when clearing a driver (for instance, if a test exits
+        // early). driver::clear() triggers all outstanding events and unblocks
+        // their waiting coroutines, but those might have other coroutines
+        // waiting for their results. We destroy the whole chain by forcing the
+        // event-unblocked coroutines to throw an exception; that exception is
+        // propagated through their awaiters.
+        if (clearing) {
+            throw clearing_exception{};
         }
     }
 };
 
 template <typename T>
 inline task_event_awaiter<T> task_promise<T>::await_transform(event ev) {
-    return task_event_awaiter<T>{std::move(ev).handle(), 0};
+    return task_event_awaiter<T>{std::move(ev).handle(), nullptr};
 }
 
 inline task_event_awaiter<void> task_promise<void>::await_transform(event ev) {
-    return task_event_awaiter<void>{std::move(ev).handle(), 0};
+    return task_event_awaiter<void>{std::move(ev).handle(), nullptr};
 }
 
 
 // Support `interest{}` and `interest_event{}`
 
-template <typename T>
-inline event_handle& task_promise<T>::make_interest() {
-    if (!has_interest_) {
-        interest_ = event_handle(new event_body);
-        has_interest_ = true;
-    }
-    return interest_;
-}
-
-inline event_handle& task_promise<void>::make_interest() {
+inline event_handle& task_promise_base::make_interest() {
     if (!has_interest_) {
         interest_ = event_handle(new event_body);
         has_interest_ = true;
@@ -519,11 +750,11 @@ inline event_handle& task_promise<void>::make_interest() {
 
 template <typename T>
 inline task_event_awaiter<T> task_promise<T>::await_transform(interest) {
-    return task_event_awaiter<T>{make_interest(), 0};
+    return task_event_awaiter<T>{make_interest(), nullptr};
 }
 
 inline task_event_awaiter<void> task_promise<void>::await_transform(interest) {
-    return task_event_awaiter<void>{make_interest(), 0};
+    return task_event_awaiter<void>{make_interest(), nullptr};
 }
 
 // make_event(interest)
@@ -531,8 +762,7 @@ inline task_event_awaiter<void> task_promise<void>::await_transform(interest) {
 //    `interest{}` appears as the sole argument to any()/all().
 
 inline event make_event(interest) {
-    auto q = new detail::quorum_event_body(1);
-    q->flags_ |= f_interest | f_want_interest;
+    auto q = new detail::quorum_event_body(1, interest{});
     return event_handle(q);
 }
 
@@ -560,31 +790,33 @@ inline interest_event_awaiter task_promise<void>::await_transform(interest_event
 //    interest; it may have already triggered.
 
 inline void quorum_event_body::fix_want_interest(event_handle& ievent) {
-    assert((flags_ & (f_quorum | f_want_interest)) == (f_quorum | f_want_interest));
-    flags_ &= ~f_want_interest;
-    if (triggered()) {
+    uint32_t qf = lock();
+    qf &= ~ef_want_interest;
+    if (qf & ef_triggered) {
+        unlock(qf);
         return;
     }
     // Apply local interest (this quorum has one or more `interest{}` members)
-    while (flags_ >= f_interest) {
-        add_member(ievent);
-        flags_ -= f_interest;
+    while (qf >= ef_interest) {
+        qf = add_member(qf - ef_interest, ievent);
     }
+    // That might trigger `this`. If it does, exit now, *without* propagating
+    // interest{} to members. They will need to be awaited explicitly to get
+    // the interest notification.
     if (triggered_ >= quorum_) {
-        trigger();
+        trigger_unlock(qf);
         return;
     }
-    // Apply transitive interest. Just as with `event-body::trigger()`, we
-    // cannot call `mem.fix_want_interest` directly -- there is a chance that
-    // `mem.fix_want_interest` triggers that member, which in turn triggers us
-    // and/or removes the last reference to `this`, deleting `this`. So make a
-    // stack copy first.
+    // Update members who want interest. Just as with `trigger_unlock()`, we
+    // cannot call `mem.fix_want_interest()` directly, since those calls might
+    // eventually delete `this`.
     small_vector<event_handle, 3> wi_members;
     for (auto& mem : members_) {
-        if (mem->flags_ & f_want_interest) {
+        if (mem->relaxed_flags() & ef_want_interest) {
             wi_members.push_back(mem);
         }
     }
+    unlock(qf);
     for (auto& mem : wi_members) {
         static_cast<quorum_event_body*>(mem.get())->fix_want_interest(ievent);
     }
@@ -618,17 +850,22 @@ inline bool event::triggered() const noexcept {
     return !ep_ || ep_->triggered();
 }
 
-inline void event::trigger() {
-    if (ep_) {
-        std::exchange(ep_, nullptr)->trigger();
-    }
+inline bool event::trigger() {
+    return ep_ && ep_->trigger();
 }
 
-inline const detail::event_handle& event::handle() const& {
+inline event& event::arm() {
+    if (!ep_ || ep_->triggered()) {
+        std::exchange(ep_, detail::event_handle{new detail::event_body});
+    }
+    return *this;
+}
+
+inline const detail::event_handle& event::handle() const& noexcept {
     return ep_;
 }
 
-inline detail::event_handle&& event::handle() && {
+inline detail::event_handle&& event::handle() && noexcept {
     return std::move(ep_);
 }
 
@@ -713,16 +950,28 @@ inline detail::task_awaiter<T> task<T>::operator co_await() const noexcept {
 
 // driver methods
 
-inline clock::time_point driver::now() {
-    return now_;
+inline system_time_point driver::now() noexcept {
+    return virtual_epoch_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(snow_.time_since_epoch());
 }
 
-inline void driver::step_time() {
-    now_ += clock::duration{1};
+inline steady_time_point driver::steady_now() noexcept {
+    return snow_;
+}
+
+inline void driver::step_time() noexcept {
+    snow_ += duration{1};
+}
+
+inline void driver::keepalive(event e) {
+    if (!e.triggered()) {
+        keepalives_.emplace_back(std::move(e).handle());
+    }
 }
 
 inline void driver::asap(event e) {
-    asap_.push_back(std::move(e));
+    if (e.handle()) {
+        asap_.emplace_back(std::move(e).handle());
+    }
 }
 
 inline event driver::asap() {
@@ -731,12 +980,14 @@ inline event driver::asap() {
     return e;
 }
 
-inline void driver::at(clock::time_point t, event e) {
-    timed_.emplace(t, std::move(e).handle());
+inline void driver::at(steady_time_point t, event e) {
+    if (e.handle()) {
+        timed_.emplace(t, std::move(e).handle());
+    }
 }
 
-inline event driver::at(clock::time_point t) {
-    if (t <= now_) {
+inline event driver::at(steady_time_point t) {
+    if (t <= snow_) {
         return event(nullptr);
     }
     event e;
@@ -744,35 +995,104 @@ inline event driver::at(clock::time_point t) {
     return e;
 }
 
-inline void driver::after(clock::duration d, event e) {
-    at(now() + d, std::move(e));
+inline void driver::at(system_time_point t, event e) {
+    after(t - now(), std::move(e));
 }
 
-inline event driver::after(clock::duration d) {
-    return at(now() + d);
+inline event driver::at(system_time_point t) {
+    return after(t - now());
+}
+
+inline void driver::after(duration d, event e) {
+    at(steady_now() + d, std::move(e));
+}
+
+inline event driver::after(duration d) {
+    return at(steady_now() + d);
+}
+
+template <typename Rep, typename Period>
+inline event driver::after(const std::chrono::duration<Rep, Period>& d) {
+    return at(steady_now() + std::chrono::duration_cast<duration>(d));
+}
+
+template <typename Rep, typename Period>
+inline void driver::after(const std::chrono::duration<Rep, Period>& d, event e) {
+    at(steady_now() + std::chrono::duration_cast<duration>(d), std::move(e));
+}
+
+inline void driver::loop() {
+    loop(looptype::complete);
+}
+
+inline void driver::poll() {
+    loop(looptype::poll);
 }
 
 
-// time functions
+// driver_guard
 
-inline clock::time_point now() {
-    return driver::main->now();
+inline driver_guard::driver_guard()
+    : drv_(driver::current.get()) {
+    ++drv_->guard_count_;
 }
 
-inline void step_time() {
-    driver::main->step_time();
+inline driver_guard::~driver_guard() {
+    if (drv_) {
+        --drv_->guard_count_;
+    }
+}
+
+inline driver_guard::driver_guard(driver_guard&& x)
+    : drv_(std::exchange(x.drv_, nullptr)) {
+}
+
+inline driver_guard& driver_guard::operator=(driver_guard&& x) {
+    if (drv_) {
+        --drv_->guard_count_;
+    }
+    drv_ = std::exchange(x.drv_, nullptr);
+    return *this;
+}
+
+
+// free functions
+
+inline system_time_point now() noexcept {
+    return driver::current->now();
+}
+
+inline steady_time_point steady_now() noexcept {
+    return driver::current->steady_now();
+}
+
+inline void step_time() noexcept {
+    driver::current->step_time();
+}
+
+inline void keepalive(event e) {
+    driver::current->keepalive(std::move(e));
 }
 
 inline event asap() {
-    return driver::main->asap();
+    return driver::current->asap();
 }
 
-inline event at(clock::time_point t) {
-    return driver::main->at(t);
+inline event at(steady_time_point t) {
+    return driver::current->at(t);
 }
 
-inline event after(clock::duration d) {
-    return driver::main->after(d);
+inline event at(system_time_point t) {
+    return driver::current->at(t);
+}
+
+inline event after(duration d) {
+    return driver::current->after(d);
+}
+
+template <typename Rep, typename Period>
+inline event after(const std::chrono::duration<Rep, Period>& d) {
+    return driver::current->after(d);
 }
 
 
@@ -864,11 +1184,30 @@ task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es) {
 // driver functions
 
 inline void loop() {
-    driver::main->loop();
+    driver::current->loop();
+}
+
+inline void poll() {
+    driver::current->poll();
 }
 
 inline void clear() {
-    driver::main->clear();
+    driver::current->clear();
+}
+
+inline uint32_t driver::lock() {
+    while (true) {
+        uint32_t flags = lock_.load(std::memory_order_relaxed);
+        if ((flags & df_lock) == 0
+            && lock_.compare_exchange_weak(flags, flags | df_lock, std::memory_order_acquire, std::memory_order_relaxed)) {
+            return flags;
+        }
+        detail::spinlock_hint();
+    }
+}
+
+inline void driver::unlock(uint32_t flags) {
+    lock_.store(flags, std::memory_order_release);
 }
 
 inline size_t driver::timer_size() const {

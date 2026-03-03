@@ -6,7 +6,9 @@
 #include <deque>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -15,6 +17,9 @@
 
 // cotamer.hh
 //    Public interface to the Cotamer coroutine library.
+
+// Define COTAMER_STATS to 1 to collect statistics.
+// #define COTAMER_STATS 1
 
 namespace cotamer {
 
@@ -35,14 +40,15 @@ public:
     event& operator=(const event&) = default;
     event& operator=(event&&) = default;
 
-    inline void trigger();
-    inline bool triggered() const noexcept;
+    inline bool triggered() const noexcept;    // has triggered
+    inline bool idle() const noexcept;         // has no listeners
+    inline bool empty() const noexcept;        // can be garbage collected
 
-    inline bool empty() const noexcept;
-    inline bool idle() const noexcept;
+    inline bool trigger();
+    inline event& arm();
 
-    inline const detail::event_handle& handle() const&;
-    inline detail::event_handle&& handle() &&;
+    inline const detail::event_handle& handle() const& noexcept;
+    inline detail::event_handle&& handle() && noexcept;
     std::string debug_info() const;
 
 private:
@@ -67,6 +73,7 @@ public:
     using promise_type = detail::task_promise<T>;
     using handle_type = std::coroutine_handle<promise_type>;
 
+    inline task() noexcept = default;
     explicit inline task(handle_type handle) noexcept;
     inline task(task&& x) noexcept;
     inline task& operator=(task&& x) noexcept;
@@ -74,12 +81,10 @@ public:
     task& operator=(const task&) = delete;
     inline ~task();
 
-    inline void detach();
-
-    inline event completion();
-    inline bool done();
-
-    inline void start();
+    inline void start();            // start a task waiting for interest{}
+    inline void detach();           // coroutine survives task<> deletion
+    inline bool done();             // has coroutine completed?
+    inline event completion();      // event that triggers on done()
 
     detail::task_awaiter<T> operator co_await() const noexcept;
 
@@ -95,10 +100,6 @@ private:
 struct interest {};
 struct interest_event {};
 
-// Exception thrown during driver::clear() to unwind suspended coroutines.
-struct clearing_error {};
-
-
 // Event combinators.
 // any(e1, e2, ...) — triggers when any one of its arguments triggers.
 // all(e1, e2, ...) — triggers when all of its arguments have triggered.
@@ -111,25 +112,11 @@ template <typename... Es> inline event all(Es&&... es);
 // result (wrapped in optional) if the task completes first, or nullopt if
 // one of the events triggers first.
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<T> t, Es&&... es);
+[[nodiscard]] task<std::optional<T>> attempt(task<T> t, Es&&... es);
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
+[[nodiscard]] task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
 template <typename... Es>
-task<std::optional<bool>> attempt(task<void> t, Es&&... es);
-
-
-// Time and scheduling functions (operate on driver::main).
-using clock = std::chrono::system_clock;
-inline clock::time_point now();
-inline void step_time();
-
-inline event asap();                   // triggers before next time step
-inline event after(clock::duration);   // triggers after a delay
-inline event at(clock::time_point);    // triggers at an absolute time
-
-inline void loop();                    // run event loop until quiescent
-inline void clear();                   // cancel all pending events
-void reset();                          // destroy and recreate driver
+[[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
 
 
 // driver
@@ -138,8 +125,12 @@ void reset();                          // destroy and recreate driver
 //    Time is simulated: the clock advances by one tick per coroutine
 //    resumption, and jumps forward to the next timer when idle.
 //
-//    A single global driver is stored in `driver::main`. The free functions
-//    `now()`, `after()`, `loop()`, etc. delegate to it.
+//    Each thread has its own driver stored in `driver::current`. The free
+//    functions `now()`, `after()`, `loop()`, etc. delegate to it.
+
+using system_time_point = std::chrono::system_clock::time_point;
+using steady_time_point = std::chrono::steady_clock::time_point;
+using duration = std::chrono::steady_clock::duration;
 
 class driver {
 public:
@@ -150,34 +141,135 @@ public:
     driver& operator=(const driver&) = delete;
     driver& operator=(driver&&) = delete;
 
-    inline clock::time_point now();
-    inline void step_time();
+    inline system_time_point now() noexcept;        // current system time (might go backwards)
+    inline steady_time_point steady_now() noexcept; // time since boot (monotonic)
+    inline void step_time() noexcept;
+
+    inline void keepalive(event);
 
     inline void asap(event);
     inline event asap();
-    inline void at(clock::time_point t, event);
-    inline event at(clock::time_point t);
-    inline void after(clock::duration d, event);
-    inline event after(clock::duration d);
 
-    void loop();
+    inline void at(steady_time_point t, event);
+    inline event at(steady_time_point t);
+    inline void at(system_time_point t, event);
+    inline event at(system_time_point t);
+    inline void after(duration d, event);
+    inline event after(duration d);
+    template <typename Rep, typename Period>
+    inline void after(const std::chrono::duration<Rep, Period>&, event);
+    template <typename Rep, typename Period>
+    inline event after(const std::chrono::duration<Rep, Period>&);
+
+    inline void loop();
+    inline void poll();
     void clear();
+    bool clearing() const { return clearing_; }
 
     // introspection
     inline size_t timer_size() const;
 
-    static std::unique_ptr<driver> main;
-    static bool clearing;
+    static thread_local std::unique_ptr<driver> current;
 
 private:
     friend struct detail::event_body;
-    template <typename T> friend struct detail::task_event_awaiter;
+    friend class driver_guard;
+    template <typename T> friend struct detail::task_final_awaiter;
 
-    std::deque<std::coroutine_handle<>> ready_;
-    std::deque<event> asap_;
+    system_time_point virtual_epoch_;
+    steady_time_point snow_;
+    bool clearing_ = false;
+    int guard_count_ = 0;
+    std::deque<detail::event_handle> asap_;
     timer_heap<detail::event_handle> timed_;
-    clock::time_point now_;
+    std::vector<detail::event_handle> keepalives_;
+
+    static constexpr uint32_t df_lock = 1;
+    static constexpr uint32_t df_nonempty = 2;
+    std::atomic<uint32_t> lock_ = 0;
+    std::vector<detail::event_handle> migrate_;
+
+    static constexpr size_t asap_quota = 0x1000; // run at most 4096 ASAP tasks per poll()
+
+    inline uint32_t lock();
+    inline void unlock(uint32_t flags);
+    void migrate_asap(detail::event_handle eh);
+    inline void migrate_wake();
+    void finish_migrate();
+
+    enum class looptype { complete, poll };
+    void loop(looptype);
 };
+
+
+// Time and scheduling functions (operate on driver::current)
+
+inline void loop();                    // run event loop until quiescent
+inline void poll();                    // run event loop once without blocking
+inline void clear();                   // cancel all pending events
+void reset();                          // destroy and recreate driver
+
+inline system_time_point now() noexcept;
+inline steady_time_point steady_now() noexcept;
+inline void step_time() noexcept;
+
+inline void keepalive(event);          // loop continues until event triggers
+
+inline event asap();                   // triggers before next time step
+
+inline event after(duration);          // triggers after a delay
+template <typename Rep, typename Period>
+inline event after(const std::chrono::duration<Rep, Period>&);
+inline event at(steady_time_point);    // triggers at an absolute time
+inline event at(system_time_point);    // triggers at an absolute system time
+
+
+// driver_guard
+//    Keeps the driver loop alive as long as it exists. Use when waiting
+//    for an event invisible to the driver — e.g., an event triggered on
+//    a different thread.
+
+class driver_guard {
+public:
+    inline driver_guard();
+    inline driver_guard(driver_guard&&);
+    inline driver_guard& operator=(driver_guard&&);
+    driver_guard(const driver_guard&) = delete;
+    driver_guard& operator=(const driver_guard&) = delete;
+    inline ~driver_guard();
+
+private:
+    driver* drv_;
+};
+
+
+// Error codes and exception type.
+
+enum class cotamer_errc {
+    cross_driver_await = 1
+};
+
+struct cotamer_error : std::logic_error {
+    explicit cotamer_error(cotamer_errc ec);
+    inline cotamer_errc code() const noexcept { return errc_; }
+
+private:
+    cotamer_errc errc_;
+    static constexpr const char* message(cotamer_errc ec) noexcept;
+};
+
+
+// Statistics.
+
+#if COTAMER_STATS
+struct statistics {
+    std::atomic<size_t> promises_allocated;
+    std::atomic<size_t> promises_destroyed;
+    std::atomic<size_t> events_allocated;
+    std::atomic<size_t> events_destroyed;
+};
+extern statistics stats;
+#endif
 
 }
 
