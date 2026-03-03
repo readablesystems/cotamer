@@ -42,6 +42,7 @@ private:
     cotamer::event rev_{nullptr};
     cotamer::event eev_{nullptr};
     cotamer::task<> task_;
+    cotamer::mutex mutex_;
     bool send_delay_ = false;
 
     inline cotamer::task<> make_writer(cotamer::fd);
@@ -68,6 +69,7 @@ inline cotamer::event message_stream::drained() {
 }
 
 inline cotamer::task<> message_stream::send(const void* buf, size_t len) {
+    cotamer::unique_lock guard(co_await mutex_);
     assert(len <= 0xFFFFFFFF && op_ != receiver);
     while (len_ > 0 && len_ + len > backlog && status_ == statuscode::running) {
         co_await ev_.arm();
@@ -140,6 +142,7 @@ inline size_t message_stream::first_message_length() const noexcept {
 }
 
 inline cotamer::task<std::string> message_stream::recv() {
+    cotamer::unique_lock guard(co_await mutex_);
     assert(op_ != sender);
     size_t fml;
     while ((fml = first_message_length()) > len_) {

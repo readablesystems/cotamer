@@ -16,6 +16,7 @@ struct quorum_event_body;
 template <typename T> struct task_promise;
 template <typename T> struct task_awaiter;
 template <typename T> struct task_event_awaiter;
+template <typename T, bool shared> struct task_mutex_event_awaiter;
 template <typename T> struct task_final_awaiter;
 struct interest_event_awaiter;
 

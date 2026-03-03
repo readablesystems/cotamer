@@ -199,6 +199,56 @@ std::string event::debug_info() const {
 }
 
 
+// mutex functions
+
+inline bool mutex::allow(bool is_shared, latch_type l) const noexcept {
+    return is_shared ? !(l & mf_lock_excl) : l < mf_lock_excl;
+}
+
+inline auto mutex::notify_locked(latch_type l) -> latch_type {
+    while (!waiters_.empty()) {
+        auto& fw = waiters_.front();
+        if (!fw.empty()) {
+            bool fws = waiter_shared(fw);
+            if (!allow(fws, l)) {
+                break;
+            }
+            if (fw->trigger()) {
+                l += fws ? mf_lock_shared : mf_lock_excl;
+            }
+        }
+        waiters_.pop_front();
+    }
+    return l;
+}
+
+void mutex::lock_impl(bool is_shared, detail::event_handle& e) {
+    latch_type l = latch();
+    l = notify_locked(l);
+    if (waiters_.empty() && allow(is_shared, l)) {
+        if (e) {
+            e->trigger();
+        }
+        l += is_shared ? mf_lock_shared : mf_lock_excl;
+    } else {
+        if (!e) {
+            e = detail::event_handle(new detail::event_body);
+        }
+        if (is_shared) {
+            e->set_user_flags(detail::ef_user);
+        }
+        waiters_.push_back(e);
+    }
+    unlatch(l);
+}
+
+void mutex::unlock_impl(bool is_shared) {
+    latch_type l = latch();
+    l = notify_locked(l - (is_shared ? mf_lock_shared : mf_lock_excl));
+    unlatch(l);
+}
+
+
 // error functions
 
 cotamer_error::cotamer_error(cotamer_errc ec)

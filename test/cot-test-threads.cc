@@ -891,6 +891,172 @@ void test_torture_destroy_trigger_race() {
 }
 
 
+// Torture: Mutex shared/exclusive contention across threads.
+// Each thread runs coroutines that repeatedly lock the mutex (exclusive or
+// shared), check mutual-exclusion invariants, then unlock. Exercises the
+// latch spinlock, awoken_ handoff, waiter queue, and cross-thread event
+// triggering (unlock on thread A triggers a waiter coroutine on thread B via
+// remote_ready_).
+void test_torture_mutex() {
+    constexpr int NTHREADS = 4;
+    constexpr int OPS_PER_THREAD = 500;
+
+    cot::mutex m;
+    std::atomic<int> active_exclusive{0};
+    std::atomic<int> active_shared{0};
+    std::atomic<int> violations{0};
+    std::atomic<int> completed{0};
+
+    auto thread_fn = [&](int) {
+        auto worker = [&]() -> cot::task<> {
+            for (int i = 0; i < OPS_PER_THREAD; ++i) {
+                if (i % 3 == 0) {
+                    co_await m.lock();
+                    int excl = active_exclusive.fetch_add(1) + 1;
+                    int shared = active_shared.load();
+                    if (excl != 1 || shared != 0) {
+                        violations.fetch_add(1);
+                    }
+                    std::this_thread::yield();
+                    active_exclusive.fetch_sub(1);
+                    m.unlock();
+                } else {
+                    co_await m.lock_shared();
+                    int excl = active_exclusive.load();
+                    active_shared.fetch_add(1);
+                    if (excl != 0) {
+                        violations.fetch_add(1);
+                    }
+                    std::this_thread::yield();
+                    active_shared.fetch_sub(1);
+                    m.unlock_shared();
+                }
+            }
+            completed.fetch_add(1);
+        };
+        auto t = worker();
+        while (!t.done()) {
+            cot::loop();
+            std::this_thread::yield();
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < NTHREADS; ++i) {
+        threads.emplace_back(thread_fn, i);
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    assert(completed.load() == NTHREADS);
+    assert(violations.load() == 0 && "mutual exclusion violated");
+    std::cerr << "torture_mutex: ok\n";
+}
+
+
+// Torture: Mutex with try_lock contention. Some threads use co_await lock(),
+// others spin with try_lock/try_lock_shared. Verifies that the atomic fast
+// paths (which bypass the latch and waiter queue) don't violate exclusion.
+void test_torture_mutex_trylock() {
+    constexpr int NTHREADS = 4;
+    constexpr int OPS_PER_THREAD = 2000;
+
+    cot::mutex m;
+    std::atomic<int> active_exclusive{0};
+    std::atomic<int> active_shared{0};
+    std::atomic<int> violations{0};
+    std::atomic<int> completed{0};
+    std::atomic<bool> stop{false};
+
+    // Half the threads use coroutine lock/unlock
+    auto coro_thread_fn = [&](int) {
+        auto worker = [&]() -> cot::task<> {
+            for (int i = 0; i < OPS_PER_THREAD; ++i) {
+                if (i % 3 == 0) {
+                    co_await m.lock();
+                    int excl = active_exclusive.fetch_add(1) + 1;
+                    int shared = active_shared.load();
+                    if (excl != 1 || shared != 0) {
+                        violations.fetch_add(1);
+                    }
+                    active_exclusive.fetch_sub(1);
+                    m.unlock();
+                } else {
+                    co_await m.lock_shared();
+                    int excl = active_exclusive.load();
+                    active_shared.fetch_add(1);
+                    if (excl != 0) {
+                        violations.fetch_add(1);
+                    }
+                    active_shared.fetch_sub(1);
+                    m.unlock_shared();
+                }
+            }
+            completed.fetch_add(1);
+        };
+        auto t = worker();
+        while (!t.done()) {
+            cot::loop();
+            std::this_thread::yield();
+        }
+    };
+
+    // Other half use try_lock/try_lock_shared (no coroutine, no driver)
+    auto trylock_thread_fn = [&](int) {
+        int ops = 0;
+        while (!stop.load(std::memory_order_relaxed) || ops < OPS_PER_THREAD) {
+            if (ops % 3 == 0) {
+                if (m.try_lock()) {
+                    int excl = active_exclusive.fetch_add(1) + 1;
+                    int shared = active_shared.load();
+                    if (excl != 1 || shared != 0) {
+                        violations.fetch_add(1);
+                    }
+                    active_exclusive.fetch_sub(1);
+                    m.unlock();
+                    ++ops;
+                }
+            } else {
+                if (m.try_lock_shared()) {
+                    int excl = active_exclusive.load();
+                    active_shared.fetch_add(1);
+                    if (excl != 0) {
+                        violations.fetch_add(1);
+                    }
+                    active_shared.fetch_sub(1);
+                    m.unlock_shared();
+                    ++ops;
+                }
+            }
+            std::this_thread::yield();
+        }
+        completed.fetch_add(1);
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < NTHREADS / 2; ++i) {
+        threads.emplace_back(coro_thread_fn, i);
+    }
+    for (int i = NTHREADS / 2; i < NTHREADS; ++i) {
+        threads.emplace_back(trylock_thread_fn, i);
+    }
+
+    // Let coroutine threads finish, then signal try_lock threads
+    for (int i = 0; i < NTHREADS / 2; ++i) {
+        threads[i].join();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    for (int i = NTHREADS / 2; i < NTHREADS; ++i) {
+        threads[i].join();
+    }
+
+    assert(completed.load() == NTHREADS);
+    assert(violations.load() == 0 && "mutual exclusion violated");
+    std::cerr << "torture_mutex_trylock: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -924,6 +1090,8 @@ int main(int argc, char* argv[]) {
     run("leak_await", test_leak_await);
     run("cross_thread_await_task", test_cross_thread_await_task);
     run("torture_destroy_trigger_race", test_torture_destroy_trigger_race);
+    run("torture_mutex", test_torture_mutex);
+    run("torture_mutex_trylock", test_torture_mutex_trylock);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");
