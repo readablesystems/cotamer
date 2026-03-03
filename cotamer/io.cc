@@ -231,7 +231,7 @@ inline std::optional<fd_update> fd_batch::pop() noexcept {
 
 }
 
-inline void driver::hard_pollfd() {
+void driver::hard_pollfd() {
 #if COTAMER_USE_KQUEUE
     if ((pollfd_ = kqueue()) < 0) {
         throw std::system_error(errno, std::generic_category());
@@ -255,7 +255,7 @@ inline void driver::hard_pollfd() {
     }
     epoll_event epev;
     epev.events = EPOLLIN;
-    epev.data.u64 = epoll_wakefd_ | (uint64_t(fd_event_set::internal_epoch) << 32);
+    epev.data.u64 = epoll_wakefd_ | (uint64_t(detail::fd_event_set::internal_epoch) << 32);
     if (epoll_ctl(pollfd_, EPOLL_CTL_ADD, epoll_wakefd_, &epev) < 0) {
         throw std::system_error(errno, std::generic_category());
     }

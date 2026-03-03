@@ -1,17 +1,17 @@
 #include "rpcgame.hh"
 #include "cotamer.hh"
-#include "message_buffer.hh"
+#include "message_stream.hh"
 
 namespace cot = cotamer;
 using namespace std::chrono_literals;
 
 class RPCGameServer {
-    message_buffer sender_;
-    message_buffer recver_;
+    message_stream sender_;
+    message_stream recver_;
 public:
     RPCGameServer(cot::fd f)
-        : sender_(f, message_buffer::sender),
-          recver_(f, message_buffer::receiver) {
+        : sender_(f, message_stream::sender),
+          recver_(f, message_stream::receiver) {
     }
 
     cot::task<> handle_try(const std::string& m) {

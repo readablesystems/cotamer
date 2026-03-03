@@ -1,17 +1,18 @@
 #pragma once
 #include "cotamer.hh"
+#include <cstring>
 
-class message_buffer {
+class message_stream {
 public:
     enum operation { sender, receiver };
     enum class statuscode { running, eof, error };
 
-    inline message_buffer(cotamer::fd, operation);
-    inline ~message_buffer();
-    message_buffer(const message_buffer&) = delete;
-    message_buffer(message_buffer&&) = delete;
-    message_buffer& operator=(const message_buffer&) = delete;
-    message_buffer& operator=(message_buffer&&) = delete;
+    inline message_stream(cotamer::fd, operation);
+    inline ~message_stream();
+    message_stream(const message_stream&) = delete;
+    message_stream(message_stream&&) = delete;
+    message_stream& operator=(const message_stream&) = delete;
+    message_stream& operator=(message_stream&&) = delete;
 
     inline bool running() const noexcept { return status_ == statuscode::running; }
     inline bool eof() const noexcept     { return status_ == statuscode::eof; }
@@ -23,6 +24,8 @@ public:
     inline cotamer::task<> send(const std::string_view& s);
 
     inline cotamer::task<std::string> recv();
+
+    inline size_t size() const noexcept  { return len_; }
 
 private:
     static constexpr size_t backlog = 1 << 20;
@@ -40,6 +43,7 @@ private:
     cotamer::event eev_{nullptr};
     cotamer::task<> task_;
     cotamer::mutex mutex_;
+    bool send_delay_ = false;
 
     inline cotamer::task<> make_writer(cotamer::fd);
     inline size_t first_message_length() const noexcept;
@@ -47,24 +51,24 @@ private:
 };
 
 
-inline message_buffer::message_buffer(cotamer::fd f, operation op)
+inline message_stream::message_stream(cotamer::fd f, operation op)
     : buf_(new char[capacity_]), op_(op),
       status_(f.valid() ? statuscode::running : statuscode::error),
       task_(op == receiver ? make_reader(std::move(f)) : make_writer(std::move(f))) {
 }
 
-inline message_buffer::~message_buffer() {
+inline message_stream::~message_stream() {
     delete[] buf_;
 }
 
-inline cotamer::event message_buffer::drained() {
+inline cotamer::event message_stream::drained() {
     if (eev_.triggered() && len_ != 0) {
         eev_.arm();
     }
     return eev_;
 }
 
-inline cotamer::task<> message_buffer::send(const void* buf, size_t len) {
+inline cotamer::task<> message_stream::send(const void* buf, size_t len) {
     cotamer::unique_lock guard(co_await mutex_);
     assert(len <= 0xFFFFFFFF && op_ != receiver);
     while (len_ > 0 && len_ + len > backlog && status_ == statuscode::running) {
@@ -92,11 +96,11 @@ inline cotamer::task<> message_buffer::send(const void* buf, size_t len) {
     rev_.trigger();
 }
 
-inline cotamer::task<> message_buffer::send(const std::string_view& s) {
+inline cotamer::task<> message_stream::send(const std::string_view& s) {
     return send(s.data(), s.size());
 }
 
-inline cotamer::task<> message_buffer::make_writer(cotamer::fd f) {
+inline cotamer::task<> message_stream::make_writer(cotamer::fd f) {
     while (true) {
         if (!f) {
             status_ = statuscode::error;
@@ -105,6 +109,9 @@ inline cotamer::task<> message_buffer::make_writer(cotamer::fd f) {
         if (len_ == 0) {
             eev_.trigger();
             co_await rev_.arm();
+            if (send_delay_) {
+                co_await cotamer::asap();
+            }
             continue;
         }
         ssize_t rv = ::write(f.fileno(), buf_ + (pos_ - head_), len_);
@@ -125,7 +132,7 @@ inline cotamer::task<> message_buffer::make_writer(cotamer::fd f) {
     ev_.trigger();
 }
 
-inline size_t message_buffer::first_message_length() const noexcept {
+inline size_t message_stream::first_message_length() const noexcept {
     if (len_ < 4) {
         return size_t(-1);
     }
@@ -134,7 +141,7 @@ inline size_t message_buffer::first_message_length() const noexcept {
     return dbuf + 4;
 }
 
-inline cotamer::task<std::string> message_buffer::recv() {
+inline cotamer::task<std::string> message_stream::recv() {
     cotamer::unique_lock guard(co_await mutex_);
     assert(op_ != sender);
     size_t fml;
@@ -153,7 +160,7 @@ inline cotamer::task<std::string> message_buffer::recv() {
     co_return std::string(buf_ + (pos_ - head_) - (fml - 4), fml - 4);
 }
 
-inline cotamer::task<> message_buffer::make_reader(cotamer::fd f) {
+inline cotamer::task<> message_stream::make_reader(cotamer::fd f) {
     while (true) {
         if (!f) {
             status_ = statuscode::error;

@@ -1,17 +1,17 @@
 #include "rpcgame.hh"
 #include "cotamer.hh"
-#include "message_buffer.hh"
+#include "message_stream.hh"
 
 namespace cot = cotamer;
 
 class RPCGameClient {
-    message_buffer sender_;
-    message_buffer recver_;
+    message_stream sender_;
+    message_stream recver_;
 
 public:
     RPCGameClient(cot::fd fd)
-        : sender_(fd, message_buffer::sender),
-          recver_(fd, message_buffer::receiver) {
+        : sender_(fd, message_stream::sender),
+          recver_(fd, message_stream::receiver) {
     }
 
     cot::task<> send_try(const char* name, size_t name_len, uint64_t count) {
@@ -49,6 +49,12 @@ public:
             << "\nmatch: " << (ok ? "true\n" : "false\n");
     }
 
+    void maybe_poll() {
+        if (sender_.size() > 8192) {
+            cot::poll();
+        }
+    }
+
 private:
     uint64_t _serial = 1;
 };
@@ -70,7 +76,7 @@ void client_connect(std::string address) {
 
 void client_send_try(const char* name, size_t name_len, uint64_t count) {
     client->send_try(name, name_len, count).detach();
-    cot::poll();
+    client->maybe_poll();
 }
 
 void client_finish() {
