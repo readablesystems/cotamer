@@ -1,4 +1,5 @@
 #include "cotamer.hh"
+#include "message_buffer.hh"
 #include "cotamer_tcp.hh"
 #include "cotamer_serial.hh"
 #include <atomic>
@@ -91,9 +92,12 @@ cot::task<> test_tcp_echo() {
     // Echo server: accept one connection, echo back one frame, then close
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
-        cot::tcp_stream stream(co_await cot::accept(lfd));
-        auto frame = co_await stream.recv_frame();
-        co_await stream.send_frame(frame.data(), frame.size());
+        auto cfd = co_await cot::accept(lfd);
+        message_buffer readbuf(cfd, message_buffer::reader);
+        message_buffer writebuf(cfd, message_buffer::writer);
+        auto frame = co_await readbuf.recv();
+        writebuf.send(frame);
+        co_await writebuf.drained();
     };
     server().detach();
 
@@ -102,12 +106,13 @@ cot::task<> test_tcp_echo() {
 
     // Client: connect, send a frame, receive the echo
     auto client = [&]() -> cot::task<> {
-        cot::tcp_stream stream(co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port)));
-        const char msg[] = "echo test message";
-        co_await stream.send_frame(msg, sizeof(msg));
-        auto reply = co_await stream.recv_frame();
-        assert(reply.size() == sizeof(msg));
-        assert(std::memcmp(reply.data(), msg, sizeof(msg)) == 0);
+        auto cfd = co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port));
+        message_buffer readbuf(cfd, message_buffer::reader);
+        message_buffer writebuf(cfd, message_buffer::writer);
+        std::string msg("echo test message");
+        writebuf.send(msg);
+        auto reply = co_await readbuf.recv();
+        assert(reply == msg);
         std::cerr << "tcp_echo: ok\n";
     };
     co_await client();
@@ -184,30 +189,35 @@ cot::task<> test_tcp_multi_frame() {
 
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
-        cot::tcp_stream stream(co_await cot::accept(lfd));
-        // Receive 3 frames and send them back reversed
-        std::vector<std::vector<char>> frames;
+        auto cfd = co_await cot::accept(lfd);
+        // Receive 3 messages and send them back reversed
+        std::vector<std::string> frames;
+        message_buffer readbuf(cfd, message_buffer::reader);
         for (int i = 0; i < 3; ++i) {
-            frames.push_back(co_await stream.recv_frame());
+            frames.emplace_back(co_await readbuf.recv());
         }
+        message_buffer writebuf(cfd, message_buffer::writer);
         for (int i = 2; i >= 0; --i) {
-            co_await stream.send_frame(frames[i].data(), frames[i].size());
+            writebuf.send(frames[i]);
         }
+        co_await writebuf.drained();
     };
     server().detach();
 
     co_await cot::after(2ms); // give `tcp_listen` a chance
 
     auto client = [&]() -> cot::task<> {
-        cot::tcp_stream stream(co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port)));
+        auto cfd = co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port));
+        message_buffer writebuf(cfd, message_buffer::writer);
         const char* msgs[] = {"first", "second", "third"};
         for (int i = 0; i < 3; ++i) {
-            co_await stream.send_frame(msgs[i], strlen(msgs[i]));
+            writebuf.send(msgs[i]);
         }
         // Should receive in reverse order
+        message_buffer readbuf(cfd, message_buffer::reader);
         for (int i = 2; i >= 0; --i) {
-            auto frame = co_await stream.recv_frame();
-            assert(std::string(frame.data(), frame.size()) == msgs[i]);
+            auto frame = co_await readbuf.recv();
+            assert(frame == msgs[i]);
         }
         std::cerr << "tcp_multi_frame: ok\n";
     };

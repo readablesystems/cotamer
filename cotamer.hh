@@ -44,6 +44,7 @@ public:
     inline bool empty() const noexcept;        // can be garbage collected
 
     inline bool trigger();
+    inline event& arm();
 
     inline const detail::event_handle& handle() const& noexcept;
     inline detail::event_handle&& handle() && noexcept;
@@ -71,6 +72,7 @@ public:
     using promise_type = detail::task_promise<T>;
     using handle_type = std::coroutine_handle<promise_type>;
 
+    inline task() noexcept = default;
     explicit inline task(handle_type handle) noexcept;
     inline task(task&& x) noexcept;
     inline task& operator=(task&& x) noexcept;

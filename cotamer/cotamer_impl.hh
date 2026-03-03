@@ -158,6 +158,7 @@ struct task_promise : public task_promise_base {
     task_event_awaiter<T> await_transform(event ev);
     template <bool shared>
     task_mutex_event_awaiter<T, shared> await_transform(mutex_event<shared> ev);
+    task_mutex_event_awaiter<T, false> await_transform(mutex&);
     inline task_event_awaiter<T> await_transform(interest);
     inline interest_event_awaiter await_transform(interest_event);
     template <typename Aw>
@@ -204,6 +205,7 @@ struct task_promise<void> : public task_promise_base {
     task_event_awaiter<void> await_transform(event ev);
     template <bool shared>
     task_mutex_event_awaiter<void, shared> await_transform(mutex_event<shared> ev);
+    inline task_mutex_event_awaiter<void, false> await_transform(mutex&);
     inline task_event_awaiter<void> await_transform(interest);
     inline interest_event_awaiter await_transform(interest_event);
     template <typename Aw>
@@ -957,6 +959,13 @@ inline bool event::triggered() const noexcept {
 
 inline bool event::trigger() {
     return ep_ && ep_->trigger();
+}
+
+inline event& event::arm() {
+    if (!ep_ || ep_->triggered()) {
+        std::exchange(ep_, detail::event_handle{new detail::event_body});
+    }
+    return *this;
 }
 
 inline const detail::event_handle& event::handle() const& noexcept {
@@ -1778,6 +1787,17 @@ inline void shared_lock::unlock() {
 inline auto shared_lock::release() noexcept -> mutex_type* {
     owned_ = false;
     return std::exchange(m_, nullptr);
+}
+
+namespace detail {
+template <typename T>
+inline task_mutex_event_awaiter<T, false> task_promise<T>::await_transform(mutex& m) {
+    return await_transform(m.lock());
+}
+
+inline task_mutex_event_awaiter<void, false> task_promise<void>::await_transform(mutex& m) {
+    return await_transform(m.lock());
+}
 }
 
 }
