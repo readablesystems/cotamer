@@ -13,7 +13,8 @@ ifeq ($(V),1)
 cmake_verbose := --verbose
 endif
 
-targets = cot-test cot-test-threads cot-test-io ctconsensus
+targets = cot-test cot-test-threads cot-test-io ctconsensus \
+	rpcg-client rpcg-server
 
 all:
 	cmake -B $(BUILD) $(cmake_build)
