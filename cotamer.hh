@@ -171,7 +171,8 @@ public:
     inline event file_event(const cotamer::fd& f, fdevent type);
     inline void notify_close(int base_fileno);
 
-    void loop();
+    inline void loop();
+    inline void poll();
     void clear();
     bool clearing() const { return clearing_; }
 
@@ -222,6 +223,9 @@ private:
     void hard_pollfd();
     void apply_fd_update(detail::fd_batch&, const detail::fd_update&);
     bool watch_fds(detail::fd_batch&, duration timeout);
+
+    enum class looptype { complete, poll };
+    void loop(looptype);
 };
 
 
@@ -229,6 +233,7 @@ private:
 
 inline void set_clock(clock);
 inline void loop();                    // run event loop until quiescent
+inline void poll();                    // run event loop once without blocking
 inline void clear();                   // cancel all pending events
 void reset();                          // destroy and recreate driver
 

@@ -72,7 +72,7 @@ driver::~driver() {
     }
 }
 
-void driver::loop() {
+void driver::loop(looptype lt) {
     detail::fd_batch fdb;
 
     while (true) {
@@ -115,7 +115,8 @@ void driver::loop() {
         duration timeout;
         if (!asap_.empty()
             || !real_time_
-            || lock_.load(std::memory_order_relaxed)) {
+            || lock_.load(std::memory_order_relaxed)
+            || lt == looptype::poll) {
             timeout = duration::zero();
         } else if (!timed_.empty()) {
             timeout = timed_.top_time() - steady_now();
@@ -150,6 +151,11 @@ void driver::loop() {
                 coh();
                 step_time();
             }
+        }
+
+        // exit if polling
+        if (lt == looptype::poll) {
+            break;
         }
     }
     clearing_ = false;

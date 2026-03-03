@@ -3,7 +3,7 @@
 
 class message_buffer {
 public:
-    enum operation { reader, writer };
+    enum operation { sender, receiver };
     enum class statuscode { running, eof, error };
 
     inline message_buffer(cotamer::fd, operation);
@@ -39,6 +39,7 @@ private:
     cotamer::event rev_{nullptr};
     cotamer::event eev_{nullptr};
     cotamer::task<> task_;
+    cotamer::mutex mutex_;
 
     inline cotamer::task<> make_writer(cotamer::fd);
     inline size_t first_message_length() const noexcept;
@@ -49,7 +50,7 @@ private:
 inline message_buffer::message_buffer(cotamer::fd f, operation op)
     : buf_(new char[capacity_]), op_(op),
       status_(f.valid() ? statuscode::running : statuscode::error),
-      task_(op == reader ? make_reader(std::move(f)) : make_writer(std::move(f))) {
+      task_(op == receiver ? make_reader(std::move(f)) : make_writer(std::move(f))) {
 }
 
 inline message_buffer::~message_buffer() {
@@ -64,7 +65,8 @@ inline cotamer::event message_buffer::drained() {
 }
 
 inline cotamer::task<> message_buffer::send(const void* buf, size_t len) {
-    assert(len <= 0xFFFFFFFF && op_ != reader);
+    cotamer::unique_lock guard(co_await mutex_);
+    assert(len <= 0xFFFFFFFF && op_ != receiver);
     while (len_ > 0 && len_ + len > backlog && status_ == statuscode::running) {
         co_await ev_.arm();
     }
@@ -133,7 +135,8 @@ inline size_t message_buffer::first_message_length() const noexcept {
 }
 
 inline cotamer::task<std::string> message_buffer::recv() {
-    assert(op_ != writer);
+    cotamer::unique_lock guard(co_await mutex_);
+    assert(op_ != sender);
     size_t fml;
     while ((fml = first_message_length()) > len_) {
         if (status_ != statuscode::running) {

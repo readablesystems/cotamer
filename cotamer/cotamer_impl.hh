@@ -1148,6 +1148,14 @@ inline event driver::file_event(const cotamer::fd& f, fdevent type) {
     return fds_.watch(f.fileno(), int(type), f.body(), this);
 }
 
+inline void driver::loop() {
+    loop(looptype::complete);
+}
+
+inline void driver::poll() {
+    loop(looptype::poll);
+}
+
 
 // driver_guard
 
@@ -1333,6 +1341,10 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
 
 inline void loop() {
     driver::current->loop();
+}
+
+inline void poll() {
+    driver::current->poll();
 }
 
 inline void clear() {
