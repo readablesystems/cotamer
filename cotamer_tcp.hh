@@ -1,5 +1,5 @@
 #pragma once
-#include "cotamer_io.hh"
+#include "cotamer.hh"
 #include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
@@ -15,15 +15,6 @@
 
 namespace cotamer {
 
-// Set a file descriptor to non-blocking mode.
-inline void set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        throw std::runtime_error("set_nonblocking failed");
-    }
-}
-
-
 // tcp_stream
 //    Owns a TCP file descriptor and provides length-prefixed message framing.
 //    Messages are sent as [4-byte big-endian length][payload].
@@ -31,7 +22,6 @@ inline void set_nonblocking(int fd) {
 class tcp_stream {
 public:
     explicit tcp_stream(cotamer::fd f) : fd_(std::move(f)) {
-        set_nonblocking(fd_.fileno());
         int flag = 1;
         setsockopt(fd_.fileno(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     }
@@ -101,79 +91,5 @@ public:
 private:
     cotamer::fd fd_;
 };
-
-
-// Create a non-blocking listening socket bound to host:port.
-inline cotamer::fd tcp_listen(const char* host, uint16_t port, int backlog = 128) {
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-    auto port_str = std::to_string(port);
-    struct addrinfo* res = nullptr;
-    if (getaddrinfo(host, port_str.c_str(), &hints, &res) != 0 || !res) {
-        throw std::runtime_error("tcp_listen: getaddrinfo failed");
-    }
-
-    int raw = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (raw < 0) {
-        freeaddrinfo(res);
-        throw std::runtime_error("tcp_listen: socket failed");
-    }
-    int opt = 1;
-    setsockopt(raw, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    if (bind(raw, res->ai_addr, res->ai_addrlen) < 0) {
-        freeaddrinfo(res);
-        ::close(raw);
-        throw std::runtime_error(std::string("tcp_listen: bind failed: ") + strerror(errno));
-    }
-    freeaddrinfo(res);
-
-    if (listen(raw, backlog) < 0) {
-        ::close(raw);
-        throw std::runtime_error("tcp_listen: listen failed");
-    }
-    set_nonblocking(raw);
-    return cotamer::fd(raw);
-}
-
-
-// Accept a connection and return a tcp_stream.
-inline task<tcp_stream> tcp_accept(const cotamer::fd& listen_fd) {
-    auto f = co_await accept(listen_fd);
-    if (!f) {
-        throw std::runtime_error("tcp_accept failed");
-    }
-    co_return tcp_stream(std::move(f));
-}
-
-
-// Connect to host:port and return a tcp_stream.
-inline task<tcp_stream> tcp_connect(const char* host, uint16_t port) {
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    auto port_str = std::to_string(port);
-    struct addrinfo* res = nullptr;
-    if (getaddrinfo(host, port_str.c_str(), &hints, &res) != 0 || !res) {
-        throw std::runtime_error("tcp_connect: getaddrinfo failed");
-    }
-
-    int raw = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (raw < 0) {
-        freeaddrinfo(res);
-        throw std::runtime_error("tcp_connect: socket failed");
-    }
-    set_nonblocking(raw);
-
-    cotamer::fd f(raw);
-    int r = co_await connect(f, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-    if (r < 0) {
-        throw std::runtime_error("tcp_connect: connect failed");
-    }
-    co_return tcp_stream(std::move(f));
-}
 
 } // namespace cotamer

@@ -1,5 +1,4 @@
 #include "cotamer.hh"
-#include "cotamer_io.hh"
 #include "cotamer_tcp.hh"
 #include "cotamer_serial.hh"
 #include <atomic>
@@ -91,19 +90,19 @@ cot::task<> test_tcp_echo() {
 
     // Echo server: accept one connection, echo back one frame, then close
     auto server = [&]() -> cot::task<> {
-        auto lfd = cot::tcp_listen("127.0.0.1", port);
-        auto stream = co_await cot::tcp_accept(lfd);
+        auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
+        cot::tcp_stream stream(co_await cot::accept(lfd));
         auto frame = co_await stream.recv_frame();
         co_await stream.send_frame(frame.data(), frame.size());
     };
     server().detach();
 
     // Give the server a moment to start listening
-    co_await cot::asap();
+    co_await cot::after(2ms); // give `tcp_listen` a chance
 
     // Client: connect, send a frame, receive the echo
     auto client = [&]() -> cot::task<> {
-        auto stream = co_await cot::tcp_connect("127.0.0.1", port);
+        cot::tcp_stream stream(co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port)));
         const char msg[] = "echo test message";
         co_await stream.send_frame(msg, sizeof(msg));
         auto reply = co_await stream.recv_frame();
@@ -184,8 +183,8 @@ cot::task<> test_tcp_multi_frame() {
     uint16_t port = 19877;
 
     auto server = [&]() -> cot::task<> {
-        auto lfd = cot::tcp_listen("127.0.0.1", port);
-        auto stream = co_await cot::tcp_accept(lfd);
+        auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
+        cot::tcp_stream stream(co_await cot::accept(lfd));
         // Receive 3 frames and send them back reversed
         std::vector<std::vector<char>> frames;
         for (int i = 0; i < 3; ++i) {
@@ -197,10 +196,10 @@ cot::task<> test_tcp_multi_frame() {
     };
     server().detach();
 
-    co_await cot::asap();
+    co_await cot::after(2ms); // give `tcp_listen` a chance
 
     auto client = [&]() -> cot::task<> {
-        auto stream = co_await cot::tcp_connect("127.0.0.1", port);
+        cot::tcp_stream stream(co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port)));
         const char* msgs[] = {"first", "second", "third"};
         for (int i = 0; i < 3; ++i) {
             co_await stream.send_frame(msgs[i], strlen(msgs[i]));

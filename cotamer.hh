@@ -12,6 +12,8 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include "cotamer/timer_heap.hh"
 #include "cotamer/event_handle.hh"
 
@@ -37,9 +39,9 @@ public:
     event& operator=(const event&) = default;
     event& operator=(event&&) = default;
 
-    inline bool triggered() const noexcept;
-    inline bool empty() const noexcept;
-    inline bool idle() const noexcept;
+    inline bool triggered() const noexcept;    // has triggered
+    inline bool idle() const noexcept;         // has no listeners
+    inline bool empty() const noexcept;        // can be garbage collected
 
     inline bool trigger();
 
@@ -122,8 +124,8 @@ template <typename... Es>
 //    Time is simulated: the clock advances by one tick per coroutine
 //    resumption, and jumps forward to the next timer when idle.
 //
-//    A single global driver is stored in `driver::main`. The free functions
-//    `now()`, `after()`, `loop()`, etc. delegate to it.
+//    Each thread has its own driver stored in `driver::current`. The free
+//    functions `now()`, `after()`, `loop()`, etc. delegate to it.
 
 using system_time_point = std::chrono::system_clock::time_point;
 using steady_time_point = std::chrono::steady_clock::time_point;
@@ -148,8 +150,11 @@ public:
     inline steady_time_point steady_now() noexcept; // time since boot (monotonic)
     inline void step_time() noexcept;
 
+    inline void keepalive(event);
+
     inline void asap(event);
     inline event asap();
+
     inline void at(steady_time_point t, event);
     inline event at(steady_time_point t);
     inline void at(system_time_point t, event);
@@ -160,6 +165,7 @@ public:
     inline void after(const std::chrono::duration<Rep, Period>&, event);
     template <typename Rep, typename Period>
     inline event after(const std::chrono::duration<Rep, Period>&);
+
     inline event file_event(const cotamer::fd& f, fdevent type);
     inline void notify_close(int base_fileno);
 
@@ -170,11 +176,12 @@ public:
     // introspection
     inline size_t timer_size() const;
 
-    static thread_local std::unique_ptr<driver> main;
+    static thread_local std::unique_ptr<driver> current;
 
 private:
     friend struct detail::event_body;
     friend struct detail::fd_body;
+    friend class driver_guard;
     template <typename T> friend struct detail::task_final_awaiter;
     friend void set_clock(cotamer::clock);
 
@@ -182,8 +189,10 @@ private:
     steady_time_point snow_;
     bool clearing_ = false;
     bool real_time_ = false;
+    int guard_count_ = 0;
     std::deque<detail::event_handle> asap_;
     timer_heap<detail::event_handle> timed_;
+    std::vector<detail::event_handle> keepalives_;
 
     static constexpr uint32_t df_lock = 1;
     static constexpr uint32_t df_nonempty = 2;
@@ -208,12 +217,13 @@ private:
     void finish_migrate();
 
     inline int pollfd();
+    void hard_pollfd();
     void apply_fd_update(detail::fd_batch&, const detail::fd_update&);
     bool watch_fds(detail::fd_batch&, duration timeout);
 };
 
 
-// Time and scheduling functions (operate on driver::main)
+// Time and scheduling functions (operate on driver::current)
 
 inline void set_clock(clock);
 inline void loop();                    // run event loop until quiescent
@@ -224,12 +234,34 @@ inline system_time_point now() noexcept;
 inline steady_time_point steady_now() noexcept;
 inline void step_time() noexcept;
 
+inline void keepalive(event);          // loop continues until event triggers
+
 inline event asap();                   // triggers before next time step
+
 inline event after(duration);          // triggers after a delay
 template <typename Rep, typename Period>
 inline event after(const std::chrono::duration<Rep, Period>&);
 inline event at(steady_time_point);    // triggers at an absolute time
 inline event at(system_time_point);    // triggers at an absolute system time
+
+
+// driver_guard
+//    Keeps the driver loop alive as long as it exists. Use when waiting
+//    for an event invisible to the driver — e.g., an event triggered on
+//    a different thread.
+
+class driver_guard {
+public:
+    inline driver_guard();
+    inline driver_guard(driver_guard&&);
+    inline driver_guard& operator=(driver_guard&&);
+    driver_guard(const driver_guard&) = delete;
+    driver_guard& operator=(const driver_guard&) = delete;
+    inline ~driver_guard();
+
+private:
+    driver* drv_;
+};
 
 
 // fd
@@ -262,6 +294,20 @@ private:
 inline event readable(const fd&);      // triggers when `read(fd)` won't block
 inline event writable(const fd&);      // triggers when `write(fd)` won't block
 inline event closed(const fd&);        // triggers when `fd` errors or closes
+
+
+// File-related functions
+
+inline void set_nonblocking(int rawfd);
+inline task<ssize_t> read_once(const fd& f, void* buf, size_t n);
+inline task<ssize_t> write_once(const fd& f, const void* buf, size_t n);
+inline task<ssize_t> write(const fd& f, const void* buf, size_t n);
+
+inline task<int> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
+inline task<fd> accept(const fd& listen_fd);
+
+task<cotamer::fd> tcp_listen(std::string address, int backlog = 128);
+task<cotamer::fd> tcp_connect(std::string address);
 
 
 // mutex, mutex_event, unique_lock, shared_lock
@@ -433,3 +479,4 @@ private:
 }
 
 #include "cotamer/cotamer_impl.hh"
+#include "cotamer/io.hh"

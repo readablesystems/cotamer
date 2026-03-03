@@ -546,7 +546,7 @@ cot::task<> test_timer_heap_cull() {
     // entries, the first emplace should cull down to ~32 (the autocull loop
     // threshold).
     co_await cot::after(1ms);
-    size_t sz = cot::driver::main->timer_size();
+    size_t sz = cot::driver::current->timer_size();
     std::cerr << "timer_heap_cull: timer_size=" << sz << "\n";
     assert(sz < 40 && "timer heap should have autoculled stale 300ms entries");
 }

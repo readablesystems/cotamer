@@ -29,6 +29,7 @@ endif()
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
     cotamer/utils.cc
+    cotamer/io.cc
 )
 
 add_executable(cot-test

@@ -142,7 +142,7 @@ struct task_promise_base {
     std::coroutine_handle<task_promise_base> continuation_;
 
     inline task_promise_base()
-        : home_(driver::main.get()) {
+        : home_(driver::current.get()) {
     }
     inline event_handle& make_interest();
 };
@@ -1076,8 +1076,16 @@ inline void driver::step_time() noexcept {
     }
 }
 
+inline void driver::keepalive(event e) {
+    if (!e.triggered()) {
+        keepalives_.emplace_back(std::move(e).handle());
+    }
+}
+
 inline void driver::asap(event e) {
-    asap_.emplace_back(std::move(e).handle());
+    if (e.handle()) {
+        asap_.emplace_back(std::move(e).handle());
+    }
 }
 
 inline event driver::asap() {
@@ -1087,7 +1095,9 @@ inline event driver::asap() {
 }
 
 inline void driver::at(steady_time_point t, event e) {
-    timed_.emplace(t, std::move(e).handle());
+    if (e.handle()) {
+        timed_.emplace(t, std::move(e).handle());
+    }
 }
 
 inline event driver::at(steady_time_point t) {
@@ -1130,57 +1140,87 @@ inline event driver::file_event(const cotamer::fd& f, fdevent type) {
 }
 
 
+// driver_guard
+
+inline driver_guard::driver_guard()
+    : drv_(driver::current.get()) {
+    ++drv_->guard_count_;
+}
+
+inline driver_guard::~driver_guard() {
+    if (drv_) {
+        --drv_->guard_count_;
+    }
+}
+
+inline driver_guard::driver_guard(driver_guard&& x)
+    : drv_(std::exchange(x.drv_, nullptr)) {
+}
+
+inline driver_guard& driver_guard::operator=(driver_guard&& x) {
+    if (drv_) {
+        --drv_->guard_count_;
+    }
+    drv_ = std::exchange(x.drv_, nullptr);
+    return *this;
+}
+
+
 // free functions
 
 inline void set_clock(cotamer::clock ct) {
     bool is_real = ct == cotamer::clock::real_time;
     driver::global_real_time = is_real;
-    driver::main->set_clock(ct);
+    driver::current->set_clock(ct);
 }
 
 inline system_time_point now() noexcept {
-    return driver::main->now();
+    return driver::current->now();
 }
 
 inline steady_time_point steady_now() noexcept {
-    return driver::main->steady_now();
+    return driver::current->steady_now();
 }
 
 inline void step_time() noexcept {
-    driver::main->step_time();
+    driver::current->step_time();
+}
+
+inline void keepalive(event e) {
+    driver::current->keepalive(std::move(e));
 }
 
 inline event asap() {
-    return driver::main->asap();
+    return driver::current->asap();
 }
 
 inline event at(steady_time_point t) {
-    return driver::main->at(t);
+    return driver::current->at(t);
 }
 
 inline event at(system_time_point t) {
-    return driver::main->at(t);
+    return driver::current->at(t);
 }
 
 inline event after(duration d) {
-    return driver::main->after(d);
+    return driver::current->after(d);
 }
 
 template <typename Rep, typename Period>
 inline event after(const std::chrono::duration<Rep, Period>& d) {
-    return driver::main->after(d);
+    return driver::current->after(d);
 }
 
 inline event readable(const fd& f) {
-    return driver::main->file_event(f, fdevent::read);
+    return driver::current->file_event(f, fdevent::read);
 }
 
 inline event writable(const fd& f) {
-    return driver::main->file_event(f, fdevent::write);
+    return driver::current->file_event(f, fdevent::write);
 }
 
 inline event closed(const fd& f) {
-    return driver::main->file_event(f, fdevent::close);
+    return driver::current->file_event(f, fdevent::close);
 }
 
 
@@ -1283,11 +1323,11 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
 // driver functions
 
 inline void loop() {
-    driver::main->loop();
+    driver::current->loop();
 }
 
 inline void clear() {
-    driver::main->clear();
+    driver::current->clear();
 }
 
 inline uint32_t driver::lock() {
