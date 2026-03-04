@@ -26,9 +26,8 @@
 # include <poll.h>
 #endif
 
-// cotamer_io.hh
+// cotamer/io.hh
 //    Async I/O primitives built on cotamer::readable() and cotamer::writable().
-//    All fds must be non-blocking.
 
 namespace cotamer {
 

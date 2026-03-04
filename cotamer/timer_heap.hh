@@ -31,8 +31,8 @@ struct timer_heap {
     timer_heap& operator=(timer_heap&&) = delete;
     inline ~timer_heap();
 
-    inline bool empty() const;
-    inline unsigned size() const;
+    inline bool empty() const noexcept;
+    inline unsigned size() const noexcept;
     inline time_point_type top_time() const;
     inline T& top() &;
     inline const T& top() const&;
@@ -56,9 +56,9 @@ struct timer_heap {
     unsigned order_ = 0;         // next `order` to insert
     unsigned cull_rand_ = 8173;  // random seed for `cull`
 
-    static inline unsigned heap_parent(unsigned i);
-    static inline unsigned heap_first_child(unsigned i);
-    inline unsigned heap_last_child(unsigned i) const;
+    static inline unsigned heap_parent(unsigned i) noexcept;
+    static inline unsigned heap_first_child(unsigned i) noexcept;
+    inline unsigned heap_last_child(unsigned i) const noexcept;
     void hard_cull(unsigned pos);
     void expand();
 };
@@ -72,12 +72,12 @@ inline timer_heap<T>::~timer_heap() {
 }
 
 template <typename T>
-inline bool timer_heap<T>::empty() const {
+inline bool timer_heap<T>::empty() const noexcept {
     return size_ == 0;
 }
 
 template <typename T>
-inline unsigned timer_heap<T>::size() const {
+inline unsigned timer_heap<T>::size() const noexcept {
     return size_;
 }
 
@@ -113,17 +113,17 @@ inline bool timer_heap<T>::element::operator<(const element &x) const noexcept {
 }
 
 template <typename T>
-inline unsigned timer_heap<T>::heap_parent(unsigned i) {
+inline unsigned timer_heap<T>::heap_parent(unsigned i) noexcept {
     return (i - (arity == 2)) / arity;
 }
 
 template <typename T>
-inline unsigned timer_heap<T>::heap_first_child(unsigned i) {
+inline unsigned timer_heap<T>::heap_first_child(unsigned i) noexcept {
     return i * arity + (arity == 2 || i == 0);
 }
 
 template <typename T>
-inline unsigned timer_heap<T>::heap_last_child(unsigned i) const {
+inline unsigned timer_heap<T>::heap_last_child(unsigned i) const noexcept {
     unsigned p = i * arity + arity + (arity == 2);
     return p < size_ ? p : size_;
 }

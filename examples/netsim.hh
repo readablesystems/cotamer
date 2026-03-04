@@ -22,10 +22,6 @@ template <typename T> struct message_traits;
 
 using id_type = int;       // type of server IDs
 
-template <typename T, typename U>
-concept smart_pointer_to =
-    std::same_as<T, std::unique_ptr<U>> || std::same_as<T, std::shared_ptr<U>>;
-
 
 // channel<T>
 //    A link from one server to another.
@@ -55,18 +51,6 @@ struct channel {
 
     // send a message on this channel
     cot::task<> send(message_type m);
-
-    // convenience: when `message_type` is a smart pointer, allow
-    // `send(ELEMENT_TYPE)`
-    template <typename U>
-    requires smart_pointer_to<message_type, U>
-    cot::task<> send(U value) {
-        if constexpr (std::same_as<message_type, std::unique_ptr<U>>) {
-            return send(std::make_unique<U>(std::move(value)));
-        } else {
-            return send(std::make_shared<U>(std::move(value)));
-        }
-    }
 
 
 private:
@@ -112,7 +96,6 @@ struct port {
 
     // receive a message on this port
     cot::task<T> receive();
-    cot::task<std::pair<T, id_type>> receive_with_id();
 
 
 private:
@@ -122,11 +105,8 @@ private:
     bool verbose_;
     network<T>& net_;
 
-    cot::duration receive_delay_ = 0ms;
-
-    std::deque<std::pair<message_type, id_type>> messageq_;
+    std::deque<message_type> messageq_;
     cot::event receiver_event_;
-    id_type last_sender_;
 };
 
 
@@ -159,7 +139,7 @@ cot::task<> channel<T>::send_after(cot::duration delay, message_type m) {
     co_await cot::after(delay);
 
     // record this message in the destination message queue
-    to_port_.messageq_.emplace_back(std::move(m), from_);
+    to_port_.messageq_.emplace_back(std::move(m));
 
     // wake up a blocked receiver
     to_port_.receiver_event_.trigger();
@@ -175,31 +155,23 @@ cot::task<T> port<T>::receive() {
     while (messageq_.empty()) {
         // Register an event that senders will trigger on delivery.
         // Need a new one every time because events are one-shot.
-        co_await (receiver_event_ = cot::event());
-
-        // Delay after the message is delivered and before dequeuing it.
-        // (We must not delay *after* dequeuing it, because doing so might
-        // drop the message!)
-        //co_await cot::after(receive_delay_);
+        co_await receiver_event_.arm();
     }
 
     auto m = std::move(messageq_.front());
     messageq_.pop_front();
 
     if (verbose_) {
-        std::print("{}: {} ← {} \"{}\"\n", cot::now(), id(), m.second,
-                   message_traits_type::print_transform(m.first));
+        std::print("{}: {} ← \"{}\"\n", cot::now(), id(),
+                   message_traits_type::print_transform(m));
     }
 
-    last_sender_ = m.second;
-    co_return std::move(m.first);
+    // NB could also model receive_delay_, like `send()`’s send_delay_,
+    // but don’t bother in handout code
+
+    co_return m;
 }
 
-template <typename T>
-auto port<T>::receive_with_id() -> cot::task<std::pair<T, id_type>> {
-    auto m = co_await receive();
-    co_return std::make_pair(m, last_sender_);
-}
 
 
 // network<T>
@@ -252,7 +224,7 @@ struct network {
     template <std::floating_point FP>
     inline FP uniform(FP min, FP max);
     inline cot::duration uniform(cot::duration min,
-                                        cot::duration max);
+                                 cot::duration max);
     // - exponential distributions: useful for network delay, which can have
     //   occasional long tails
     template <std::floating_point FP>
@@ -263,7 +235,7 @@ struct network {
     template <std::floating_point FP>
     inline FP normal(FP mean, FP stddev);
     inline cot::duration normal(cot::duration mean,
-                                       cot::duration stddev);
+                                cot::duration stddev);
 
 
     // - erase network state

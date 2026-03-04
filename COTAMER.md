@@ -59,10 +59,10 @@ virtual time and runs unblocked tasks until there’s nothing left to do.
 ## Events
 
 The key benefit of coroutine programming is that functions can suspend
-themselves while waiting for external occurrences. In Cotamer, the **event**
-abstraction represents these occurrences.
+themselves while waiting for external occurrences. In Cotamer, **events**
+represent these occurrences.
 
-Events start in the **untriggered** state and then transition to the
+Each event starts in the **untriggered** state and then transitions to the
 **triggered** state. Once triggered, an event stays triggered forever: events
 are one-shot notifications. A task can wait for an event with `co_await e`.
 
@@ -73,11 +73,9 @@ Cotamer functions can create events associated with specific future occurrences:
 | `cotamer::after(duration)` | after the given duration elapses            |
 | `cotamer::at(time_point)`  | at the given absolute time                  |
 | `cotamer::asap()`          | as soon as possible (next loop iteration)   |
-
-A full event-driven system would offer other primitive events, such as
-`readable(fd)` (triggers once file descriptor `fd` becomes readable), and as
-class progresses we will add those too. But in the context of a deterministic
-network simulation, time is the only primitive event.
+| `cotamer::readable(fd)`    | when `::read(fd)` wouldn’t block            |
+| `cotamer::writable(fd)`    | when `::write(fd)` wouldn’t block           |
+| `cotamer::closed(fd)`      | when `fd` errors or closes                  |
 
 An event can be also created explicitly with `cotamer::event e` and triggered
 with `e.trigger()`. The `e.triggered()` function tests whether an event has
@@ -115,9 +113,9 @@ if (result) {
 
 ## Task lifetime
 
-Coroutine data, such as local variables, are normally tied to the lifetime of
-the `task<>` object. If the `task<>` is destroyed, then all data associated
-with the task is destroyed too.
+Coroutine data, such as local variables, is normally tied to the lifetime of the
+`task<>` object. When the `task<>` goes out of scope, all data associated with
+the task is destroyed too.
 
 ```cpp
 cot::task<> printer(int i) {
@@ -138,9 +136,10 @@ int main() {
 // printer(1) completed
 ```
 
-If you don’t want this, the `task::detach()` function detaches a task,
-allowing it to run to completion even if no one is interested in its result.
-The task’s memory will be automatically freed when the task returns.
+The `task::detach()` function breaks the link between a running coroutine and
+its `task` object, allowing the coroutine to run to completion even after the
+`task` is destroyed. The task’s memory will be automatically freed when the task
+returns.
 
 ```cpp
 cot::task<> printer(int i) {
@@ -162,18 +161,66 @@ int main() {
 // printer(1) completed
 ```
 
-The `cotamer::loop()` function runs until there’s nothing left to do—no
-outstanding `asap` events, no coroutines, no timers. To cause this loop to
-exit early, call `cotamer::clear()`, which clears all these task sources and
-destroys outstanding coroutines.
+
+## Event loop
+
+Cotamer runs coroutines from its event loop, `cotamer::loop()`. (Every
+application thread has its own thread-local driver, `cotamer::driver::current`;
+free functions like `cotamer::loop()` call into that driver.) The `loop`
+function repeatedly runs unblocked tasks, triggers expired timer events, and
+checks for file descriptor events, blocking as appropriate. It runs until
+there’s nothing left for it to do: no unblocked tasks, no timers, and no file
+descriptor interest.
+
+A `cotamer::driver_guard` token keeps `cotamer::loop()` alive and processing
+events even if the loop has no other work. This is useful when suspending on an
+event managed outside of Cotamer. For example, this function creates a
+non-blocking wrapper around the blocking `getaddrinfo()` API. The `driver_guard`
+prevents Cotamer from terminating until the `nonblocking_getaddrinfo` call
+resolves (when the `driver_guard` token goes out of scope).
+
+```cpp
+cot::task<struct addrinfo*> nonblocking_getaddrinfo(
+    const char* host, const char* port, const struct addrinfo* hints
+) {
+    struct addrinfo* result;       // collect result from `getaddrinfo`
+    int status;
+    cot::event notifier;           // wake coroutine when `getaddrinfo` thread completes
+    cot::driver_guard guard;       // prevent early exit from event loop
+
+    std::thread th([&] () {
+        status = getaddrinfo(host, port, hints, &result);
+        notifier.trigger();
+    }).detach();
+
+    co_await notifier;             // coroutine waits for thread
+    if (status != 0) {
+        throw std::runtime_error(gai_strerror(status));
+    }
+    co_return result;
+}
+```
+
+Alternatively, call `cotamer::keepalive(e)` to keep the current driver loop
+running until `event e` triggers.
+
+The `cotamer::clear()` function causes a driver loop to exit cleanly, even if it
+has outstanding events. `cotamer::clear()` unregisters all file descriptor
+events and destroys outstanding coroutines.
+
+The `cotamer::poll()` function runs the driver once, processing one batch of
+ASAP events, file descriptor updates, and timers without blocking.
+`cotamer::poll()` returns true if the driver still has outstanding work.
+`cotamer::loop()` behaves like `while (cotamer::poll()) {}`, but is more
+efficient since `cotamer::loop()` can block.
 
 
-## Deterministic virtual time
+## Clocks
 
-Cotamer uses **deterministic virtual time**. The system starts running at a
-fixed timestamp, and system time appears to jump forward whenever the system
-would block. For instance, this program completes instantaneously, even though
-it reports that over a year has elapsed:
+By default, Cotamer uses **deterministic virtual time**. Each driver starts
+running at a fixed timestamp, and time appears to jump forward whenever the
+system would block. For instance, this program completes instantaneously, even
+though it reports that over a year has elapsed:
 
 ```cpp
 #include "cotamer.hh"
@@ -211,6 +258,40 @@ behavior—as long as you built your system right.
 
 
 ## Advanced topics
+
+### Rearming events
+
+Since events are one-shot, a long-lived coroutine that repeatedly waits for
+notifications needs a fresh event each time. The `event& event::arm()`
+convenience function simplifies this. If `e` has already triggered, `e.arm()`
+replaces it with a fresh untriggered event; otherwise `e.arm()` leaves `e`
+unchanged. In both cases it returns the modified `e`.
+
+Here, a producer enqueues work and calls `trigger()` on a notifier event, while
+a background worker uses `work_queue_wakeup.arm()` to ensure that it always
+`co_await`s an untriggered event:
+
+```cpp
+cot::event work_queue_wakeup;
+std::deque<Item> work_queue;
+
+cot::task<> background_worker() {
+    while (true) {
+        while (work_queue.empty()) {
+            co_await work_queue_wakeup.arm();
+        }
+        auto item = std::move(work_queue.front());
+        work_queue.pop_front();
+        // ... process item ...
+    }
+}
+
+void enqueue_work(Item item) {
+    work_queue.push_back(std::move(item));
+    work_queue_wakeup.trigger();   // does nothing unless background_worker is waiting
+}
+```
+
 
 ### Lazy tasks
 

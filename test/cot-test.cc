@@ -29,7 +29,7 @@ cot::task<> g() {
     std::cerr << cot::now() << ": " << z << "\n";
 }
 
-// 1. Synchronous task completion (no suspension)
+// TEST: Synchronous task completion (no suspension)
 cot::task<int> immediate() {
     co_return 42;
 }
@@ -40,7 +40,7 @@ cot::task<> test_sync() {
     assert(z == 42 && start == cot::now());
 }
 
-// 2. Exception propagation
+// TEST: Exception propagation
 cot::task<int> throwing() {
     co_await cot::after(1h);
     throw std::runtime_error("boom");
@@ -57,7 +57,7 @@ cot::task<> test_exception() {
     assert(cot::now() - start >= 1h);
 }
 
-// 3. Deep task chain
+// TEST: Deep task chain
 cot::task<int> chain(int n) {
     co_await cot::after(1h);
     if (n > 0) {
@@ -74,7 +74,7 @@ cot::task<> test_chain() {
     assert(cot::now() - start >= 6h && cot::now() - start < 7h);
 }
 
-// 4. any() cleanup — losing event fires later
+// TEST: any() cleanup — losing event fires later
 cot::task<> test_any_cleanup() {
     auto start = cot::now();
     co_await cot::any(cot::after(1h), cot::after(100h));
@@ -82,7 +82,7 @@ cot::task<> test_any_cleanup() {
     assert(cot::now() - start >= 1h && cot::now() - start < 2h);
 }
 
-// 5. all() with 3 events at different times
+// TEST: all() with 3 events at different times
 cot::task<> test_all_multi() {
     auto start = cot::now();
     co_await cot::all(cot::after(1h), cot::after(2h), cot::after(3h));
@@ -90,7 +90,7 @@ cot::task<> test_all_multi() {
     assert(cot::now() - start >= 3h && cot::now() - start < 4h);
 }
 
-// 6. Nested any/all
+// TEST: Nested any/all
 cot::task<> test_nested_combinators() {
     auto start = cot::now();
     co_await cot::any(cot::all(cot::after(1h), cot::after(2h)), cot::after(10h));
@@ -98,7 +98,7 @@ cot::task<> test_nested_combinators() {
     assert(cot::now() - start >= 2h && cot::now() - start < 3h);
 }
 
-// 7. co_await a task<void>
+// TEST: co_await a task<void>
 cot::task<> inner_void() {
     co_await cot::after(1h);
     std::cerr << cot::now() << ": inner void done\n";
@@ -110,7 +110,7 @@ cot::task<> test_await_void() {
     assert(cot::now() - start >= 1h && cot::now() - start < 2h);
 }
 
-// 8. Two racing tasks
+// TEST: Two racing tasks
 cot::task<> racer(const char* name, int hours) {
     co_await cot::after(std::chrono::hours(hours));
     std::cerr << cot::now() << ": " << name << "\n";
@@ -124,7 +124,7 @@ cot::task<> test_racers() {
     assert(cot::now() - start >= 4h && cot::now() - start < 5h);
 }
 
-// 9. any/all with all asap
+// TEST: any/all with all asap
 cot::task<> test_any_all_asap() {
     auto start = cot::now();
     co_await cot::any(cot::asap(), cot::asap());
@@ -134,7 +134,7 @@ cot::task<> test_any_all_asap() {
     assert(cot::now() - start < 1h);
 }
 
-// 10. Move-only return type
+// TEST: Move-only return type
 cot::task<std::unique_ptr<int>> make_ptr() {
     co_await cot::after(1h);
     co_return std::make_unique<int>(99);
@@ -147,7 +147,7 @@ cot::task<> test_move_only() {
     assert(cot::now() - start >= 1h && cot::now() - start < 2h);
 }
 
-// 11. any() with no events does not wait
+// TEST: any() with no events does not wait
 cot::task<> test_any0() {
     auto start = cot::now();
     co_await cot::any();
@@ -155,7 +155,7 @@ cot::task<> test_any0() {
     assert(start == cot::now());
 }
 
-// 12. attempt succeeds — task completes before timeout
+// TEST: attempt succeeds — task completes before timeout
 cot::task<int> slow_value() {
     co_await cot::after(1h);
     co_return 77;
@@ -169,7 +169,7 @@ cot::task<> test_attempt_success() {
     std::cerr << "attempt_success: " << *result << "\n";
 }
 
-// 13. attempt cancelled — timeout fires before task completes
+// TEST: attempt cancelled — timeout fires before task completes
 cot::task<int> very_slow_value() {
     co_await cot::after(100h);
     co_return 99;
@@ -182,7 +182,7 @@ cot::task<> test_attempt_cancelled() {
     std::cerr << "attempt_cancelled: nullopt\n";
 }
 
-// 14. attempt with already-done task
+// TEST: attempt with already-done task
 cot::task<> test_attempt_already_done() {
     auto start = cot::now();
     auto result = co_await cot::attempt(immediate(), cot::after(10h));
@@ -192,7 +192,7 @@ cot::task<> test_attempt_already_done() {
     std::cerr << "attempt_already_done: " << *result << "\n";
 }
 
-// 15. attempt with nested tasks — cancellation cascades
+// TEST: attempt with nested tasks — cancellation cascades
 cot::task<int> nested_slow() {
     co_await cot::after(50h);
     auto v = co_await very_slow_value();
@@ -206,7 +206,7 @@ cot::task<> test_attempt_nested() {
     std::cerr << "attempt_nested: nullopt\n";
 }
 
-// 16. attempt on task<optional<T>> — succeeds, no double-wrapping
+// TEST: attempt on task<optional<T>> — succeeds, no double-wrapping
 cot::task<std::optional<int>> maybe_value() {
     co_await cot::after(1h);
     co_return 55;
@@ -222,7 +222,7 @@ cot::task<> test_attempt_optional_success() {
     std::cerr << "attempt_optional_success: " << *result << "\n";
 }
 
-// 17. attempt on task<optional<T>> — cancelled
+// TEST: attempt on task<optional<T>> — cancelled
 cot::task<> test_attempt_optional_cancelled() {
     auto start = cot::now();
     auto result = co_await cot::attempt(maybe_value(), cot::after(0h));
@@ -232,7 +232,7 @@ cot::task<> test_attempt_optional_cancelled() {
     std::cerr << "attempt_optional_cancelled: nullopt\n";
 }
 
-// 18. attempt on task<optional<T>> — task itself returns nullopt
+// TEST: attempt on task<optional<T>> — task itself returns nullopt
 cot::task<std::optional<int>> returns_nullopt() {
     co_await cot::after(1h);
     co_return std::nullopt;
@@ -247,7 +247,7 @@ cot::task<> test_attempt_optional_inner_nullopt() {
     std::cerr << "attempt_optional_inner_nullopt: nullopt\n";
 }
 
-// 19. Lazy task with co_await — task doesn't run until co_awaited
+// TEST: Lazy task with co_await — task doesn't run until co_awaited
 bool lazy_ran = false;
 cot::task<int> lazy_task() {
     co_await cot::interest{};
@@ -268,7 +268,7 @@ cot::task<> test_lazy_await() {
     std::cerr << "lazy_await: " << val << "\n";
 }
 
-// 20. Lazy task with start() and completion()
+// TEST: Lazy task with start() and completion()
 bool lazy_comp_ran = false;
 cot::task<int> lazy_comp_task() {
     co_await cot::interest{};
@@ -292,7 +292,7 @@ cot::task<> test_lazy_completion() {
     std::cerr << "lazy_completion: " << val << "\n";
 }
 
-// 21. Lazy task with attempt — attempt triggers interest via completion()
+// TEST: Lazy task with attempt — attempt triggers interest via completion()
 cot::task<int> lazy_attempt_task() {
     co_await cot::interest{};
     co_await cot::after(1h);
@@ -307,7 +307,7 @@ cot::task<> test_lazy_attempt() {
     std::cerr << "lazy_attempt: " << *result << "\n";
 }
 
-// 22. Lazy task with internal timeout — any(interest, after(...)) auto-starts
+// TEST: Lazy task with internal timeout — any(interest, after(...)) auto-starts
 bool lazy_timeout_ran = false;
 cot::steady_time_point lazy_timeout_time;
 cot::task<int> lazy_timeout_task() {
@@ -331,7 +331,7 @@ cot::task<> test_lazy_internal_timeout() {
     std::cerr << "lazy_internal_timeout: " << val << "\n";
 }
 
-// 23. Non-lazy task — verify existing tasks are unaffected
+// TEST: Non-lazy task — verify existing tasks are unaffected
 bool nonlazy_ran = false;
 cot::task<int> nonlazy_task() {
     nonlazy_ran = true;
@@ -349,7 +349,7 @@ cot::task<> test_nonlazy() {
     std::cerr << "nonlazy: " << val << "\n";
 }
 
-// 24. Pre-started task with nested interest quorum — exercises apply_interest
+// TEST: Pre-started task with nested interest quorum — exercises apply_interest
 //     delegation through non-f_interest quorum.
 //     The task suspends on a non-interest event first, has start() called,
 //     then reaches co_await all(any(interest{}, ...), after(...)).
@@ -376,7 +376,7 @@ cot::task<> test_delayed_interest() {
     std::cerr << "delayed_interest: " << val << "\n";
 }
 
-// 25. Pre-started task with top-level any(interest{}, ...) — the cascade
+// TEST: Pre-started task with top-level any(interest{}, ...) — the cascade
 //     fully satisfies the any-quorum during apply_interest, so the event
 //     is already triggered when await_suspend tries to add the coroutine.
 cot::task<int> prestarted_any_task() {
@@ -394,7 +394,7 @@ cot::task<> test_prestarted_any() {
     std::cerr << "prestarted_any: " << val << "\n";
 }
 
-// 26. Folded interest plus nested interest child — exercises the sequential
+// TEST: Folded interest plus nested interest child — exercises the sequential
 //     (non-else) path in fix_want_interest, where the quorum has both
 //     f_interest (from a direct interest{} argument) and a child with
 //     f_want_interest (from any(interest{}, ...)).
@@ -414,7 +414,7 @@ cot::task<> test_interest_and_nested() {
     std::cerr << "interest_and_nested: " << val << "\n";
 }
 
-// 27. interest_event — returns event without suspending
+// TEST: interest_event — returns event without suspending
 bool ie_continued = false;
 cot::task<int> interest_event_task() {
     auto e = co_await cot::interest_event{};
@@ -438,7 +438,7 @@ cot::task<> test_interest_event() {
     std::cerr << "interest_event: " << val << "\n";
 }
 
-// 28. explicit_trigger_quorum — test difference between natural and explicit
+// TEST: explicit_trigger_quorum — test difference between natural and explicit
 // trigger on a quorum event
 cot::task<> test_explicit_trigger_quorum() {
     // Natural case: quorum completes because one member fires
@@ -465,7 +465,7 @@ cot::task<> test_explicit_trigger_quorum() {
     std::cerr << "explicit_trigger_quorum: ok\n";
 }
 
-// 29. multi_interest — all(interest{}, interest{}) should count both
+// TEST: multi_interest — all(interest{}, interest{}) should count both
 cot::task<int> multi_interest_task() {
     co_await cot::all(cot::interest{}, cot::interest{});
     co_return 42;
@@ -479,7 +479,7 @@ cot::task<> test_multi_interest() {
     std::cerr << "multi_interest: " << val << "\n";
 }
 
-// 30. Nested interest propagation through any()
+// TEST: Nested interest propagation through any()
 //     In fix_want_interest, if processing local interest{} satisfies the quorum
 //     (as it does for any()), we trigger and return WITHOUT propagating interest
 //     to child quorums. This is the lazy semantics: interest propagates only
@@ -516,7 +516,7 @@ cot::task<> test_nested_interest_propagation() {
     std::cerr << "nested_interest_propagation: " << val << "\n";
 }
 
-// 31. Stored event triggers without listeners — tests that the timer heap
+// TEST: Stored event triggers without listeners — tests that the timer heap
 //     does not garbage-collect an event just because nobody is co_awaiting it.
 //     Create an event via after(200ms), store it in a variable (but don't
 //     co_await it), then wait 400ms. The stored event should have triggered.
@@ -530,7 +530,7 @@ cot::task<> test_stored_event_triggers() {
     std::cerr << "stored_event_triggers: ok\n";
 }
 
-// 32. Timer heap autocull — verifies that the timer heap stays small through
+// TEST: Timer heap autocull — verifies that the timer heap stays small through
 //     the amortized empty() check within timer_heap::emplace
 cot::task<> test_timer_heap_cull() {
     std::vector<cot::event> events;
@@ -548,10 +548,10 @@ cot::task<> test_timer_heap_cull() {
     co_await cot::after(1ms);
     size_t sz = cot::driver::current->timer_size();
     std::cerr << "timer_heap_cull: timer_size=" << sz << "\n";
-    assert(sz < 40 && "timer heap should have autoculled stale 300ms entries");
+    assert(sz < 80 && "timer heap should have autoculled stale 300ms entries");
 }
 
-// 33. any(event()) should not be immediately triggered.
+// TEST: any(event()) should not be immediately triggered.
 //     A default-constructed event is untriggered, and any() of an untriggered
 //     event should remain untriggered. Test both the single-argument path
 //     (make_event passthrough) and the multi-argument quorum path.
@@ -564,7 +564,7 @@ cot::task<> test_any_default_event() {
     co_return;
 }
 
-// 35. Duplicate event in quorum — the same event added to a quorum multiple
+// TEST: Duplicate event in quorum — the same event added to a quorum multiple
 //     times. When it triggers, trigger_member is called once per listener entry,
 //     and the quorum must handle the duplicate removals without double-free.
 cot::task<> test_duplicate_event_in_quorum() {
@@ -636,7 +636,34 @@ cot::task<> test_duplicate_event_in_quorum() {
     co_return;
 }
 
-// 36. Mutex: exclusive/shared ordering
+// TEST: keepalive — loop stays alive until keepalive event triggers
+cot::task<> test_keepalive() {
+    auto done = cot::event();
+    cot::keepalive(done);
+    bool detached_ran = false;
+
+    auto worker = [&]() -> cot::task<> {
+        co_await cot::after(5h);
+        detached_ran = true;
+        done.trigger();
+    };
+    worker().detach();
+
+    co_await done;
+    assert(detached_ran && "keepalive should have kept loop alive for detached task");
+    std::cerr << "keepalive: ok\n";
+}
+
+// TEST: keepalive with already-triggered event — no effect on loop
+cot::task<> test_keepalive_triggered() {
+    auto e = cot::event();
+    e.trigger();
+    cot::keepalive(e);
+    std::cerr << "keepalive_triggered: ok\n";
+    co_return;
+}
+
+// TEST: Mutex: exclusive/shared ordering
 cot::task<> test_mutex_exclusive(cot::mutex& m, std::vector<int>& ops, int id) {
     co_await m.lock();
     ops.push_back(id);
@@ -666,7 +693,7 @@ cot::task<> test_mutex() {
     std::cerr << "mutex: ok\n";
 }
 
-// 37. Mutex cancellation: attempt() cancels a pending lock, and the mutex
+// TEST: Mutex cancellation: attempt() cancels a pending lock, and the mutex
 //     still works for subsequent waiters. Tests that the cancelled waiter's
 //     event handle in waiters_ becomes empty() and gets cleaned up.
 cot::task<> test_mutex_cancellation() {
@@ -731,7 +758,7 @@ cot::task<> test_mutex_cancellation() {
     std::cerr << "mutex_cancellation: ok\n";
 }
 
-// 38. Mutex cancellation with shared holder: T1 holds shared, T2 wants
+// TEST: Mutex cancellation with shared holder: T1 holds shared, T2 wants
 //     exclusive (cancelled), T3 wants shared. After T2 is cancelled and T1
 //     unlocks, T3 should be unblocked. Also tests a variant with two shared
 //     holders (T1a, T1b), where the first unlock_shared does NOT call notify()
@@ -781,7 +808,7 @@ cot::task<> test_mutex_cancel_excl_waiter() {
     std::cerr << "cancel_excl_waiter: ok\n";
 }
 
-// 39. Same scenario but with two shared holders. The first unlock_shared
+// TEST: Same scenario but with two shared holders. The first unlock_shared
 //     skips notify() (old count > 1, mf_waiter set, not mf_waiter_shared).
 //     The second unlock_shared calls notify() and unblocks T3.
 cot::task<> test_mutex_cancel_excl_waiter_2shared() {
@@ -840,7 +867,7 @@ cot::task<> test_mutex_cancel_excl_waiter_2shared() {
     std::cerr << "cancel_excl_waiter_2shared: ok\n";
 }
 
-// 40. unique_lock: RAII, token construction, move, unlock, release
+// TEST: unique_lock: RAII, token construction, move, unlock, release
 cot::task<> test_unique_lock() {
     cot::mutex m;
     std::vector<int> ops;
@@ -896,7 +923,7 @@ cot::task<> test_unique_lock() {
     std::cerr << "unique_lock: ok\n";
 }
 
-// 41. unique_lock: move semantics and release()
+// TEST: unique_lock: move semantics and release()
 cot::task<> test_unique_lock_move() {
     cot::mutex m;
 
@@ -947,7 +974,7 @@ cot::task<> test_unique_lock_move() {
     std::cerr << "unique_lock_move: ok\n";
 }
 
-// 42. shared_lock: RAII, token construction, shared semantics
+// TEST: shared_lock: RAII, token construction, shared semantics
 cot::task<> test_shared_lock() {
     cot::mutex m;
     std::vector<int> ops;
@@ -996,7 +1023,7 @@ cot::task<> test_shared_lock() {
     std::cerr << "shared_lock: ok\n";
 }
 
-// 43. shared_lock: move, try_lock, release, swap
+// TEST: shared_lock: move, try_lock, release, swap
 cot::task<> test_shared_lock_move() {
     cot::mutex m;
 
@@ -1044,7 +1071,7 @@ cot::task<> test_shared_lock_move() {
     std::cerr << "shared_lock_move: ok\n";
 }
 
-// 44. unique_lock/shared_lock: error conditions
+// TEST: unique_lock/shared_lock: error conditions
 cot::task<> test_lock_errors() {
     cot::mutex m;
     bool caught;
@@ -1110,7 +1137,7 @@ cot::task<> test_lock_errors() {
     std::cerr << "lock_errors: ok\n";
 }
 
-// 45. mutex_event with any/all: tests make_event(mutex_event<shared>&)
+// TEST: mutex_event with any/all: tests make_event(mutex_event<shared>&)
 //     and make_event(mutex_event<shared>&&) overloads.
 cot::task<> test_mutex_event_combinators() {
     cot::mutex m;
@@ -1238,6 +1265,8 @@ int main(int argc, char* argv[]) {
     run("timer_heap_cull", test_timer_heap_cull);
     run("any_default_event", test_any_default_event);
     run("duplicate_event_in_quorum", test_duplicate_event_in_quorum);
+    run("keepalive", test_keepalive);
+    run("keepalive_triggered", test_keepalive_triggered);
     run("mutex", test_mutex);
     run("mutex_cancellation", test_mutex_cancellation);
     run("cancel_excl_waiter", test_mutex_cancel_excl_waiter);

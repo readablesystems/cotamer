@@ -36,34 +36,39 @@ endif()
 
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
-    cotamer/utils.cc
     cotamer/io.cc
 )
 
+add_library(CotamerExamples OBJECT
+    examples/utils.cc
+)
+
 add_executable(cot-test
-    cot-test.cc
+    test/cot-test.cc
     $<TARGET_OBJECTS:Cotamer>
 )
 
 add_executable(cot-test-threads
-    cot-test-threads.cc
+    test/cot-test-threads.cc
     $<TARGET_OBJECTS:Cotamer>
 )
 
 add_executable(cot-test-io
-    cot-test-io.cc
+    test/cot-test-io.cc
     $<TARGET_OBJECTS:Cotamer>
 )
 
 add_executable(ctconsensus
-    ctconsensus.cc
+    examples/ctconsensus.cc
     $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerExamples>
 )
 
 add_executable(rpcg-server
-    rpcg-server.cc
-    serverstub.cc
+    examples/rpcg-server.cc
+    examples/serverstub.cc
     $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerExamples>
 )
 target_include_directories(rpcg-server PRIVATE
     ${XXHASH_INCLUDE_DIR}
@@ -73,9 +78,10 @@ target_link_libraries(rpcg-server PRIVATE
 )
 
 add_executable(rpcg-client
-    rpcg-client.cc
-    clientstub.cc
+    examples/rpcg-client.cc
+    examples/clientstub.cc
     $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerExamples>
 )
 target_include_directories(rpcg-client PRIVATE
     ${XXHASH_INCLUDE_DIR}

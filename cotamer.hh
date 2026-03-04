@@ -21,7 +21,7 @@
 //    Public interface to the Cotamer coroutine library.
 
 // Define COTAMER_STATS to 1 to collect statistics.
-#define COTAMER_STATS 1
+// #define COTAMER_STATS 1
 
 namespace cotamer {
 
@@ -153,6 +153,7 @@ public:
     inline steady_time_point steady_now() noexcept; // time since boot (monotonic)
     inline void step_time() noexcept;
 
+    inline bool empty() const noexcept;
     inline void keepalive(event);
 
     inline void asap(event);
@@ -173,12 +174,13 @@ public:
     inline void notify_close(int base_fileno);
 
     inline void loop();
-    inline void poll();
+    inline bool poll();
+
     void clear();
-    bool clearing() const { return clearing_; }
+    inline bool clearing() const noexcept;
 
     // introspection
-    inline size_t timer_size() const;
+    inline size_t timer_size() const noexcept;
 
     static thread_local std::unique_ptr<driver> current;
 
@@ -228,7 +230,9 @@ private:
     bool watch_fds(detail::fd_batch&, duration timeout);
 
     enum class looptype { complete, poll };
-    void loop(looptype);
+    bool loop(looptype);
+
+    void process_clearing();
 };
 
 
@@ -236,7 +240,7 @@ private:
 
 inline void set_clock(clock);
 inline void loop();                    // run event loop until quiescent
-inline void poll();                    // run event loop once without blocking
+inline bool poll();                    // run event loop once without blocking
 inline void clear();                   // cancel all pending events
 void reset();                          // destroy and recreate driver
 
@@ -491,14 +495,13 @@ private:
 // Statistics.
 
 #if COTAMER_STATS
-struct stats {
+struct statistics {
     std::atomic<size_t> promises_allocated;
     std::atomic<size_t> promises_destroyed;
     std::atomic<size_t> events_allocated;
     std::atomic<size_t> events_destroyed;
-
-    static stats s;
 };
+extern statistics stats;
 #endif
 
 }

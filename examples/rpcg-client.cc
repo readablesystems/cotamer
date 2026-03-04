@@ -135,10 +135,12 @@ void rpc_client::run(uint64_t n, steady_time_point timestamp) {
             const std::chrono::duration<double> diff = next_timestamp - timestamp;
             std::cerr << std::format("sent {} RPCs, recently {:.0f} RPCs/sec...\n",
                                      i, 10000 / diff.count());
-            std::cerr << std::format("events {}, promises {}, sent {}, received {}\n",
-                cotamer::stats::s.events_allocated - cotamer::stats::s.events_destroyed,
-                cotamer::stats::s.promises_allocated - cotamer::stats::s.promises_destroyed,
-                sent, received);
+#if COTAMER_STATS
+            std::cerr << std::format("events {}, promises {}\n",
+                cotamer::stats.events_allocated - cotamer::stats.events_destroyed,
+                cotamer::stats.promises_allocated - cotamer::stats.promises_destroyed);
+#endif
+            std::cerr << std::format("sent {}, received {}\n", sent, received);
             timestamp = next_timestamp;
         }
     }
@@ -179,7 +181,7 @@ std::string server_checksum() {
 int main(int argc, char* const argv[]) {
     std::string address = "localhost:29381";
     uint64_t n = 100000;
-    const char* filename = "lines.txt";
+    const char* filename = "examples/lines.txt";
     int ch;
     while ((ch = getopt(argc, argv, "h:n:f:")) != -1) {
         if (ch == 'h') {
@@ -205,7 +207,9 @@ int main(int argc, char* const argv[]) {
     const std::chrono::duration<double> diff = end_time - start_time;
     std::cerr << std::format("sent {} RPCs in {:.09f} sec\n", n, diff.count())
         << std::format("sent {:.0f} RPCs per sec\n", n / diff.count());
+#if COTAMER_STATS
     std::cerr << std::format("events {}, promises {}\n",
-        cotamer::stats::s.events_allocated - cotamer::stats::s.events_destroyed,
-        cotamer::stats::s.promises_allocated - cotamer::stats::s.promises_destroyed);
+        cotamer::stats.events_allocated - cotamer::stats.events_destroyed,
+        cotamer::stats.promises_allocated - cotamer::stats.promises_destroyed);
+#endif
 }

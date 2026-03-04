@@ -73,12 +73,21 @@ cot::event server::failure_detector(int leader) {
 
 
 // Receive a message of a specific type for the current round.
-// Ignore other messages, except for DECIDE messages.
+// Ignore old messages, except for DECIDE messages.
 
 cot::task<message> server::receive(message_type mt) {
-    std::deque<message> next_stash;
+    size_t stash_size = stash_.size();
+
     while (!decided_) {
-        auto m = stash_.empty() ? co_await my_port_.receive() : pop_stash();
+        // Process the stash first (not including re-stashed messages),
+        // then receive from the network
+        message m;
+        if (stash_size > 0) {
+            --stash_size;
+            m = pop_stash();
+        } else {
+            m = co_await my_port_.receive();
+        }
 
         // DECIDE messages cause us to decide
         if (m.type == m_decide) {
@@ -87,16 +96,15 @@ cot::task<message> server::receive(message_type mt) {
             break;
         }
 
-        // ignore other unwanted messages
+        // ignore or stash unwanted messages
         if (m.type != mt || m.round != round_) {
             if (m.round >= round_) {
-                next_stash.push_back(m);
+                stash_.push_back(m);
             }
             continue;
         }
 
         // return wanted message
-        stash_.append_range(next_stash);
         co_return m;
     }
 

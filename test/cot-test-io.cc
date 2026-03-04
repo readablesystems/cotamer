@@ -1,6 +1,5 @@
 #include "cotamer.hh"
-#include "message_stream.hh"
-#include "cotamer_serial.hh"
+#include "examples/message_stream.hh"
 #include <atomic>
 #include <cassert>
 #include <cstring>
@@ -115,70 +114,6 @@ cot::task<> test_tcp_echo() {
         std::cerr << "tcp_echo: ok\n";
     };
     co_await client();
-}
-
-
-// TEST: Serialization round-trip
-cot::task<> test_serialization() {
-    // Integer types
-    {
-        auto buf = cot::serialize<int32_t>(-42);
-        auto val = cot::deserialize<int32_t>(buf);
-        assert(val == -42);
-    }
-    {
-        auto buf = cot::serialize<uint64_t>(0xDEADBEEFCAFEBABEULL);
-        auto val = cot::deserialize<uint64_t>(buf);
-        assert(val == 0xDEADBEEFCAFEBABEULL);
-    }
-    // String
-    {
-        std::string orig = "hello world!";
-        auto buf = cot::serialize<std::string>(orig);
-        auto val = cot::deserialize<std::string>(buf);
-        assert(val == orig);
-    }
-    // Empty string
-    {
-        std::string orig;
-        auto buf = cot::serialize<std::string>(orig);
-        auto val = cot::deserialize<std::string>(buf);
-        assert(val.empty());
-    }
-    // Float and double
-    {
-        auto buf = cot::serialize<float>(3.14f);
-        auto val = cot::deserialize<float>(buf);
-        assert(val == 3.14f);
-    }
-    {
-        auto buf = cot::serialize<double>(2.718281828);
-        auto val = cot::deserialize<double>(buf);
-        assert(val == 2.718281828);
-    }
-    // Bool
-    {
-        auto buf = cot::serialize<bool>(true);
-        assert(cot::deserialize<bool>(buf) == true);
-        buf = cot::serialize<bool>(false);
-        assert(cot::deserialize<bool>(buf) == false);
-    }
-    // Composite: manual writer/reader
-    {
-        cot::serial_writer w;
-        w.write_i32(100);
-        w.write_string("test");
-        w.write_u8(7);
-        cot::serial_reader r(w.data(), w.size());
-        assert(r.read_i32() == 100);
-        assert(r.read_string() == "test");
-        assert(r.read_u8() == 7);
-        assert(!r.error());
-        assert(r.remaining() == 0);
-    }
-
-    std::cerr << "serialization: ok\n";
-    co_return;
 }
 
 
@@ -748,6 +683,41 @@ void test_cross_thread_wake_race() {
 }
 
 
+// TEST: clear() exits cleanly when fd events are outstanding.
+// A coroutine awaits readable() on a pipe (no data will arrive), then
+// clear() is called. The clearing mechanism must force-trigger the fd
+// event so the coroutine wakes up, throws clearing_exception, and
+// loop() exits.
+void test_clear_with_fd_events() {
+    cot::reset();
+
+    int piperaw[2];
+    assert(pipe(piperaw) == 0);
+    cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
+    cot::set_nonblocking(rfd.fileno());
+    cot::set_nonblocking(wfd.fileno());
+
+    bool reader_cleared = false;
+
+    auto reader = [&]() -> cot::task<> {
+        try {
+            co_await cot::readable(rfd);
+            assert(false && "readable should have thrown clearing_exception");
+        } catch (cot::detail::clearing_exception&) {
+            reader_cleared = true;
+        }
+    };
+    auto t = reader();
+
+    cot::clear();
+    cot::loop();
+
+    assert(reader_cleared);
+    assert(t.done());
+    std::cerr << "clear_with_fd_events: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -772,7 +742,6 @@ int main(int argc, char* argv[]) {
     run("readable_event", test_readable_event);
     run("realtime_timer", test_realtime_timer);
     run("tcp_echo", test_tcp_echo);
-    run("serialization", test_serialization);
     run("tcp_multi_frame", test_tcp_multi_frame);
     run("dup_close_fd", test_dup_close_fd);
     run("forget_fd_cleanup", test_forget_fd_cleanup);
@@ -791,6 +760,7 @@ int main(int argc, char* argv[]) {
         fn();
     };
 
+    run_threaded("clear_with_fd_events", test_clear_with_fd_events);
     run_threaded("close_wakes_reader", test_close_wakes_reader);
     run_threaded("shutdown_wakes_reader", test_shutdown_wakes_reader);
     run_threaded("cross_thread_wake", test_cross_thread_wake);

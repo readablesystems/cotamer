@@ -15,7 +15,7 @@ namespace cotamer {
 namespace detail {
 
 #if COTAMER_STATS
-# define COTAMER_STAT_INCR(x) cotamer::stats::s.x.fetch_add(1, std::memory_order_relaxed)
+# define COTAMER_STAT_INCR(x) cotamer::stats.x.fetch_add(1, std::memory_order_relaxed)
 #else
 # define COTAMER_STAT_INCR(x)
 #endif
@@ -642,8 +642,8 @@ inline bool event_body::trigger_unlock(uint32_t f, driver* drv,
         driver* ldrv = lcoh.promise().home_;
         if (ldrv == drv) {
             // The coroutine `lcoh` should run on driver `drv`, which called
-            // us via `driver_trigger`. No need to post this event to `drivers`:
-            // our caller will run it to completion.
+            // us via `driver_trigger`. No need to post this event to
+            // `drivers`: our caller will run it to completion.
             if (!*coh) {
                 *coh = lcoh;
                 continue;
@@ -1103,6 +1103,19 @@ inline void driver::step_time() noexcept {
     }
 }
 
+inline bool driver::empty() const noexcept {
+    return timed_.empty()
+        && nfdctl_ == 0
+        && !fds_.has_update()
+        && !lock_.load(std::memory_order_relaxed)
+        && guard_count_ == 0
+        && keepalives_.empty();
+}
+
+inline bool driver::clearing() const noexcept {
+    return clearing_;
+}
+
 inline void driver::keepalive(event e) {
     if (!e.triggered()) {
         keepalives_.emplace_back(std::move(e).handle());
@@ -1170,8 +1183,8 @@ inline void driver::loop() {
     loop(looptype::complete);
 }
 
-inline void driver::poll() {
-    loop(looptype::poll);
+inline bool driver::poll() {
+    return loop(looptype::poll);
 }
 
 
@@ -1361,8 +1374,8 @@ inline void loop() {
     driver::current->loop();
 }
 
-inline void poll() {
-    driver::current->poll();
+inline bool poll() {
+    return driver::current->poll();
 }
 
 inline void clear() {
@@ -1384,7 +1397,7 @@ inline void driver::unlock(uint32_t flags) {
     lock_.store(flags, std::memory_order_release);
 }
 
-inline size_t driver::timer_size() const {
+inline size_t driver::timer_size() const noexcept {
     return timed_.size();
 }
 
