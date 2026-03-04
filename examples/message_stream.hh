@@ -58,6 +58,7 @@ inline message_stream::message_stream(cotamer::fd f, operation op)
 
 inline message_stream::~message_stream() {
     delete[] buf_;
+    // `task_` is also destroyed, freeing the reader_loop or writer_loop
 }
 
 inline cotamer::event message_stream::drained() {
@@ -196,6 +197,7 @@ inline cotamer::task<> message_stream::reader_loop(cotamer::fd f) {
                             head_ + capacity_ - (pos_ + len_));
         if (rv > 0) {
             len_ += rv;
+            // New data has arrived → alert `recv()`
             client_notifier_.trigger();
         } else if (rv == 0) {
             status_ = statuscode::eof;
