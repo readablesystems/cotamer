@@ -324,7 +324,7 @@ inline task<ssize_t> read_once(const fd& f, void* buf, size_t n);
 inline task<ssize_t> write_once(const fd& f, const void* buf, size_t n);
 inline task<ssize_t> write(const fd& f, const void* buf, size_t n);
 
-inline task<int> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
+inline task<> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
 inline task<fd> accept(const fd& listen_fd);
 
 task<fd> tcp_listen(std::string address, int backlog = 128);

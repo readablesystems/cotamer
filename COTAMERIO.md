@@ -64,15 +64,13 @@ file descriptors you construct in other ways, call
 ## I/O helpers
 
 Cotamer provides convenience coroutines that combine readiness events with
-system calls, so you don't have to write the retry loop yourself:
+system calls:
 
 | Function                                    | Description                                        |
 |:--------------------------------------------|:---------------------------------------------------|
 | `read_once(f, buf, n)` | read up to `n` bytes; suspends on `EAGAIN`; returns bytes read, 0 for EOF, or negative errno |
 | `write_once(f, buf, n)` | write up to `n` bytes; suspends on `EAGAIN`; returns bytes written or negative errno |
 | `write(f, buf, n)` | write all `n` bytes, suspending as needed; returns total written or negative errno |
-
-These are defined in `cotamer/io.hh` (included by `cotamer.hh`).
 
 Here is a complete pipe example:
 
@@ -97,6 +95,20 @@ cot::task<> pipe_echo() {
 }
 ```
 
+(But note that more complex examples would likely need [mutual
+exclusion](#mutual-exclusion) to prevent message corruption.)
+
+In addition to these, `cotamer::connect` and `cotamer::accept` perform
+asynchronous versions of the corresponding socket system calls. `cotamer::task<>
+cotamer::connect(cotamer::fd, const struct sockaddr*, socklen_t)` connects a
+client socket to a remote address; the coroutine suspends until the connection
+attempt succeeds. `cotamer::task<cotamer::fd> cotamer::accept(cotamer::fd lfd)`
+suspends until a new connection request arrives on `lfd`; when one does, it is
+accepted, put into non-blocking mode, and returned as an `fd` object. If either
+function observes an error (such as `ETIMEDOUT`), it throws that error using
+`std::system_error`; you can recover the error number with `catch (const
+std::system_error& ex) { ... ex.code() ... }`.
+
 
 ## TCP
 
@@ -104,14 +116,16 @@ Higher-level coroutines handle TCP connection setup:
 
 | Function                         | Description                                              |
 |:---------------------------------|:---------------------------------------------------------|
-| `tcp_listen(address, backlog)`   | bind and listen; returns a listening `fd`                |
-| `tcp_connect(address)`           | connect to a remote address; returns a connected `fd`    |
-| `tcp_accept(listen_fd)`          | accept a connection; returns a new `fd` with `TCP_NODELAY` |
-| `accept(listen_fd)`              | accept a connection without setting socket options       |
-| `connect(f, addr, len)`          | low-level async connect on an existing `fd`              |
+| `tcp_listen(address, backlog)`   | bind and listen; returns a listening `fd`                  |
+| `tcp_connect(address)`           | connect to a remote address using TCP; returns a connected `fd`    |
+| `tcp_accept(listen_fd)`          | accept a connection on a TCP listening socket            |
 
-Addresses are strings like `"127.0.0.1:8080"` or `":8080"`. DNS resolution
-happens on a background thread to avoid blocking the event loop.
+Addresses are strings like `"127.0.0.1:8080"`, `"www.google.com:80"`, or
+`":8080"`. DNS resolution uses the standard `getaddrinfo(3)` function, and
+happens on a background thread to avoid blocking the event loop. `tcp_connect`
+and `tcp_accept` both set the `TCP_NODELAY` socket option to disable [Nagle’s
+algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm)
+([why?](https://brooker.co.za/blog/2024/05/09/nagle.html)).
 
 ```cpp
 cot::task<> echo_server() {
@@ -184,9 +198,10 @@ cot::task<> write_message(lockable_fd& lfd, std::string message) {
         if (rv > 0) {
             pos += rv;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            co_await cot::writable(lfd.f);   // suspension point: coroutine might be destroyed!
+            // suspension point: coroutine might be destroyed!
+            co_await cot::writable(lfd.f);
         } else {
-            /* ... handle error ... */
+            throw std::system_error(errno, std::generic_category());
         }
     }
 }

@@ -86,25 +86,27 @@ inline task<ssize_t> write(const fd& f, const void* buf, size_t n) {
     }
 }
 
-// Connects to an address. Suspends until connected.
-inline task<int> connect(const fd& f, const struct sockaddr* addr, socklen_t len) {
-    int r = ::connect(f.fileno(), addr, len);
+// Connects to an address. Suspends until connected. Throws on error.
+inline task<> connect(const fd& f, const struct sockaddr* addr, socklen_t len) {
+    int r = ::connect(f.fileno(), addr, len), err = 0;
     if (r == 0) {
-        co_return 0;
+        co_return;
     } else if (errno != EINPROGRESS) {
-        co_return -errno;
+        err = errno;
+    } else {
+        co_await writable(f);
+        // Check for connection error
+        socklen_t errlen = sizeof(err);
+        if (getsockopt(f.fileno(), SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
+            err = errno;
+        }
     }
-    co_await writable(f);
-    // Check for connection error
-    int err = 0;
-    socklen_t errlen = sizeof(err);
-    if (getsockopt(f.fileno(), SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
-        co_return -errno;
+    if (err != 0) {
+        throw std::system_error(err, std::generic_category());
     }
-    co_return err == 0 ? 0 : -err;
 }
 
-// Accepts a connection. Returns new fd (with ownership) or invalid fd on error.
+// Accepts a connection. Returns new fd (with ownership). Throws on error.
 inline task<fd> accept(const fd& listen_fd) {
     while (true) {
         int rawfd = ::accept(listen_fd.fileno(), nullptr, nullptr);
@@ -112,7 +114,7 @@ inline task<fd> accept(const fd& listen_fd) {
             set_nonblocking(rawfd);
             co_return fd(rawfd);
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            co_return fd(-errno);
+            throw std::system_error(errno, std::generic_category());
         }
         co_await readable(listen_fd);
     }

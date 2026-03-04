@@ -483,13 +483,13 @@ task<cotamer::fd> tcp_connect(std::string address) {
 
     // associate with cotamer::fd container
     cotamer::fd f(rawfd);
-    auto rv = co_await connect(f, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    // error out if necessary
-    if (rv < 0) {
-        throw std::system_error(-rv, std::generic_category());
+    try {
+        co_await connect(f, res->ai_addr, res->ai_addrlen);
+    } catch (...) {
+        freeaddrinfo(res);
+        throw;
     }
+    freeaddrinfo(res);
 
     co_return std::move(f);
 }
