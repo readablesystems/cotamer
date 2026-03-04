@@ -986,6 +986,14 @@ inline event& event::arm() {
     return *this;
 }
 
+inline bool event::operator==(const event& x) const noexcept {
+    return ep_.get() == x.ep_.get();
+}
+
+inline bool event::operator!=(const event& x) const noexcept {
+    return ep_.get() != x.ep_.get();
+}
+
 inline const detail::event_handle& event::handle() const& noexcept {
     return ep_;
 }
@@ -1026,13 +1034,25 @@ inline task<T>::~task() {
 }
 
 template <typename T>
-inline bool task<T>::done() {
+inline task<T>::operator bool() const noexcept {
+    return handle_;
+}
+
+template <typename T>
+inline bool task<T>::empty() const noexcept {
+    return !handle_;
+}
+
+template <typename T>
+inline bool task<T>::done() const {
     return handle_ && handle_.done();
 }
 
 template <typename T>
 inline event task<T>::completion() {
-    if (done()) {
+    if (!handle_) {
+        return event();
+    } else if (handle_.done()) {
         return event(nullptr);
     }
     auto& p = handle_.promise();
@@ -1044,7 +1064,7 @@ inline event task<T>::completion() {
 
 template <typename T>
 inline void task<T>::start() {
-    if (done()) {
+    if (!handle_ || handle_.done()) {
         return;
     }
     auto& p = handle_.promise();
@@ -1062,6 +1082,14 @@ inline void task<T>::detach() {
     }
     handle_.promise().detached_ = true;
     if (handle_.done()) {
+        handle_.destroy();
+    }
+    handle_ = nullptr;
+}
+
+template <typename T>
+inline void task<T>::destroy() {
+    if (handle_) {
         handle_.destroy();
     }
     handle_ = nullptr;
@@ -1328,6 +1356,10 @@ task<std::optional<T>> attempt(task<T> t, Es&&... es) {
     if (t.done()) {
         co_return co_await t;
     }
+    // `t` is a parameter, so its destructor will not run immediately upon
+    // co_return (it is destroyed with the coroutine state). But we want to
+    // destroy it now, because no one cares about its result.
+    t.destroy();
     co_return std::nullopt;
 }
 
@@ -1340,6 +1372,7 @@ task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es) {
     if (t.done()) {
         co_return co_await t;
     }
+    t.destroy();
     co_return std::nullopt;
 }
 
@@ -1353,6 +1386,7 @@ task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es) {
         co_await t;
         co_return std::monostate{};
     }
+    t.destroy();
     co_return std::nullopt;
 }
 

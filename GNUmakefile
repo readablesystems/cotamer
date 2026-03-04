@@ -13,7 +13,7 @@ ifeq ($(V),1)
 cmake_verbose := --verbose
 endif
 
-targets = cot-test cot-test-threads cot-test-io ctconsensus \
+targets = cot-test cot-test-threads cot-test-io cot-manual ctconsensus \
 	rpcg-server rpcg-client
 
 all:
@@ -31,10 +31,11 @@ $(targets:%=$(BUILD)/%): $(BUILD)/%:
 	cmake -B $(BUILD) $(cmake_build)
 	cmake --build $(BUILD) --target $* $(cmake_verbose)
 
-check test: cot-test cot-test-threads cot-test-io ctconsensus
+check test: cot-test cot-test-threads cot-test-io cot-manual ctconsensus
 	$(BUILD)/cot-test
 	$(BUILD)/cot-test-threads
 	$(BUILD)/cot-test-io
+	$(BUILD)/cot-manual
 	$(BUILD)/ctconsensus -q -R 10000
 
 .PHONY: all clean check test $(targets) $(targets:%=$(BUILD)/%)
