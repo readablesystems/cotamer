@@ -362,18 +362,32 @@ co_await cot::any(cot::interest{}, cot::after(5h));
 ```
 
 
-### Introspection
+### Event construction and introspection
 
-Tasks and events offer functions to introspect their state. `e.triggered()`
-returns true if event `e` has triggered; `t.done()` returns true if task `t`
-has completed. The `t.completion()` function returns an event that triggers
-when the task completes. Although a task’s return value can be harvested at
-most once (with `co_await t`), any number of coroutines can wait for a task to
-complete (with `co_await t.completion()`). Test if two events refer to the
-same underlying occurrence with `e1 == e2` or `e1 != e2`.
+`event()` constructs a new, untriggered event. To construct an already-triggered
+event, use `event{nullptr}`. Given an event `e`, `e.triggered()` returns true if
+`e`’s underlying occurrence has triggered. You may also test whether two events
+refer to the same underlying occurrence with `e1 == e2`.
 
-Within a coroutine, the expression `co_await cotamer::interest_event{}`
-returns an `event` that becomes triggered once another task is interested in
-this task’s result. You can use that event’s `triggered()` function to test
-for interest. Note that `co_await cotamer::interest_event{}` never suspends
-the current task (unlike `co_await cotamer::interest{}`).
+
+### Task construction and introspection
+
+The `t.done()` function call returns true if task `t` has completed.
+`t.completion()` returns an event that triggers when the task completes.
+Although a task’s return value can be harvested at most once (with `co_await
+t`), any number of coroutines can wait for a task to complete (with `co_await
+t.completion()`).
+
+Most `cotamer::task` objects are constructed automatically by calling a
+coroutine, but default construction with `task<T>()` produces an empty task with
+no associated coroutine. A non-empty task becomes empty when it is detached,
+when it is destroyed with `t.destroy()`, or when its coroutine is moved to
+another task object with `std::move`. Test for task emptiness with `t.empty()`.
+Empty tasks are not `done()` and their `completion()` events never trigger.
+
+Within a coroutine, the expression `co_await cotamer::interest_event{}` returns
+an `event` that becomes triggered once another coroutine is interested in the
+current coroutine’s result. Thus, a coroutine can use its interest event’s
+`triggered()` function to test whether interest has materialized. Note that
+`co_await cotamer::interest_event{}` always returns immediately without
+suspending.
