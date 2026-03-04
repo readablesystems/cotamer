@@ -77,7 +77,7 @@ driver::~driver() {
     }
 }
 
-void driver::loop(looptype lt) {
+bool driver::loop(looptype lt) {
     detail::fd_batch fdb;
 
     while (true) {
@@ -113,7 +113,13 @@ void driver::loop(looptype lt) {
             && !lock_.load(std::memory_order_relaxed)
             && guard_count_ == 0
             && keepalives_.empty()) {
-            break;
+            clearing_ = false;
+            return false;
+        }
+
+        // if clearing, empty fds, keepalives, and timeouts
+        if (clearing_) {
+            process_clearing();
         }
 
         // compute timeout
@@ -121,7 +127,8 @@ void driver::loop(looptype lt) {
         if (!asap_.empty()
             || !real_time_
             || lock_.load(std::memory_order_relaxed)
-            || lt == looptype::poll) {
+            || lt == looptype::poll
+            || clearing_) {
             timeout = duration::zero();
         } else if (!timed_.empty()) {
             timeout = timed_.top_time() - steady_now();
@@ -160,10 +167,9 @@ void driver::loop(looptype lt) {
 
         // exit if polling
         if (lt == looptype::poll) {
-            break;
+            return true;
         }
     }
-    clearing_ = false;
 }
 
 void driver::finish_migrate() {
@@ -183,6 +189,33 @@ void driver::finish_migrate() {
 
 void driver::clear() {
     clearing_ = true;
+}
+
+void driver::process_clearing() {
+    assert(clearing_);
+    keepalives_.clear();
+
+    // trigger all fd events (but coroutines throw rather than running)
+    int fd = -1;
+    while (auto fdu = fds_.next_nonempty(fd)) {
+        fd = fdu->fd;
+        for (int interest = 0; interest < 3; ++interest) {
+            if (auto eh = fds_.take(fd, interest, 0)) {
+                while (auto coh = eh->driver_trigger(this)) {
+                    coh();
+                }
+            }
+        }
+    }
+
+    // trigger all timers (but coroutines throw rather than running)
+    while (!timed_.empty()) {
+        auto eh = std::move(timed_.top());
+        timed_.pop();
+        while (auto coh = eh->driver_trigger(this)) {
+            coh();
+        }
+    }
 }
 
 void reset() {

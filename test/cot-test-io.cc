@@ -683,6 +683,41 @@ void test_cross_thread_wake_race() {
 }
 
 
+// TEST: clear() exits cleanly when fd events are outstanding.
+// A coroutine awaits readable() on a pipe (no data will arrive), then
+// clear() is called. The clearing mechanism must force-trigger the fd
+// event so the coroutine wakes up, throws clearing_exception, and
+// loop() exits.
+void test_clear_with_fd_events() {
+    cot::reset();
+
+    int piperaw[2];
+    assert(pipe(piperaw) == 0);
+    cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
+    cot::set_nonblocking(rfd.fileno());
+    cot::set_nonblocking(wfd.fileno());
+
+    bool reader_cleared = false;
+
+    auto reader = [&]() -> cot::task<> {
+        try {
+            co_await cot::readable(rfd);
+            assert(false && "readable should have thrown clearing_exception");
+        } catch (cot::detail::clearing_exception&) {
+            reader_cleared = true;
+        }
+    };
+    auto t = reader();
+
+    cot::clear();
+    cot::loop();
+
+    assert(reader_cleared);
+    assert(t.done());
+    std::cerr << "clear_with_fd_events: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -725,6 +760,7 @@ int main(int argc, char* argv[]) {
         fn();
     };
 
+    run_threaded("clear_with_fd_events", test_clear_with_fd_events);
     run_threaded("close_wakes_reader", test_close_wakes_reader);
     run_threaded("shutdown_wakes_reader", test_shutdown_wakes_reader);
     run_threaded("cross_thread_wake", test_cross_thread_wake);
