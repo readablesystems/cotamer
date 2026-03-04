@@ -26,7 +26,7 @@ assert(rfd.fileno() == rfd_copy.fileno());
 | `fd(int rawfd)`            | take ownership of a raw file descriptor          |
 | `fileno()`                 | return the raw file descriptor number            |
 | `valid()`, `operator bool` | true if the fd is open                           |
-| `close()`                  | close early, before destruction                  |
+| `close()`                  | close fd                                         |
 
 Closing an `fd`—whether by calling `close()`, by destroying the last copy, or
 by cancelling the owning task—triggers all outstanding readiness events on that
@@ -56,11 +56,12 @@ ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 ```
 
 File descriptors must be in non-blocking mode for readiness events to work
-correctly. Use `cotamer::set_nonblocking(rawfd)` before constructing a
-`cotamer::fd`.
+correctly. The I/O helpers automatically put their fds in non-blocking mode; for
+file descriptors you construct in other ways, call
+`cotamer::set_nonblocking(rawfd)`.
 
 
-## Async I/O helpers
+## I/O helpers
 
 Cotamer provides convenience coroutines that combine readiness events with
 system calls, so you don't have to write the retry loop yourself:
@@ -132,73 +133,72 @@ cot::task<> handle_connection(cot::fd f) {
 ```
 
 
-## Mutex
+## Mutual exclusion
 
 When multiple coroutines share a file descriptor, a logical operation like
-"write this entire message" may require several system calls, with `co_await
-writable(f)` suspensions in between. Without protection, another coroutine
-could interleave its own writes during those suspensions, corrupting both
-messages. A `cotamer::mutex` solves this: the coroutine holds the mutex for the
-duration of the logical operation, ensuring that each multi-call sequence
-completes atomically with respect to other coroutines.
+“write this entire message” might require several system calls, with `co_await
+writable(f)` suspensions in between. Without protection, another coroutine could
+interleave its own writes during those suspensions, corrupting both messages. A
+`cotamer::mutex` solves this: a coroutine can hold a mutex for the duration of
+its logical operation, ensuring that each multi-call sequence completes
+atomically with respect to other coroutines.
 
-Unlike `std::mutex`, which blocks the calling thread, `cotamer::mutex` suspends
-the calling coroutine—other coroutines on the same thread continue to run.
+Unlike `std::mutex`, which blocks the calling thread, `cotamer::mutex`
+*suspends* the calling *coroutine*. Other coroutines on the same thread continue
+to run.
 
-The mutex supports both exclusive and shared (reader/writer) locking:
+Mutex functions are:
 
-| Function           | Description                                            |
-|:-------------------|:-------------------------------------------------------|
-| `lock()`           | acquire exclusive access; returns an awaitable         |
-| `try_lock()`       | try to acquire exclusive access without suspending     |
-| `unlock()`         | release exclusive access                               |
-| `lock_shared()`    | acquire shared access; returns an awaitable            |
-| `try_lock_shared()`| try to acquire shared access without suspending        |
-| `unlock_shared()`  | release shared access                                  |
+| Function            | Description                                            |
+|:--------------------|:-------------------------------------------------------|
+| `cotamer::mutex m;` | construct mutex                                        |
+| `co_await m.lock()` | acquire exclusive access                               |
+| `co_await m`        | equivalent to `co_await m.lock()`                      |
+| `m.try_lock()`      | try to acquire exclusive access without suspending     |
+| `m.unlock()`        | release exclusive access                               |
 
-Multiple shared locks can be held simultaneously, but an exclusive lock is
-exclusive. Waiters are served in FIFO order.
+Cotamer mutexes are thread-safe, so multiple threads can call `m.lock()`
+concurrently (only one thread will win). Lock attempts are serviced in FIFO
+order: if coroutine A calls `m.lock()` before coroutine B does, then A will
+always acquire access before B (unless A is destroyed before acquiring access).
 
-```cpp
-cot::mutex m;
-
-cot::task<> writer() {
-    co_await m.lock();
-    // exclusive access
-    m.unlock();
-}
-
-cot::task<> reader() {
-    co_await m.lock_shared();
-    // shared access — other readers can proceed concurrently
-    m.unlock_shared();
-}
-```
-
-
-### Lock guards
-
-`cotamer::unique_lock` and `cotamer::shared_lock` are RAII guards that mirror
-`std::unique_lock` and `std::shared_lock`. The most common construction uses
-the token returned by `co_await m.lock()`:
+Since coroutines can be destroyed at any suspension point, explicitly calling
+`m.lock()` and `m.unlock()` risks abandoning a mutex in the locked state. Avoid
+this with `cotamer::unique_lock`, a guarded lock ownership class mirroring
+`std::unique_lock`. Pass the `unique_lock` constructor the ownership token
+returned by `co_await m` or `co_await m.lock()`. For instance:
 
 ```cpp
-cot::task<> writer(cot::mutex& m) {
-    cot::unique_lock guard(co_await m.lock());
+struct lockable_fd {
+    cot::fd f;
+    cot::mutex mutex;
+};
+
+cot::task<> write_message(lockable_fd& lfd, std::string message) {
+    cot::unique_lock guard(co_await lfd.mutex);
     // critical section — automatically unlocked when guard goes out of scope
-}
-
-cot::task<> reader(cot::mutex& m) {
-    cot::shared_lock guard(co_await m.lock_shared());
-    // shared critical section
+    // or coroutine is destroyed
+    size_t pos = 0;
+    while (pos != message.size()) {
+        auto rv = ::write(lfd.f.fileno(), message.data() + pos, message.size() - pos);
+        if (rv > 0) {
+            pos += rv;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            co_await cot::writable(lfd.f);   // suspension point: coroutine might be destroyed!
+        } else {
+            /* ... handle error ... */
+        }
+    }
 }
 ```
 
-The guards also support the standard construction tags:
+`cotamer::unique_lock` can also be explicitly locked or unlocked (with `co_await
+guard.lock()` and `guard.unlock()`), and supports the standard construction
+tags:
 
 ```cpp
 cot::unique_lock guard(m, std::defer_lock);    // don't lock yet
-co_await guard.lock();                          // lock explicitly later
+co_await guard.lock();                         // lock explicitly later
 
 cot::unique_lock guard(m, std::try_to_lock);   // non-blocking attempt
 if (guard) {
@@ -209,11 +209,9 @@ co_await m.lock();
 cot::unique_lock guard(m, std::adopt_lock);    // take ownership of existing lock
 ```
 
-
-### Mutex cancellation
-
-A pending lock can be cancelled with `cotamer::attempt`. If the timeout fires
-before the lock is acquired, the waiter is removed from the queue:
+Active attempts to lock a mutex may be cancelled by destroying the corresponding
+task. For instance, here, if the timeout fires, the `m.lock()` attempt is safely
+removed from the mutex’s queue:
 
 ```cpp
 auto result = co_await cot::attempt(m.lock(), cot::after(1s));
@@ -221,9 +219,26 @@ if (result) {
     cot::unique_lock guard(*result);
     // acquired within 1 second
 } else {
-    // timed out — lock was not acquired
+    // timed out — lock was not acquired; this coroutine’s place in line
+    // is skipped
 }
 ```
 
-Cancelled waiters are cleaned up automatically. Subsequent waiters are
-unaffected.
+### Shared access
+
+The exclusive lock mode is most useful in typical coroutine code, but
+`cotamer::mutex` also supports a shared lock mode modelling readers–writer
+locking. The shared lock mode uses `*_shared` mutex functions and the
+`cotamer::shared_lock` guard.
+
+| Function            | Description                                            |
+|:--------------------|:-------------------------------------------------------|
+| `co_await m.lock_shared()` | acquire shared access                           |
+| `m.try_lock_shared()`      | try to acquire shared access without suspending |
+| `m.unlock_shared()`        | release shared access                           |
+
+The FIFO rule also applies to mixtures of shared and exclusive access. If `mutex
+m` is acquired in shared mode, but an exclusive lock attempt has already been
+enqueued, then another coroutine that calls `m.lock_shared()` will suspend until
+the exclusive lock attempt has been serviced. On the other hand, if no exclusive
+attempts are waiting, then `m.lock_shared()` will proceed right away.
