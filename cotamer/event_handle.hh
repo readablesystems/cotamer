@@ -32,12 +32,12 @@ public:
     inline void swap(event_handle&) noexcept;
     inline ~event_handle();
 
-    explicit operator bool() const { return eb_ != nullptr; }
+    explicit operator bool() const noexcept { return eb_ != nullptr; }
     inline bool empty() const noexcept;
     inline bool idle() const noexcept;
-    event_body* get() const { return eb_; }
+    event_body* get() const noexcept { return eb_; }
     event_body& operator*() const { return *eb_; }
-    event_body* operator->() const { return eb_; }
+    event_body* operator->() const noexcept { return eb_; }
 
 private:
     event_body* eb_ = nullptr;

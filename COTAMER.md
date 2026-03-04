@@ -46,9 +46,13 @@ int main() {
 // 2021-10-12 21:21:09.000000: slow_add returns 7
 ```
 
-A task begins running as soon as it is called, and keeps running until it hits a
-`co_await`. Then it suspends and other tasks get a chance to run. When its
-awaited event or task becomes ready, it resumes where it left off.
+A task begins running as soon as it is called, and keeps running until it hits
+a `co_await`. Then it suspends and other tasks get a chance to run. When the
+awaited event or task becomes ready, the task resumes where it left off.
+
+`co_await t` on a `task<T>` produces the task's return value. If the task threw
+an exception, `co_await` rethrows it in the awaiting coroutine. At most one
+coroutine can `co_await` a given task.
 
 The `main` function starts `main_task`, which starts `slow_add`. Both
 `slow_add` and `main_task` then suspend themselves, `slow_add` waiting on a
@@ -77,9 +81,38 @@ Cotamer functions can create events associated with specific future occurrences:
 | `cotamer::writable(fd)`    | when `::write(fd)` wouldn’t block           |
 | `cotamer::closed(fd)`      | when `fd` errors or closes                  |
 
-An event can be also created explicitly with `cotamer::event e` and triggered
+An event can also be created explicitly with `cotamer::event e` and triggered
 with `e.trigger()`. The `e.triggered()` function tests whether an event has
 triggered yet.
+
+Copies of an event object refer to the same underlying occurrence: triggering
+one copy triggers all of them. Events are automatically reference counted, and
+most event operations are thread-safe—it works to construct, trigger, and await
+the same event on three different threads. (Event assignment with `operator=` is
+not thread-safe.)
+
+When multiple events trigger at the same logical time, they run in the order
+they were registered:
+
+```cpp
+cot::task<> awaiter(int n, cot::event e) {
+    co_await e;
+    std::print("{} ", n);
+}
+
+int main() {
+    auto t0 = awaiter(0, cot::asap());
+    auto t1 = awaiter(1, cot::asap());
+    auto t2 = awaiter(2, cot::after(5ms));
+    auto t3 = awaiter(3, cot::after(10ms));
+    auto t4 = awaiter(4, cot::after(10ms));
+    auto t5 = awaiter(5, cot::after(5ms));     // earlier expiration time
+    cot::loop();
+    std::print("\n");
+}
+
+// always prints `0 1 2 5 3 4`
+```
 
 
 ## Combinators: `any`, `all`, and `attempt`
@@ -95,8 +128,8 @@ co_await cot::any(cot::after(1h), cot::after(10h));
 co_await cot::all(cot::after(1h), cot::after(10h));
 ```
 
-`cotamer::attempt(task, event...)` runs a task with cancellation. The `task`
-is cancelled if any of the `event`s trigger before the task completes.
+`cotamer::attempt(task, event...)` runs a task with cancellation: if any of the
+`event`s trigger before the task completes, the task is destroyed.
 `co_await attempt(task<T>, ...)` returns a `std::optional<T>`, which either
 contains the return value from the task or `std::nullopt` if the task was
 cancelled. `attempt` is a natural fit for timeouts:
@@ -113,9 +146,10 @@ if (result) {
 
 ## Task lifetime
 
-Coroutine data, such as local variables, is normally tied to the lifetime of the
-`task<>` object. When the `task<>` goes out of scope, all data associated with
-the task is destroyed too.
+Coroutine data, such as local variables, is normally tied to the lifetime of
+the corresponding `task<T>` object. When the `task` goes out of scope (or is
+cancelled by `cotamer::attempt`), all data associated with its coroutine is
+destroyed too.
 
 ```cpp
 cot::task<> printer(int i) {
@@ -125,8 +159,8 @@ cot::task<> printer(int i) {
 }
 
 int main() {
-    printer(0);             // returned `task` destroyed → coroutine destroyed
-    auto t = printer(1);    // returned `task` preserved → coroutine lives
+    printer(0);             // `task` destroyed → coroutine destroyed
+    auto t = printer(1);    // `task` preserved → coroutine lives
     cot::loop();
 }
 
@@ -138,19 +172,13 @@ int main() {
 
 The `task::detach()` function breaks the link between a running coroutine and
 its `task` object, allowing the coroutine to run to completion even after the
-`task` is destroyed. The task’s memory will be automatically freed when the task
+`task` is destroyed. The coroutine’s memory is automatically freed when it
 returns.
 
 ```cpp
-cot::task<> printer(int i) {
-    std::print("printer({}) began\n", i);
-    co_await cot::asap();
-    std::print("printer({}) completed\n", i);
-}
-
 int main() {
-    printer(0).detach();    // returned `task` detached → coroutine lives
-    auto t = printer(1);    // returned `task` preserved → coroutine lives
+    printer(0).detach();    // `task` detached → coroutine lives
+    auto t = printer(1);    // `task` preserved → coroutine lives
     cot::loop();
 }
 
@@ -164,13 +192,13 @@ int main() {
 
 ## Event loop
 
-Cotamer runs coroutines from its event loop, `cotamer::loop()`. (Every
-application thread has its own thread-local driver, `cotamer::driver::current`;
-free functions like `cotamer::loop()` call into that driver.) The `loop`
-function repeatedly runs unblocked tasks, triggers expired timer events, and
-checks for file descriptor events, blocking as appropriate. It runs until
-there’s nothing left for it to do: no unblocked tasks, no timers, and no file
-descriptor interest.
+Cotamer runs coroutines from its event loop, `cotamer::loop()`. Every
+application thread has its own thread-local driver (`cotamer::driver::current`);
+free functions like `cotamer::loop()` call into that driver. The `loop` function
+repeatedly runs unblocked tasks, triggers expired timer events, and checks for
+file descriptor events, blocking as appropriate. It runs until there’s nothing
+left for it to do: no unblocked tasks, no timers, and no file descriptor
+interest.
 
 A `cotamer::driver_guard` token keeps `cotamer::loop()` alive and processing
 events even if the loop has no other work. This is useful when suspending on an
@@ -188,7 +216,7 @@ cot::task<struct addrinfo*> nonblocking_getaddrinfo(
     cot::event notifier;           // wake coroutine when `getaddrinfo` thread completes
     cot::driver_guard guard;       // prevent early exit from event loop
 
-    std::thread th([&] () {
+    std::thread([&] () {
         status = getaddrinfo(host, port, hints, &result);
         notifier.trigger();
     }).detach();
@@ -204,15 +232,15 @@ cot::task<struct addrinfo*> nonblocking_getaddrinfo(
 Alternatively, call `cotamer::keepalive(e)` to keep the current driver loop
 running until `event e` triggers.
 
-The `cotamer::clear()` function causes a driver loop to exit cleanly, even if it
-has outstanding events. `cotamer::clear()` unregisters all file descriptor
-events and destroys outstanding coroutines.
+The `cotamer::clear()` function causes a driver loop to exit even if it has
+outstanding events. `cotamer::clear()` unregisters all file descriptor events
+and destroys outstanding coroutines. This can be useful for testing.
 
-The `cotamer::poll()` function runs the driver once, processing one batch of
-ASAP events, file descriptor updates, and timers without blocking.
-`cotamer::poll()` returns true if the driver still has outstanding work.
-`cotamer::loop()` behaves like `while (cotamer::poll()) {}`, but is more
-efficient since `cotamer::loop()` can block.
+The `cotamer::poll()` function runs the driver once, processing the current
+batch of ASAP events, file descriptor updates, and timers in non-blocking
+fashion. `cotamer::poll()` returns true if the driver still has outstanding
+work. `cotamer::loop()` behaves like `while (cotamer::poll()) {}`, but uses
+the CPU more efficiently since `cotamer::loop()` can block.
 
 
 ## Clocks
@@ -223,11 +251,6 @@ system would block. For instance, this program completes instantaneously, even
 though it reports that over a year has elapsed:
 
 ```cpp
-#include "cotamer.hh"
-#include <print>
-namespace cot = cotamer;
-using namespace std::chrono_literals;
-
 cot::task<> long_delay() {
     std::print("{}: good morning\n", cot::now());
     co_await cot::after(10000h);
@@ -256,6 +279,9 @@ random seed should be perfectly replicable by rerunning with the same seed,
 and exploring many random seeds should explore a wide range of system
 behavior—as long as you built your system right.
 
+Call `cotamer::set_clock(cotamer::clock::real_time)` to change Cotamer to
+real-time mode.
+
 
 ## Advanced topics
 
@@ -263,9 +289,9 @@ behavior—as long as you built your system right.
 
 Since events are one-shot, a long-lived coroutine that repeatedly waits for
 notifications needs a fresh event each time. The `event& event::arm()`
-convenience function simplifies this. If `e` has already triggered, `e.arm()`
-replaces it with a fresh untriggered event; otherwise `e.arm()` leaves `e`
-unchanged. In both cases it returns the modified `e`.
+convenience function simplifies this. If `e` has triggered, `e.arm()` reassigns
+`e` to a fresh untriggered event; otherwise `e.arm()` leaves `e` unchanged. In
+both cases it returns `e`.
 
 Here, a producer enqueues work and calls `trigger()` on a notifier event, while
 a background worker uses `work_queue_wakeup.arm()` to ensure that it always
@@ -289,6 +315,23 @@ cot::task<> background_worker() {
 void enqueue_work(Item item) {
     work_queue.push_back(std::move(item));
     work_queue_wakeup.trigger();   // does nothing unless background_worker is waiting
+}
+```
+
+Since `arm()` may reassign the event, it is not thread-safe. It only
+modifies `e`—other copies of the original event are unaffected:
+
+```cpp
+void test_event_arm_copies() {
+    cot::event e;                  // construct untriggered event
+    cot::event e_copy = e;         // copy shares same underlying occurrence
+    assert(e == e_copy);           // `operator==` tests underlying occurrence
+    assert(!e.triggered() && !e_copy.triggered());
+    e.trigger();                   // trigger underlying occurrence
+    assert(e.triggered() && e_copy.triggered());  // also triggers copy
+    e.arm();                       // rearm `e`
+    assert(e != e_copy);           // `e_copy` still refers to original
+    assert(!e.triggered() && e_copy.triggered());
 }
 ```
 
@@ -323,9 +366,9 @@ co_await cot::any(cot::interest{}, cot::after(5h));
 
 Tasks and events offer functions to introspect their state. `e.triggered()`
 returns true if event `e` has triggered; `t.done()` returns true if task `t`
-has completed. You can also obtain an event that triggers when a task
-completes. This event, `t.completion()`, can be useful because multiple
-coroutines can wait on it (at most one coroutine can wait on the task itself).
+has completed. The `t.completion()` function returns an event that triggers when
+the task completes; unlike `co_await t`, any number of coroutines can wait on a
+completion event.
 
 A coroutine has no access to its `task<T>` object, so task self-introspection
 takes some work. Within a coroutine, the expression `co_await

@@ -49,6 +49,9 @@ public:
     inline bool trigger();
     inline event& arm();
 
+    inline bool operator==(const event&) const noexcept;
+    inline bool operator!=(const event&) const noexcept;
+
     inline const detail::event_handle& handle() const& noexcept;
     inline detail::event_handle&& handle() && noexcept;
     std::string debug_info() const;
@@ -75,7 +78,7 @@ public:
     using promise_type = detail::task_promise<T>;
     using handle_type = std::coroutine_handle<promise_type>;
 
-    inline task() noexcept = default;
+    inline task() noexcept = default;  // construct empty task
     explicit inline task(handle_type handle) noexcept;
     inline task(task&& x) noexcept;
     inline task& operator=(task&& x) noexcept;
@@ -83,10 +86,14 @@ public:
     task& operator=(const task&) = delete;
     inline ~task();
 
-    inline void start();            // start a task waiting for interest{}
-    inline void detach();           // coroutine survives task<> deletion
-    inline bool done();             // has coroutine completed?
-    inline event completion();      // event that triggers on done()
+    inline explicit operator bool() const noexcept;
+    inline bool empty() const noexcept;
+
+    inline void start();               // start task if waiting for interest{}
+    inline void detach();              // coroutine will survive task<> deletion
+    inline bool done() const;          // has coroutine completed?
+    inline event completion();         // event that triggers on done()
+    inline void destroy();             // destroy associated coroutine
 
     detail::task_awaiter<T> operator co_await() const noexcept;
 
@@ -503,6 +510,16 @@ struct statistics {
 };
 extern statistics stats;
 #endif
+
+
+// Metaprogramming.
+
+template <typename T> struct is_task : public std::false_type { };
+template <typename T> struct is_task<task<T>> : public std::true_type { };
+template <typename T> constexpr bool is_task_v = is_task<T>::value;
+inline constexpr bool is_task_value(const auto& v) {
+    return is_task_v<decltype(v)>;
+}
 
 }
 
