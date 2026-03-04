@@ -366,13 +366,14 @@ co_await cot::any(cot::interest{}, cot::after(5h));
 
 Tasks and events offer functions to introspect their state. `e.triggered()`
 returns true if event `e` has triggered; `t.done()` returns true if task `t`
-has completed. The `t.completion()` function returns an event that triggers when
-the task completes; unlike `co_await t`, any number of coroutines can wait on a
-completion event.
+has completed. The `t.completion()` function returns an event that triggers
+when the task completes. Although a task’s return value can be harvested at
+most once (with `co_await t`), any number of coroutines can wait for a task to
+complete (with `co_await t.completion()`). Test if two events refer to the
+same underlying occurrence with `e1 == e2` or `e1 != e2`.
 
-A coroutine has no access to its `task<T>` object, so task self-introspection
-takes some work. Within a coroutine, the expression `co_await
-cotamer::interest_event{}` returns an `event` that triggers once another task
-is interested in this task’s result. You can use that event’s `triggered()`
-function to test for interest. Note that `co_await cotamer::interest_event{}`
-never suspends the current task (unlike `co_await cotamer::interest{}`).
+Within a coroutine, the expression `co_await cotamer::interest_event{}`
+returns an `event` that becomes triggered once another task is interested in
+this task’s result. You can use that event’s `triggered()` function to test
+for interest. Note that `co_await cotamer::interest_event{}` never suspends
+the current task (unlike `co_await cotamer::interest{}`).
