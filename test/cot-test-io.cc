@@ -27,7 +27,7 @@ cot::task<> test_pipe_readwrite() {
     auto writer = [&]() -> cot::task<> {
         const char* msg = "hello from pipe";
         auto r = co_await cot::write(wfd, msg, strlen(msg));
-        assert(r == static_cast<ssize_t>(strlen(msg)));
+        assert(r == strlen(msg));
     };
 
     // Reader: read from the pipe

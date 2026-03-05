@@ -31,59 +31,88 @@
 
 namespace cotamer {
 
+inline void throw_errno() {
+    throw std::system_error(errno, std::generic_category());
+}
+
 // Set a raw file descriptor to non-blocking mode.
 inline void set_nonblocking(int rawfd) {
     int flags = fcntl(rawfd, F_GETFL, 0);
     if (flags < 0 || fcntl(rawfd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        throw std::system_error(errno, std::generic_category());
+        throw_errno();
     }
 }
 
-// Reads up to n bytes. Suspends on EAGAIN. Returns bytes read
-// (0 = EOF; negative = error code).
-inline task<ssize_t> read_once(const fd& f, void* buf, size_t n) {
+// Reads up to count bytes. Suspends on EAGAIN. Returns bytes read.
+inline task<size_t> read_once(const fd& f, void* buf, size_t count) {
     while (true) {
-        ssize_t r = n ? ::read(f.fileno(), buf, n) : 0;
+        ssize_t r = count ? ::read(f.fileno(), buf, count) : 0;
         if (r >= 0) {
             co_return r;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            co_return -errno;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            throw_errno();
         }
         co_await readable(f);
     }
 }
 
-// Writes up to n bytes. Suspends on EGAIN. Returns bytes written or
-// negative error code.
-inline task<ssize_t> write_once(const fd& f, const void* buf, size_t n) {
+// Writes up to count bytes. Suspends on EAGAIN. Returns bytes written.
+inline task<size_t> write_once(const fd& f, const void* buf, size_t count) {
     while (true) {
-        ssize_t r = n ? ::write(f.fileno(), buf, n) : 0;
+        ssize_t r = count ? ::write(f.fileno(), buf, count) : 0;
         if (r >= 0) {
             co_return r;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            co_return -errno;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            throw_errno();
         }
         co_await writable(f);
     }
 }
 
-// Writes all n bytes, suspending as needed. Returns total written or
-// negative error code.
-inline task<ssize_t> write(const fd& f, const void* buf, size_t n) {
-    size_t nw = 0;
-    const char* p = static_cast<const char*>(buf);
+// Reads all n bytes, suspending as needed. Returns bytes read.
+inline task<size_t> read(const fd& f, void* buf, size_t count) {
+    char* p = static_cast<char*>(buf);
+    size_t nr = 0;
     while (true) {
-        ssize_t r = n > nw ? ::write(f.fileno(), p + nw, n - nw) : 0;
+        ssize_t r = count ? ::read(f.fileno(), p + nr, count - nr) : 0;
+        if (r > 0) {
+            nr += r;
+            if (nr == count) {
+                break;
+            }
+        } else if (r == 0) {
+            break;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            if (nr > 0) {
+                break;
+            }
+            throw_errno();
+        }
+        co_await readable(f);
+    }
+    co_return nr;
+}
+
+// Writes all n bytes, suspending as needed. Returns bytes written.
+inline task<size_t> write(const fd& f, const void* buf, size_t count) {
+    const char* p = static_cast<const char*>(buf);
+    size_t nw = 0;
+    while (true) {
+        ssize_t r = count ? ::write(f.fileno(), p + nw, count - nw) : 0;
         if (r > 0) {
             nw += r;
-        }
-        if (nw == n) {
-            co_return nw;
-        } else if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            co_return nw ? nw : -errno;
+            if (nw == count) {
+                break;
+            }
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            if (nw > 0) {
+                break;
+            }
+            throw_errno();
         }
         co_await writable(f);
     }
+    co_return nw;
 }
 
 // Connects to an address. Suspends until connected. Throws on error.
@@ -113,8 +142,8 @@ inline task<fd> accept(const fd& listen_fd) {
         if (rawfd >= 0) {
             set_nonblocking(rawfd);
             co_return fd(rawfd);
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            throw std::system_error(errno, std::generic_category());
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            throw_errno();
         }
         co_await readable(listen_fd);
     }

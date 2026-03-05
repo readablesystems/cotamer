@@ -320,9 +320,11 @@ inline event closed(const fd&);        // triggers when `fd` errors or closes
 // File-related functions
 
 inline void set_nonblocking(int rawfd);
-inline task<ssize_t> read_once(const fd& f, void* buf, size_t n);
-inline task<ssize_t> write_once(const fd& f, const void* buf, size_t n);
-inline task<ssize_t> write(const fd& f, const void* buf, size_t n);
+
+inline task<size_t> read_once(const fd& f, void* buf, size_t count);
+inline task<size_t> write_once(const fd& f, const void* buf, size_t count);
+inline task<size_t> read(const fd& f, void* buf, size_t count);
+inline task<size_t> write(const fd& f, const void* buf, size_t count);
 
 inline task<> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
 inline task<fd> accept(const fd& listen_fd);

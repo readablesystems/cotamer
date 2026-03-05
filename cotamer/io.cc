@@ -399,7 +399,7 @@ static void getaddrinfo_thread(const std::string& address,
 task<cotamer::fd> tcp_listen(std::string address, int backlog) {
     // DNS lookup can block, so do it on a separate thread
     struct addrinfo hints{};
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 

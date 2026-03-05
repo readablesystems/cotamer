@@ -13,10 +13,8 @@ when the last copy of the `cotamer::fd` is destroyed, the underlying file
 descriptor is automatically closed.
 
 ```cpp
-int piperaw[2];
-pipe(piperaw);
-cot::fd rfd(piperaw[0]);       // takes ownership of raw fd
-cot::fd rfd_copy = rfd;        // shares the same underlying fd
+cot::fd rfd(fildes);       // takes ownership of raw fd
+cot::fd rfd_copy = rfd;    // shares the same underlying fd
 assert(rfd.fileno() == rfd_copy.fileno());
 ```
 
@@ -28,8 +26,8 @@ assert(rfd.fileno() == rfd_copy.fileno());
 | `valid()`, `operator bool` | true if the fd is open                           |
 | `close()`                  | close fd                                         |
 
-Closing an `fd`—whether by calling `close()`, by destroying the last copy, or
-by cancelling the owning task—triggers all outstanding readiness events on that
+Closing an `fd`, whether by calling `close()`, by destroying the last copy, or
+by cancelling the owning task, triggers all outstanding readiness events on that
 fd. This guarantees that coroutines waiting on a closed fd will always wake up.
 
 
@@ -47,7 +45,7 @@ Like all Cotamer events, these are one-shot: once triggered, they stay
 triggered. To wait for readability again, call `readable(f)` again.
 
 ```cpp
-cot::fd rfd(piperaw[0]);
+cot::fd rfd(fildes);
 cot::set_nonblocking(rfd.fileno());
 
 co_await cot::readable(rfd);              // suspend until data available
@@ -61,16 +59,38 @@ file descriptors you construct in other ways, call
 `cotamer::set_nonblocking(rawfd)`.
 
 
-## I/O helpers
+## Wrapper functions
 
-Cotamer provides convenience coroutines that combine readiness events with
-system calls:
+The `cotamer::read_once`, `cotamer::write_once`, `cotamer::read`, and
+`cotamer::write` coroutines are suspendable wrappers around `::read` and
+`::write`. The `*once` versions retry until `::read` or `::write` succeeds once;
+the other versions retry until all requested bytes are transferred. These
+functions return the number of bytes transferred.
 
-| Function                                    | Description                                        |
-|:--------------------------------------------|:---------------------------------------------------|
-| `read_once(f, buf, n)` | read up to `n` bytes; suspends on `EAGAIN`; returns bytes read, 0 for EOF, or negative errno |
-| `write_once(f, buf, n)` | write up to `n` bytes; suspends on `EAGAIN`; returns bytes written or negative errno |
-| `write(f, buf, n)` | write all `n` bytes, suspending as needed; returns total written or negative errno |
+Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions to
+retry. On serious errors (anything else), the functions exit early. If any data
+had been transferred, they return a short count; but if the error occurred
+before data transfer, they throw a `std::system_error` with the `errno` number
+as its `code()`. Recover the errno number with `catch (const std::system_error&
+ex) { ... ex.code() ... }`.
+
+`cotamer::connect` and `cotamer::accept` perform asynchronous versions of the
+corresponding socket system calls. `connect` connects a client socket to a
+remote address; the coroutine suspends until the connection attempt succeeds.
+`accept` suspends until a new connection request arrives on `lfd`; when one
+does, it is accepted, put into non-blocking mode, and returned as an `fd`
+object. Again, these functions throw `std::system_error` on serious error.
+
+Signatures:
+
+| Function | Description |
+|:---------|:------------|
+| `task<size_t> read_once(fd, void* buf, size_t count)` | Read until first success |
+| `task<size_t> read(fd, void* buf, size_t count)` | Read until completion |
+| `task<size_t> write_once(fd, const void* buf, size_t count)` | Write until first success |
+| `task<size_t> write(fd, const void* buf, size_t count)` | Write until completion |
+| `task<> connect(fd, const sockaddr*, socklen_t)` | Connect client socket to address |
+| `task<fd> accept(fd)` | Accept new nonblocking socket from listening fd |
 
 Here is a complete pipe example:
 
@@ -97,17 +117,6 @@ cot::task<> pipe_echo() {
 
 (But note that more complex examples would likely need [mutual
 exclusion](#mutual-exclusion) to prevent message corruption.)
-
-In addition to these, `cotamer::connect` and `cotamer::accept` perform
-asynchronous versions of the corresponding socket system calls. `cotamer::task<>
-cotamer::connect(cotamer::fd, const struct sockaddr*, socklen_t)` connects a
-client socket to a remote address; the coroutine suspends until the connection
-attempt succeeds. `cotamer::task<cotamer::fd> cotamer::accept(cotamer::fd lfd)`
-suspends until a new connection request arrives on `lfd`; when one does, it is
-accepted, put into non-blocking mode, and returned as an `fd` object. If either
-function observes an error (such as `ETIMEDOUT`), it throws that error using
-`std::system_error`; you can recover the error number with `catch (const
-std::system_error& ex) { ... ex.code() ... }`.
 
 
 ## TCP
@@ -140,7 +149,9 @@ cot::task<> handle_connection(cot::fd f) {
     char buf[4096];
     while (true) {
         auto n = co_await cot::read_once(f, buf, sizeof(buf));
-        if (n <= 0) break;
+        if (n <= 0) {
+            break;
+        }
         co_await cot::write(f, buf, n);
     }
 }
@@ -246,8 +257,8 @@ The exclusive lock mode is most useful in typical coroutine code, but
 locking. The shared lock mode uses `*_shared` mutex functions and the
 `cotamer::shared_lock` guard.
 
-| Function            | Description                                            |
-|:--------------------|:-------------------------------------------------------|
+| Function                   | Description                                     |
+|:---------------------------|:------------------------------------------------|
 | `co_await m.lock_shared()` | acquire shared access                           |
 | `m.try_lock_shared()`      | try to acquire shared access without suspending |
 | `m.unlock_shared()`        | release shared access                           |
