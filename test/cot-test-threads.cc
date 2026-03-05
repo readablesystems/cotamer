@@ -5,12 +5,13 @@
 #include <iostream>
 #include <optional>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace cot = cotamer;
 
 
-// Test 1: Cross-thread trigger — thread B triggers an event owned by thread A,
+// TEST: Cross-thread trigger — thread B triggers an event owned by thread A,
 // coroutine resumes on thread A.
 void test_cross_thread_trigger() {
     std::atomic<int> phase{0};
@@ -57,7 +58,7 @@ void test_cross_thread_trigger() {
 }
 
 
-// Test 2: Cross-thread trigger through an any() combinator.
+// TEST: Cross-thread trigger through an any() combinator.
 void test_cross_thread_any() {
     std::atomic<int> phase{0};
     std::thread::id resumed_thread;
@@ -103,7 +104,7 @@ void test_cross_thread_any() {
 }
 
 
-// Test 3: Multiple cross-thread triggers — thread B triggers several events.
+// TEST: Multiple cross-thread triggers — thread B triggers several events.
 void test_cross_thread_multi() {
     constexpr int N = 10;
     std::atomic<int> phase{0};
@@ -159,7 +160,7 @@ void test_cross_thread_multi() {
 }
 
 
-// Test 4: Each thread runs its own independent driver.
+// TEST: Each thread runs its own independent driver.
 void test_independent_drivers() {
     std::atomic<int> done_count{0};
 
@@ -194,7 +195,7 @@ void test_independent_drivers() {
 }
 
 
-// Test 5: Cross-thread trigger on an already-triggered event is a no-op.
+// TEST: Cross-thread trigger on an already-triggered event is a no-op.
 void test_cross_thread_already_triggered() {
     std::atomic<int> phase{0};
     cot::event* ev_ptr = nullptr;
@@ -235,7 +236,7 @@ void test_cross_thread_already_triggered() {
 // --- Torture tests below ---
 
 
-// Torture 1: 8 threads all triggering events on one driver, many rounds.
+// TORTURE: 8 threads all triggering events on one driver, many rounds.
 // Exercises high contention on the driver lock (remote_ready_).
 void test_torture_hammer() {
     constexpr int NTHREADS = 8;
@@ -300,7 +301,7 @@ void test_torture_hammer() {
 }
 
 
-// Torture 2: Multiple threads race to trigger the same event.
+// TORTURE: Multiple threads race to trigger the same event.
 // Only one trigger has any effect; the rest hit the lock and see f_triggered.
 void test_torture_same_event() {
     constexpr int NTHREADS = 8;
@@ -355,7 +356,7 @@ void test_torture_same_event() {
 }
 
 
-// Torture 3: Each member of an all() quorum triggered from a different thread.
+// TORTURE: Each member of an all() quorum triggered from a different thread.
 // Exercises trigger_member contention — multiple trigger_members racing on the
 // quorum's lock, with exactly one reaching the quorum threshold.
 void test_torture_quorum_race() {
@@ -413,7 +414,7 @@ void test_torture_quorum_race() {
 }
 
 
-// Torture 4: Nested quorums with cross-thread triggers.
+// TORTURE: Nested quorums with cross-thread triggers.
 // any(all(e0, e1), all(e2, e3)) — four threads each trigger one event.
 // The inner all() that completes first satisfies the outer any().
 void test_torture_nested_quorum() {
@@ -471,7 +472,7 @@ void test_torture_nested_quorum() {
 }
 
 
-// Torture 5: Bidirectional — two drivers, each triggers events on the other.
+// TORTURE: Bidirectional — two drivers, each triggers events on the other.
 // Both loop concurrently, processing injected triggers.
 void test_torture_bidirectional() {
     constexpr int ROUNDS = 200;
@@ -569,7 +570,7 @@ void test_torture_bidirectional() {
 }
 
 
-// Torture 6: Triggers arrive while loop() is actively processing.
+// TORTURE: Triggers arrive while loop() is actively processing.
 // The driver thread starts looping immediately; trigger threads fire events
 // with random delays so injections arrive mid-loop.
 void test_torture_inject_during_loop() {
@@ -636,7 +637,7 @@ void test_torture_inject_during_loop() {
 }
 
 
-// Torture 7: any() quorum with many members, all triggered from different
+// TORTURE: any() quorum with many members, all triggered from different
 // threads simultaneously. Only the first trigger satisfies the quorum;
 // the rest race into trigger_member on an already-triggered quorum.
 void test_torture_any_race() {
@@ -695,7 +696,7 @@ void test_torture_any_race() {
 }
 
 
-// Leak test 1: any() frees non-triggering members when the event handle drops.
+// TEST: any() frees non-triggering members when the event handle drops.
 void test_leak_any() {
     cot::event e0, e1, e2;
     auto* b0 = e0.handle().get();
@@ -728,7 +729,7 @@ void test_leak_any() {
 }
 
 
-// Leak test 2: nested any(all(), all()) frees entire non-triggering branch.
+// TEST: nested any(all(), all()) frees entire non-triggering branch.
 void test_leak_nested() {
     cot::event e0, e1, e2, e3;
     auto* b0 = e0.handle().get();
@@ -769,7 +770,7 @@ void test_leak_nested() {
 }
 
 
-// Leak test 3: verify co_await any() releases promptly after loop().
+// TEST: verify co_await any() releases promptly after loop().
 void test_leak_await() {
     cot::event e0, e1;
     auto* b1 = e1.handle().get();
@@ -796,8 +797,8 @@ void test_leak_await() {
 }
 
 
-// Cross-thread task await: co_awaiting a task created on a different driver
-// should throw cotamer_error with code cross_driver_await.
+// TEST: Cross-thread task await. Co_awaiting a task created on a different
+// driver should throw cotamer_error with code cross_driver_await.
 void test_cross_thread_await_task() {
     std::atomic<int> phase{0};
     std::optional<cot::task<int>> f_task;
@@ -846,7 +847,7 @@ void test_cross_thread_await_task() {
 }
 
 
-// Torture: Race between event_handle::~event_handle (destroy) and
+// TORTURE: Race between event_handle::~event_handle (destroy) and
 // trigger_member on the same quorum. Thread A triggers member event `e`,
 // Thread B drops the last explicit handle to the quorum. The dangerous
 // interleaving: Thread B's fetch_sub reaches 0 and enters destroy(), but
@@ -891,7 +892,7 @@ void test_torture_destroy_trigger_race() {
 }
 
 
-// Torture: Mutex shared/exclusive contention across threads.
+// TORTURE: Mutex shared/exclusive contention across threads.
 // Each thread runs coroutines that repeatedly lock the mutex (exclusive or
 // shared), check mutual-exclusion invariants, then unlock. Exercises the
 // latch spinlock, awoken_ handoff, waiter queue, and cross-thread event
@@ -955,7 +956,7 @@ void test_torture_mutex() {
 }
 
 
-// Torture: Mutex with try_lock contention. Some threads use co_await lock(),
+// TORTURE: Mutex with try_lock contention. Some threads use co_await lock(),
 // others spin with try_lock/try_lock_shared. Verifies that the atomic fast
 // paths (which bypass the latch and waiter queue) don't violate exclusion.
 void test_torture_mutex_trylock() {
@@ -1057,6 +1058,74 @@ void test_torture_mutex_trylock() {
 }
 
 
+// TEST: event.empty() as a safe bail-out for background threads.
+// A coroutine spawns a thread that holds a copy of an event. The thread
+// sleeps, then checks notifier.empty() before writing to coroutine-frame
+// locals. This tests the viability of using empty() to avoid dangling
+// writes when a coroutine is destroyed before its background thread finishes.
+void test_thread_event_empty() {
+    // Case 1: coroutine stays alive — thread writes value, triggers event.
+    {
+        int value = 1;
+        cot::event done;
+
+        std::thread driver_thread([&] {
+            auto fn = [&]() -> cot::task<> {
+                cot::event notifier;
+                cot::driver_guard guard;
+                std::thread([&, notifier]() mutable {
+                    usleep(100000);
+                    if (notifier.empty()) return;
+                    value = 2;
+                    notifier.trigger();
+                }).detach();
+                co_await notifier;
+            };
+            auto t = fn();
+            cot::loop();
+            assert(t.done());
+        });
+        driver_thread.join();
+
+        assert(value == 2 && "thread should have written value");
+        std::cerr << "thread_event_empty (alive): ok\n";
+    }
+
+    // Case 2: coroutine destroyed before thread wakes — thread sees empty().
+    {
+        int value = 1;
+        std::atomic<bool> thread_done{false};
+        bool thread_skipped = false;
+
+        {
+            cot::event notifier;
+            std::thread([&, notifier]() mutable {
+                usleep(100000);
+                if (notifier.empty()) {
+                    thread_skipped = true;
+                } else {
+                    value = 2;
+                    notifier.trigger();
+                }
+                thread_done.store(true, std::memory_order_release);
+            }).detach();
+            // notifier goes out of scope here — no coroutine ever awaited it
+        }
+
+        // Wait for the thread to finish
+        while (!thread_done.load(std::memory_order_acquire)) {
+            usleep(1000);
+        }
+
+        assert(value == 1 && "thread should NOT have written value");
+        assert(thread_skipped && "thread should have seen empty()");
+        std::cerr << "thread_event_empty (destroyed): ok\n";
+    }
+
+    std::cerr << "thread_event_empty: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -1092,6 +1161,7 @@ int main(int argc, char* argv[]) {
     run("torture_destroy_trigger_race", test_torture_destroy_trigger_race);
     run("torture_mutex", test_torture_mutex);
     run("torture_mutex_trylock", test_torture_mutex_trylock);
+    run("thread_event_empty", test_thread_event_empty);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");
