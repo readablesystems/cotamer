@@ -52,26 +52,28 @@ inline void set_nonblocking(const fd& f) {
 // Reads up to count bytes. Suspends on EAGAIN. Returns bytes read.
 inline task<size_t> read_once(const fd& f, void* buf, size_t count) {
     while (true) {
-        ssize_t r = count ? ::read(f.fileno(), buf, count) : 0;
+        ssize_t r = ::read(f.fileno(), buf, count);
         if (r >= 0) {
             co_return r;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await readable(f);
+        } else {
             throw errno_error();
         }
-        co_await readable(f);
     }
 }
 
 // Writes up to count bytes. Suspends on EAGAIN. Returns bytes written.
 inline task<size_t> write_once(const fd& f, const void* buf, size_t count) {
     while (true) {
-        ssize_t r = count ? ::write(f.fileno(), buf, count) : 0;
+        ssize_t r = ::write(f.fileno(), buf, count);
         if (r >= 0) {
             co_return r;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await writable(f);
+        } else {
             throw errno_error();
         }
-        co_await writable(f);
     }
 }
 
@@ -79,22 +81,19 @@ inline task<size_t> write_once(const fd& f, const void* buf, size_t count) {
 inline task<size_t> read(const fd& f, void* buf, size_t count) {
     char* p = static_cast<char*>(buf);
     size_t nr = 0;
-    while (true) {
-        ssize_t r = count ? ::read(f.fileno(), p + nr, count - nr) : 0;
+    while (nr != count) {
+        ssize_t r = ::read(f.fileno(), p + nr, count - nr);
         if (r > 0) {
             nr += r;
-            if (nr == count) {
-                break;
-            }
         } else if (r == 0) {
             break;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            if (nr > 0) {
-                break;
-            }
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await readable(f);
+        } else if (nr > 0) {
+            break;
+        } else {
             throw errno_error();
         }
-        co_await readable(f);
     }
     co_return nr;
 }
@@ -103,20 +102,19 @@ inline task<size_t> read(const fd& f, void* buf, size_t count) {
 inline task<size_t> write(const fd& f, const void* buf, size_t count) {
     const char* p = static_cast<const char*>(buf);
     size_t nw = 0;
-    while (true) {
-        ssize_t r = count ? ::write(f.fileno(), p + nw, count - nw) : 0;
+    while (nr != count) {
+        ssize_t r = ::write(f.fileno(), p + nw, count - nw)
         if (r > 0) {
             nw += r;
-            if (nw == count) {
-                break;
-            }
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            if (nw > 0) {
-                break;
-            }
+        } else if (r == 0) {
+            break;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await writable(f);
+        } else if (nw > 0) {
+            break;
+        } else {
             throw errno_error();
         }
-        co_await writable(f);
     }
     co_return nw;
 }

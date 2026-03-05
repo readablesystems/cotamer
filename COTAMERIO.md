@@ -46,26 +46,28 @@ triggered. To wait for readability again, call `readable(f)` again.
 
 ```cpp
 cot::fd rfd(fildes);
-cot::set_nonblocking(rfd.fileno());
+cot::set_nonblocking(rfd);
 
-co_await cot::readable(rfd);              // suspend until data available
+co_await cot::readable(rfd);              // suspend until data available or EOF
 char buf[256];
 ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 ```
 
 File descriptors must be in non-blocking mode for readiness events to work
-correctly. Some I/O helpers automatically put their fds in non-blocking mode;
-for file descriptors obtained in other ways, call
-`cotamer::set_nonblocking(fileno)`.
+correctly. I/O helpers that return a `cotamer::fd` (`accept`, `tcp_listen`,
+`tcp_connect`, `tcp_accept`) automatically put that fd in non-blocking mode; for
+file descriptors obtained in other ways, call
+`cotamer::set_nonblocking(fileno)` or `cotamer::set_nonblocking(fd)`.
 
 
 ## Wrapper functions
 
 The `cotamer::read_once`, `cotamer::write_once`, `cotamer::read`, and
 `cotamer::write` coroutines are suspendable wrappers around `::read` and
-`::write`. The `*once` versions retry until `::read` or `::write` succeeds once;
-the other versions retry until all requested bytes are transferred (or
-end-of-file or error). These functions return the number of bytes transferred.
+`::write`. The `*once` versions retry while blocked; the other versions retry
+until all requested bytes are transferred (or end-of-file or error). These
+functions return the number of bytes transferred (which might be zero at
+end-of-file).
 
 Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions to
 retry. On serious errors (anything else), the functions exit early. If any data
@@ -73,6 +75,9 @@ had been transferred, they return a short count; but if the error occurred
 before data transfer, they throw a `std::system_error` with the `errno` number
 as its `code()`. Recover the errno number with `catch (const std::system_error&
 ex) { ... ex.code() ... }`.
+
+Since the functions throw exceptions instead of returning -1 on error, their
+return type is `task<size_t>`, not `task<ssize_t>`.
 
 `cotamer::connect` and `cotamer::accept` perform asynchronous versions of the
 corresponding socket system calls. `connect` connects a client socket to a
@@ -99,8 +104,8 @@ cot::task<> pipe_echo() {
     int piperaw[2];
     pipe(piperaw);
     cot::fd rfd(piperaw[0]), wfd(piperaw[1]);
-    cot::set_nonblocking(rfd.fileno());
-    cot::set_nonblocking(wfd.fileno());
+    cot::set_nonblocking(rfd);
+    cot::set_nonblocking(wfd);
 
     // writer
     auto writer = [&]() -> cot::task<> {
@@ -115,9 +120,6 @@ cot::task<> pipe_echo() {
 }
 ```
 
-(But note that more complex examples would likely need [mutual
-exclusion](#mutual-exclusion) to prevent message corruption.)
-
 
 ## TCP
 
@@ -125,7 +127,7 @@ Higher-level coroutines handle TCP connection setup:
 
 | Function                         | Description                                              |
 |:---------------------------------|:---------------------------------------------------------|
-| `task<fd> tcp_listen(std::string address, int backlog)`   | bind and listen; returns a listening `fd`                  |
+| `task<fd> tcp_listen(std::string address [, int backlog])`   | bind and listen; returns a listening `fd`                  |
 | `task<fd> tcp_connect(std::string address)`           | connect to a remote address using TCP; returns a connected `fd`    |
 | `task<fd> tcp_accept(fd listen_fd)`          | accept a connection on a TCP listening socket            |
 
@@ -151,7 +153,7 @@ cot::task<> handle_connection(cot::fd f) {
     char buf[4096];
     while (true) {
         auto n = co_await cot::read_once(f, buf, sizeof(buf));
-        if (n <= 0) {
+        if (n == 0) {
             break;
         }
         co_await cot::write(f, buf, n);
@@ -247,8 +249,7 @@ if (result) {
     cot::unique_lock guard(*result);
     // acquired within 1 second
 } else {
-    // timed out — lock was not acquired; this coroutine’s place in line
-    // is skipped
+    // timed out — lock was not acquired; this coroutine loses its place in line
 }
 ```
 
