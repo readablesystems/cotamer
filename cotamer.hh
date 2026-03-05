@@ -294,7 +294,7 @@ private:
 class fd {
 public:
     fd() = default;
-    explicit inline fd(int rawfd);
+    explicit inline fd(int fileno);
     inline fd(const fd&) noexcept;
     inline fd(fd&&) noexcept;
     inline fd& operator=(const fd&);
@@ -319,7 +319,8 @@ inline event closed(const fd&);        // triggers when `fd` errors or closes
 
 // File-related functions
 
-inline void set_nonblocking(int rawfd);
+inline void set_nonblocking(int fileno);
+inline void set_nonblocking(const fd& f);
 
 inline task<size_t> read_once(const fd& f, void* buf, size_t count);
 inline task<size_t> write_once(const fd& f, const void* buf, size_t count);

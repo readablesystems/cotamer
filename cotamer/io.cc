@@ -176,7 +176,7 @@ inline void fd_batch::add(int pollfd, const fd_update& fdu, int old_mask) {
         EV_SET(&ev[changes], fdu.fd, EVFILT_READ, EV_DELETE, 0, 0, udata);
         ++changes;
     }
-    if (!(fdu.mask & 6) == !(old_mask & 6)) {
+    if (bool(fdu.mask & 6) == bool(old_mask & 6)) {
         return;
     }
     if (changes == capacity) {
@@ -234,18 +234,18 @@ inline std::optional<fd_update> fd_batch::pop() noexcept {
 void driver::hard_pollfd() {
 #if COTAMER_USE_KQUEUE
     if ((pollfd_ = kqueue()) < 0) {
-        throw std::system_error(errno, std::generic_category());
+        throw errno_error();
     }
     fcntl(pollfd_, F_SETFD, FD_CLOEXEC);
     // prepare wake event for cross-thread wake
     struct kevent ev;
     EV_SET(&ev, -1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, nullptr);
     if (kevent(pollfd_, &ev, 1, nullptr, 0, nullptr) < 0) {
-        throw std::system_error(errno, std::generic_category());
+        throw errno_error();
     }
 #elif COTAMER_USE_EPOLL
     if ((pollfd_ = epoll_create1(EPOLL_CLOEXEC)) < 0) {
-        throw std::system_error(errno, std::generic_category());
+        throw errno_error();
     }
     if ((epoll_wakefd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0) {
         int saved = errno;
@@ -257,7 +257,7 @@ void driver::hard_pollfd() {
     epev.events = EPOLLIN;
     epev.data.u64 = epoll_wakefd_ | (uint64_t(detail::fd_event_set::internal_epoch) << 32);
     if (epoll_ctl(pollfd_, EPOLL_CTL_ADD, epoll_wakefd_, &epev) < 0) {
-        throw std::system_error(errno, std::generic_category());
+        throw errno_error();
     }
 #endif
 }
@@ -370,128 +370,118 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
 }
 
 
+namespace {
+// ensure that the return value from `getaddrinfo` is properly freed
+struct getaddrinfo_value {
+    struct addrinfo hints{};
+    struct addrinfo* ai = nullptr;
+    int status = 0;
+    ~getaddrinfo_value() {
+        if (status == 0 && ai) {
+            freeaddrinfo(ai);
+        }
+    }
+};
+}
 
-static void getaddrinfo_thread(const std::string& address,
-                               const struct addrinfo* hints,
-                               struct addrinfo*& res,
-                               const char*& errormsg,
-                               event e) {
-    res = nullptr;
+static void getaddrinfo_thread(std::string address,
+                               std::shared_ptr<getaddrinfo_value> res,
+                               event notifier) {
     auto colon = address.rfind(':');
     if (colon == std::string::npos) {
-        errormsg = "invalid address";
-        e.trigger();
+        res->status = EAI_NONAME;
+        notifier.trigger();
         return;
     }
     auto host = address.substr(0, colon);
     auto port = address.substr(colon + 1);
-
-    int rv = getaddrinfo(host.empty() ? nullptr : host.c_str(),
-                         port.c_str(), hints, &res);
-    if (rv != 0) {
-        errormsg = gai_strerror(rv);
-    } else if (!res) {
-        errormsg = "address lookup failed";
-    }
-    e.trigger();
+    res->status = getaddrinfo(host.empty() ? nullptr : host.c_str(),
+                              port.c_str(), &res->hints, &res->ai);
+    notifier.trigger();
 }
 
 task<cotamer::fd> tcp_listen(std::string address, int backlog) {
     // DNS lookup can block, so do it on a separate thread
-    struct addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
+    auto res = std::make_shared<getaddrinfo_value>();
+    res->hints.ai_family = AF_UNSPEC;
+    res->hints.ai_socktype = SOCK_STREAM;
+    res->hints.ai_flags = AI_PASSIVE;
 
     // start thread for lookup, co_await result
-    struct addrinfo *res = nullptr;
-    const char* errormsg = nullptr;
-    event e;
+    event notifier;
     driver_guard guard;
-    std::thread th(getaddrinfo_thread, address, &hints,
-                   std::ref(res), std::ref(errormsg), e);
-    th.detach();
-    co_await e;
-    if (errormsg) {
-        throw std::runtime_error(errormsg);
+    std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
+    co_await notifier;
+    if (res->status != 0) {
+        throw std::runtime_error(gai_strerror(res->status));
     }
 
-    // construct socket
-    int rawfd, rv;
-    rawfd = rv = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-
-    // allow port number reuse
-    if (rv >= 0) {
-        int flag = 1;
-        setsockopt(rawfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
-    }
-
-    // bind
-    if (rv >= 0) {
-        rv = bind(rawfd, res->ai_addr, res->ai_addrlen);
-    }
-    freeaddrinfo(res);
-
-    // listen
-    if (rv >= 0) {
-        rv = listen(rawfd, backlog);
-    }
-
-    // error out if necessary
-    if (rv < 0) {
-        auto xerrno = errno;
-        if (rawfd >= 0) {
-            ::close(rawfd);
+    // `getaddrinfo` can return multiple addresses (e.g., IPv4 and IPv6);
+    // try each one in turn
+    int last_errno = EADDRNOTAVAIL;
+    for (auto ai = res->ai; ai; ai = ai->ai_next) {
+        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fileno < 0) {
+            last_errno = errno;
+            continue;
         }
-        throw std::system_error(xerrno, std::generic_category());
-    }
 
-    // set nonblocking and return
-    set_nonblocking(rawfd);
-    co_return cotamer::fd(rawfd);
+        set_nonblocking(fileno);
+        int flag = 1;
+        setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+        if (ai->ai_family == AF_INET6) {
+            setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
+        }
+
+        if (bind(fileno, ai->ai_addr, ai->ai_addrlen) == 0
+            && listen(fileno, backlog) == 0) {
+            // success
+            co_return cotamer::fd(fileno);
+        }
+
+        last_errno = errno;
+        ::close(fileno);
+        fileno = -1;
+    }
+    throw std::system_error(last_errno, std::generic_category());
 }
 
 task<cotamer::fd> tcp_connect(std::string address) {
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    auto res = std::make_shared<getaddrinfo_value>();
+    res->hints.ai_family = AF_UNSPEC;
+    res->hints.ai_socktype = SOCK_STREAM;
 
     // start thread for lookup, co_await result
-    struct addrinfo *res = nullptr;
-    const char* errormsg = nullptr;
-    event e;
+    event notifier;
     driver_guard guard;
-    std::thread th(getaddrinfo_thread, address, &hints,
-                   std::ref(res), std::ref(errormsg), e);
-    th.detach();
-    co_await e;
-    if (errormsg) {
-        throw std::runtime_error(errormsg);
+    std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
+    co_await notifier;
+    if (res->status) {
+        throw std::runtime_error(gai_strerror(res->status));
     }
 
-    // construct socket
-    int rawfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (rawfd < 0) {
-        freeaddrinfo(res);
-        throw std::system_error(errno, std::generic_category());
+    // try each address in turn
+    std::exception_ptr last_err;
+    for (auto ai = res->ai; ai; ai = ai->ai_next) {
+        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fileno < 0) {
+            last_err = std::make_exception_ptr(errno_error());
+            continue;
+        }
+
+        set_nonblocking(fileno);
+        int flag = 1;
+        setsockopt(fileno, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+        cotamer::fd f(fileno);
+        try {
+            co_await connect(f, ai->ai_addr, ai->ai_addrlen);
+            co_return std::move(f);
+        } catch (...) {
+            last_err = std::current_exception();
+        }
     }
-
-    // nonblocking, disable Nagle’s algorithm
-    set_nonblocking(rawfd);
-    int flag = 1;
-    setsockopt(rawfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-
-    // associate with cotamer::fd container
-    cotamer::fd f(rawfd);
-    try {
-        co_await connect(f, res->ai_addr, res->ai_addrlen);
-    } catch (...) {
-        freeaddrinfo(res);
-        throw;
-    }
-    freeaddrinfo(res);
-
-    co_return std::move(f);
+    std::rethrow_exception(last_err);
 }
 
 }

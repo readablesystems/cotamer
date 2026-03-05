@@ -1058,11 +1058,13 @@ void test_torture_mutex_trylock() {
 }
 
 
-// TEST: event.empty() as a safe bail-out for background threads.
+// TEST: event.empty() as a nearly-safe bail-out for background threads.
 // A coroutine spawns a thread that holds a copy of an event. The thread
 // sleeps, then checks notifier.empty() before writing to coroutine-frame
 // locals. This tests the viability of using empty() to avoid dangling
 // writes when a coroutine is destroyed before its background thread finishes.
+// But note that TOCTTOU errors are still possible: after empty() is checked
+// the coroutine could be destroyed.
 void test_thread_event_empty() {
     // Case 1: coroutine stays alive — thread writes value, triggers event.
     {

@@ -21,8 +21,8 @@ assert(rfd.fileno() == rfd_copy.fileno());
 | Member                     | Description                                      |
 |:---------------------------|:-------------------------------------------------|
 | `fd()`                     | construct an invalid fd                          |
-| `fd(int rawfd)`            | take ownership of a raw file descriptor          |
-| `fileno()`                 | return the raw file descriptor number            |
+| `fd(int fileno)`           | take ownership of a file descriptor              |
+| `fileno()`                 | return the file descriptor number                |
 | `valid()`, `operator bool` | true if the fd is open                           |
 | `close()`                  | close fd                                         |
 
@@ -54,9 +54,9 @@ ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 ```
 
 File descriptors must be in non-blocking mode for readiness events to work
-correctly. The I/O helpers automatically put their fds in non-blocking mode; for
-file descriptors you construct in other ways, call
-`cotamer::set_nonblocking(rawfd)`.
+correctly. Some I/O helpers automatically put their fds in non-blocking mode;
+for file descriptors obtained in other ways, call
+`cotamer::set_nonblocking(fileno)`.
 
 
 ## Wrapper functions
@@ -64,8 +64,8 @@ file descriptors you construct in other ways, call
 The `cotamer::read_once`, `cotamer::write_once`, `cotamer::read`, and
 `cotamer::write` coroutines are suspendable wrappers around `::read` and
 `::write`. The `*once` versions retry until `::read` or `::write` succeeds once;
-the other versions retry until all requested bytes are transferred. These
-functions return the number of bytes transferred.
+the other versions retry until all requested bytes are transferred (or
+end-of-file or error). These functions return the number of bytes transferred.
 
 Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions to
 retry. On serious errors (anything else), the functions exit early. If any data
@@ -125,16 +125,18 @@ Higher-level coroutines handle TCP connection setup:
 
 | Function                         | Description                                              |
 |:---------------------------------|:---------------------------------------------------------|
-| `tcp_listen(address, backlog)`   | bind and listen; returns a listening `fd`                  |
-| `tcp_connect(address)`           | connect to a remote address using TCP; returns a connected `fd`    |
-| `tcp_accept(listen_fd)`          | accept a connection on a TCP listening socket            |
+| `task<fd> tcp_listen(std::string address, int backlog)`   | bind and listen; returns a listening `fd`                  |
+| `task<fd> tcp_connect(std::string address)`           | connect to a remote address using TCP; returns a connected `fd`    |
+| `task<fd> tcp_accept(fd listen_fd)`          | accept a connection on a TCP listening socket            |
 
 Addresses are strings like `"127.0.0.1:8080"`, `"www.google.com:80"`, or
 `":8080"`. DNS resolution uses the standard `getaddrinfo(3)` function, and
 happens on a background thread to avoid blocking the event loop. `tcp_connect`
 and `tcp_accept` both set the `TCP_NODELAY` socket option to disable [Nagle’s
 algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm)
-([why?](https://brooker.co.za/blog/2024/05/09/nagle.html)).
+([why?](https://brooker.co.za/blog/2024/05/09/nagle.html)). If DNS resolution
+fails, the functions throw `std::runtime_error` with an error description; on
+other failures, they throw `std::system_error` with `errno` as error code.
 
 ```cpp
 cot::task<> echo_server() {

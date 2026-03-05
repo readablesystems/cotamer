@@ -31,15 +31,21 @@
 
 namespace cotamer {
 
-inline void throw_errno() {
-    throw std::system_error(errno, std::generic_category());
+inline std::system_error errno_error() {
+    return std::system_error(errno, std::generic_category());
 }
 
 // Set a raw file descriptor to non-blocking mode.
-inline void set_nonblocking(int rawfd) {
-    int flags = fcntl(rawfd, F_GETFL, 0);
-    if (flags < 0 || fcntl(rawfd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        throw_errno();
+inline void set_nonblocking(int fileno) {
+    int flags = fcntl(fileno, F_GETFL, 0);
+    if (flags < 0 || fcntl(fileno, F_SETFL, flags | O_NONBLOCK) < 0) {
+        throw errno_error();
+    }
+}
+
+inline void set_nonblocking(const fd& f) {
+    if (f.fileno() >= 0) {
+        set_nonblocking(f.fileno());
     }
 }
 
@@ -50,7 +56,7 @@ inline task<size_t> read_once(const fd& f, void* buf, size_t count) {
         if (r >= 0) {
             co_return r;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            throw_errno();
+            throw errno_error();
         }
         co_await readable(f);
     }
@@ -63,7 +69,7 @@ inline task<size_t> write_once(const fd& f, const void* buf, size_t count) {
         if (r >= 0) {
             co_return r;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            throw_errno();
+            throw errno_error();
         }
         co_await writable(f);
     }
@@ -86,7 +92,7 @@ inline task<size_t> read(const fd& f, void* buf, size_t count) {
             if (nr > 0) {
                 break;
             }
-            throw_errno();
+            throw errno_error();
         }
         co_await readable(f);
     }
@@ -108,7 +114,7 @@ inline task<size_t> write(const fd& f, const void* buf, size_t count) {
             if (nw > 0) {
                 break;
             }
-            throw_errno();
+            throw errno_error();
         }
         co_await writable(f);
     }
@@ -138,12 +144,12 @@ inline task<> connect(const fd& f, const struct sockaddr* addr, socklen_t len) {
 // Accepts a connection. Returns new fd (with ownership). Throws on error.
 inline task<fd> accept(const fd& listen_fd) {
     while (true) {
-        int rawfd = ::accept(listen_fd.fileno(), nullptr, nullptr);
-        if (rawfd >= 0) {
-            set_nonblocking(rawfd);
-            co_return fd(rawfd);
+        int fileno = ::accept(listen_fd.fileno(), nullptr, nullptr);
+        if (fileno >= 0) {
+            set_nonblocking(fileno);
+            co_return fd(fileno);
         } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            throw_errno();
+            throw errno_error();
         }
         co_await readable(listen_fd);
     }

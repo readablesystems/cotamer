@@ -203,29 +203,31 @@ interest.
 A `cotamer::driver_guard` token keeps `cotamer::loop()` alive and processing
 events even if the loop has no other work. This is useful when suspending on an
 event managed outside of Cotamer. For example, this function creates a
-non-blocking wrapper around the blocking `getaddrinfo()` API. The `driver_guard`
-prevents Cotamer from terminating until the `nonblocking_getaddrinfo` call
-resolves (when the `driver_guard` token goes out of scope).
+non-blocking wrapper around the blocking `stat()` system call. The
+`driver_guard` prevents Cotamer from terminating until the `nonblocking_stat`
+call resolves.
 
 ```cpp
-cot::task<struct addrinfo*> nonblocking_getaddrinfo(
-    const char* host, const char* port, const struct addrinfo* hints
-) {
-    struct addrinfo* result;       // collect result from `getaddrinfo`
-    int status;
-    cot::event notifier;           // wake coroutine when `getaddrinfo` thread completes
+cot::task<struct stat> nonblocking_stat(std::string path) {
+    cot::event notifier;           // communicate from thread to coroutine
     cot::driver_guard guard;       // prevent early exit from event loop
+    // receive return value from thread
+    // (The shared_ptr avoids undefined behavior if the coroutine is cancelled
+    // while the thread is still running.)
+    struct result_struct { struct stat st; int status; int err; };
+    auto result = std::make_shared<result_struct>();
 
-    std::thread([&] () {
-        status = getaddrinfo(host, port, hints, &result);
+    std::thread([=] () mutable {
+        result->status = stat(path.c_str(), &result->st);
+        result->err = errno;
         notifier.trigger();
     }).detach();
 
     co_await notifier;             // coroutine waits for thread
-    if (status != 0) {
-        throw std::runtime_error(gai_strerror(status));
+    if (result->status != 0) {
+        throw std::system_error(result->err, std::generic_category());
     }
-    co_return result;
+    co_return result->st;
 }
 ```
 
