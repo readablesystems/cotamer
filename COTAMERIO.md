@@ -27,8 +27,9 @@ assert(rfd.fileno() == rfd_copy.fileno());
 | `close()`                  | close fd                                         |
 
 Closing an `fd`, whether by calling `close()`, by destroying the last copy, or
-by cancelling the owning task, triggers all outstanding readiness events on that
-fd. This guarantees that coroutines waiting on a closed fd will always wake up.
+by cancelling the owning task, triggers all outstanding readiness events on
+that fd. This guarantees that coroutines waiting on a closed fd will always
+wake up.
 
 
 ## Readiness events
@@ -55,9 +56,14 @@ ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 
 File descriptors must be in non-blocking mode for readiness events to work
 correctly. I/O helpers that return a `cotamer::fd` (`accept`, `tcp_listen`,
-`tcp_connect`, `tcp_accept`) automatically put that fd in non-blocking mode; for
-file descriptors obtained in other ways, call
+`tcp_connect`, `tcp_accept`) automatically put that fd in non-blocking mode;
+for file descriptors obtained in other ways, call
 `cotamer::set_nonblocking(fileno)` or `cotamer::set_nonblocking(fd)`.
+
+When a file descriptor closes or experiences a serious error, Cotamer triggers
+all three readiness events for that file descriptor. This means that most code
+doesn’t need `closed()`. It can be useful nevertheless for coroutines that
+passively track files without reading or writing them.
 
 
 ## Wrapper functions
@@ -69,12 +75,12 @@ until all requested bytes are transferred (or end-of-file or error). These
 functions return the number of bytes transferred (which might be zero at
 end-of-file).
 
-Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions to
-retry. On serious errors (anything else), the functions exit early. If any data
-had been transferred, they return a short count; but if the error occurred
-before data transfer, they throw a `std::system_error` with the `errno` number
-as its `code()`. Recover the errno number with `catch (const std::system_error&
-ex) { ... ex.code() ... }`.
+Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions
+to retry. On serious errors (anything else), the functions exit early. If any
+data had been transferred, they return a short count; but if the error
+occurred before data transfer, they throw a `std::system_error` with the
+`errno` number as its `code()`. Recover the errno number with `catch (const
+std::system_error& ex) { ... ex.code() ... }`.
 
 Since the functions throw exceptions instead of returning -1 on error, their
 return type is `task<size_t>`, not `task<ssize_t>`.
@@ -166,15 +172,15 @@ cot::task<> handle_connection(cot::fd f) {
 
 When multiple coroutines share a file descriptor, a logical operation like
 “write this entire message” might require several system calls, with `co_await
-writable(f)` suspensions in between. Without protection, another coroutine could
-interleave its own writes during those suspensions, corrupting both messages. A
-`cotamer::mutex` solves this: a coroutine can hold a mutex for the duration of
-its logical operation, ensuring that each multi-call sequence completes
-atomically with respect to other coroutines.
+writable(f)` suspensions in between. Without protection, another coroutine
+could interleave its own writes during those suspensions, corrupting both
+messages. A `cotamer::mutex` solves this: a coroutine can hold a mutex for the
+duration of its logical operation, ensuring that each multi-call sequence
+completes atomically with respect to other coroutines.
 
 Unlike `std::mutex`, which blocks the calling thread, `cotamer::mutex`
-*suspends* the calling *coroutine*. Other coroutines on the same thread continue
-to run.
+*suspends* the calling *coroutine*. Other coroutines on the same thread
+continue to run.
 
 Mutex functions are:
 
@@ -189,13 +195,14 @@ Mutex functions are:
 Cotamer mutexes are thread-safe, so multiple threads can call `m.lock()`
 concurrently (only one thread will win). Lock attempts are serviced in FIFO
 order: if coroutine A calls `m.lock()` before coroutine B does, then A will
-always acquire access before B (unless A is destroyed before acquiring access).
+always acquire access before B (unless A is destroyed before acquiring
+access).
 
 Since coroutines can be destroyed at any suspension point, explicitly calling
-`m.lock()` and `m.unlock()` risks abandoning a mutex in the locked state. Avoid
-this with `cotamer::unique_lock`, a guarded lock ownership class mirroring
-`std::unique_lock`. Pass the `unique_lock` constructor the ownership token
-returned by `co_await m` or `co_await m.lock()`. For instance:
+`m.lock()` and `m.unlock()` risks abandoning a mutex in the locked state.
+Avoid this with `cotamer::unique_lock`, a guarded lock ownership class
+mirroring `std::unique_lock`. Pass the `unique_lock` constructor the ownership
+token returned by `co_await m` or `co_await m.lock()`. For instance:
 
 ```cpp
 struct lockable_fd {
@@ -222,9 +229,9 @@ cot::task<> write_message(lockable_fd& lfd, std::string message) {
 }
 ```
 
-`cotamer::unique_lock` can also be explicitly locked or unlocked (with `co_await
-guard.lock()` and `guard.unlock()`), and supports the standard construction
-tags:
+`cotamer::unique_lock` can also be explicitly locked or unlocked (with
+`co_await guard.lock()` and `guard.unlock()`), and supports the standard
+construction tags:
 
 ```cpp
 cot::unique_lock guard(m, std::defer_lock);    // don't lock yet
@@ -239,9 +246,9 @@ co_await m.lock();
 cot::unique_lock guard(m, std::adopt_lock);    // take ownership of existing lock
 ```
 
-Active attempts to lock a mutex may be cancelled by destroying the corresponding
-task. For instance, here, if the timeout fires, the `m.lock()` attempt is safely
-removed from the mutex’s queue:
+Active attempts to lock a mutex may be cancelled by destroying the
+corresponding task. For instance, here, if the timeout fires, the `m.lock()`
+attempt is safely removed from the mutex’s queue:
 
 ```cpp
 auto result = co_await cot::attempt(m.lock(), cot::after(1s));
@@ -266,8 +273,9 @@ locking. The shared lock mode uses `*_shared` mutex functions and the
 | `m.try_lock_shared()`      | try to acquire shared access without suspending |
 | `m.unlock_shared()`        | release shared access                           |
 
-The FIFO rule also applies to mixtures of shared and exclusive access. If `mutex
-m` is acquired in shared mode, but an exclusive lock attempt has already been
-enqueued, then another coroutine that calls `m.lock_shared()` will suspend until
-the exclusive lock attempt has been serviced. On the other hand, if no exclusive
-attempts are waiting, then `m.lock_shared()` will proceed right away.
+The FIFO rule also applies to mixtures of shared and exclusive access. If
+`mutex m` is acquired in shared mode, but an exclusive lock attempt has
+already been enqueued, then another coroutine that calls `m.lock_shared()`
+will suspend until the exclusive lock attempt has been serviced. On the other
+hand, if no exclusive attempts are waiting, then `m.lock_shared()` will
+proceed right away.
