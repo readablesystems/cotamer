@@ -1554,8 +1554,8 @@ inline std::optional<fd_update> fd_event_set::next_nonempty(int fd) const noexce
 
 // fd methods
 
-inline fd::fd(int rawfd)
-    : body_(rawfd >= 0 ? new detail::fd_body(rawfd) : nullptr) {
+inline fd::fd(int fileno)
+    : body_(fileno >= 0 ? new detail::fd_body(fileno) : nullptr) {
 }
 
 inline fd::fd(const fd& x) noexcept

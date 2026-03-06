@@ -30,7 +30,6 @@ public:
 private:
     static constexpr size_t backlog = 1 << 20;
 
-    size_t head_ = 0;
     size_t pos_ = 0;
     size_t len_ = 0;
     size_t capacity_ = 1 << 12;
@@ -38,90 +37,94 @@ private:
     operation op_;
     statuscode status_;
     int errno_ = 0;
-    cotamer::event ev_{nullptr};
-    cotamer::event rev_{nullptr};
-    cotamer::event eev_{nullptr};
+    cotamer::event client_notifier_{nullptr};  // loop alerts client (send/recv)
+    cotamer::event loop_notifier_{nullptr};    // client alerts writer_loop/reader_loop
+    cotamer::event drained_notifier_{nullptr}; // supports `drained()`
     cotamer::task<> task_;
     cotamer::mutex mutex_;
-    bool send_delay_ = false;
 
-    inline cotamer::task<> make_writer(cotamer::fd);
+    inline cotamer::task<> writer_loop(cotamer::fd);
     inline size_t first_message_length() const noexcept;
-    inline cotamer::task<> make_reader(cotamer::fd);
+    inline cotamer::task<> reader_loop(cotamer::fd);
 };
 
 
 inline message_stream::message_stream(cotamer::fd f, operation op)
     : buf_(new char[capacity_]), op_(op),
       status_(f.valid() ? statuscode::running : statuscode::error),
-      task_(op == receiver ? make_reader(std::move(f)) : make_writer(std::move(f))) {
+      task_(op == receiver ? reader_loop(std::move(f)) : writer_loop(std::move(f))) {
 }
 
 inline message_stream::~message_stream() {
     delete[] buf_;
+    // `task_` is also destroyed, freeing the reader_loop or writer_loop
 }
 
 inline cotamer::event message_stream::drained() {
-    if (eev_.triggered() && len_ != 0) {
-        eev_.arm();
+    if (len_ != 0) {
+        drained_notifier_.arm();
     }
-    return eev_;
+    return drained_notifier_;
 }
 
 inline cotamer::task<> message_stream::send(const void* buf, size_t len) {
-    cotamer::unique_lock guard(co_await mutex_);
     assert(len <= 0xFFFFFFFF && op_ != receiver);
+    // Mutual exclusion
+    cotamer::unique_lock guard(co_await mutex_);
+    // If this buffer is getting real big, apply backpressure to calling
+    // coroutine (only suspension point!)
     while (len_ > 0 && len_ + len > backlog && status_ == statuscode::running) {
-        co_await ev_.arm();
+        co_await client_notifier_.arm();
     }
     if (status_ != statuscode::running) {
         throw std::system_error(EPIPE, std::generic_category());
     }
+    // Write message to buffer
     if (len_ == 0) {
-        head_ = pos_;
+        pos_ = 0;
     }
-    while (pos_ + len_ + len + 4 > head_ + capacity_) {
+    while (pos_ + len_ + len + 4 > capacity_) {
         size_t ncapacity = capacity_ * 2;
         char* nbuf = new char[ncapacity];
-        memcpy(nbuf, buf_ + (pos_ - head_), len_);
+        memcpy(nbuf, buf_ + pos_, len_);
         delete[] buf_;
         buf_ = nbuf;
         capacity_ = ncapacity;
-        head_ = pos_;
+        pos_ = 0;
     }
     uint32_t mlen = len;
-    memcpy(buf_ + (pos_ + len_ - head_), &mlen, 4);
-    memcpy(buf_ + (pos_ + len_ + 4 - head_), buf, len);
+    memcpy(buf_ + pos_ + len_, &mlen, 4);
+    memcpy(buf_ + pos_ + len_ + 4, buf, len);
     len_ += len + 4;
-    rev_.trigger();
+    // Wake up writer_loop
+    loop_notifier_.trigger();
 }
 
 inline cotamer::task<> message_stream::send(const std::string_view& s) {
     return send(s.data(), s.size());
 }
 
-inline cotamer::task<> message_stream::make_writer(cotamer::fd f) {
+inline cotamer::task<> message_stream::writer_loop(cotamer::fd f) {
     while (true) {
         if (!f) {
             status_ = statuscode::error;
             break;
         }
+        // Wait until there’s something to write
         if (len_ == 0) {
-            eev_.trigger();
-            co_await rev_.arm();
-            if (send_delay_) {
-                co_await cotamer::asap();
-            }
+            drained_notifier_.trigger();
+            co_await loop_notifier_.arm();
             continue;
         }
-        ssize_t rv = ::write(f.fileno(), buf_ + (pos_ - head_), len_);
+        // Call `::write` system call
+        ssize_t rv = ::write(f.fileno(), buf_ + pos_, len_);
         if (rv > 0) {
             pos_ += rv;
             len_ -= rv;
             if (len_ < backlog) {
-                ev_.trigger();
+                client_notifier_.trigger();
             }
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             co_await cotamer::writable(f);
         } else {
             status_ = statuscode::error;
@@ -129,7 +132,7 @@ inline cotamer::task<> message_stream::make_writer(cotamer::fd f) {
             break;
         }
     }
-    ev_.trigger();
+    client_notifier_.trigger();
 }
 
 inline size_t message_stream::first_message_length() const noexcept {
@@ -137,60 +140,68 @@ inline size_t message_stream::first_message_length() const noexcept {
         return size_t(-1);
     }
     uint32_t dbuf;
-    memcpy(&dbuf, buf_ + pos_ - head_, sizeof(dbuf));
+    memcpy(&dbuf, buf_ + pos_, sizeof(dbuf));
     return dbuf + 4;
 }
 
 inline cotamer::task<std::string> message_stream::recv() {
-    cotamer::unique_lock guard(co_await mutex_);
     assert(op_ != sender);
+    // Mutual exclusion
+    cotamer::unique_lock guard(co_await mutex_);
+    // Suspend until a full message can be read
     size_t fml;
     while ((fml = first_message_length()) > len_) {
         if (status_ != statuscode::running) {
             co_return std::string{};
         }
-        rev_.trigger();
-        co_await ev_.arm();
+        loop_notifier_.trigger();
+        co_await client_notifier_.arm();
     }
+    // Actually read the message
     pos_ += fml;
     len_ -= fml;
     if (len_ == 0) {
-        eev_.trigger();
+        drained_notifier_.trigger();
     }
-    co_return std::string(buf_ + (pos_ - head_) - (fml - 4), fml - 4);
+    co_return std::string(buf_ + pos_ - (fml - 4), fml - 4);
 }
 
-inline cotamer::task<> message_stream::make_reader(cotamer::fd f) {
+inline cotamer::task<> message_stream::reader_loop(cotamer::fd f) {
     while (true) {
         if (!f) {
             status_ = statuscode::error;
             break;
         }
-        if (ev_.triggered()) {
-            co_await rev_.arm();
+        if (client_notifier_.triggered()) {
+            // no one has called `recv` yet; don't bother reading until
+            // someone is interested
+            co_await loop_notifier_.arm();
             continue;
         }
+        // Recycle buffer space
         if (len_ == 0) {
-            head_ = pos_;
+            pos_ = 0;
         }
-        if (pos_ + len_ + 512 > head_ + capacity_) {
+        if (pos_ + len_ + 512 > capacity_) {
             size_t ncapacity = capacity_ * 2;
             char* nbuf = new char[ncapacity];
-            memcpy(nbuf, buf_ + (pos_ - head_), len_);
+            memcpy(nbuf, buf_ + pos_, len_);
             delete[] buf_;
             buf_ = nbuf;
             capacity_ = ncapacity;
-            head_ = pos_;
+            pos_ = 0;
         }
-        ssize_t rv = ::read(f.fileno(), buf_ + (pos_ + len_ - head_),
-                            head_ + capacity_ - (pos_ + len_));
+        // Call `::read` system call
+        ssize_t rv = ::read(f.fileno(), buf_ + pos_ + len_,
+                            capacity_ - (pos_ + len_));
         if (rv > 0) {
             len_ += rv;
-            ev_.trigger();
+            // New data has arrived → alert `recv()`
+            client_notifier_.trigger();
         } else if (rv == 0) {
             status_ = statuscode::eof;
             break;
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             co_await cotamer::readable(f);
         } else {
             status_ = statuscode::error;
@@ -198,5 +209,5 @@ inline cotamer::task<> message_stream::make_reader(cotamer::fd f) {
             break;
         }
     }
-    ev_.trigger();
+    client_notifier_.trigger();
 }
