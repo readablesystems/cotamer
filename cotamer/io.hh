@@ -81,7 +81,7 @@ inline task<size_t> write_once(const fd& f, const void* buf, size_t count) {
 inline task<size_t> read(const fd& f, void* buf, size_t count) {
     char* p = static_cast<char*>(buf);
     size_t nr = 0;
-    while (nr != count) {
+    do {
         ssize_t r = ::read(f.fileno(), p + nr, count - nr);
         if (r > 0) {
             nr += r;
@@ -94,7 +94,7 @@ inline task<size_t> read(const fd& f, void* buf, size_t count) {
         } else {
             throw errno_error();
         }
-    }
+    } while (nr != count);
     co_return nr;
 }
 
@@ -102,11 +102,13 @@ inline task<size_t> read(const fd& f, void* buf, size_t count) {
 inline task<size_t> write(const fd& f, const void* buf, size_t count) {
     const char* p = static_cast<const char*>(buf);
     size_t nw = 0;
-    while (nr != count) {
-        ssize_t r = ::write(f.fileno(), p + nw, count - nw)
+    do {
+        ssize_t r = ::write(f.fileno(), p + nw, count - nw);
         if (r > 0) {
             nw += r;
         } else if (r == 0) {
+            // This result is only expected if the original `count` was 0.
+            // At other times, treat it like EOF on read.
             break;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             co_await writable(f);
@@ -115,7 +117,7 @@ inline task<size_t> write(const fd& f, const void* buf, size_t count) {
         } else {
             throw errno_error();
         }
-    }
+    } while (nw != count);
     co_return nw;
 }
 

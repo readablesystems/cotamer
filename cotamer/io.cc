@@ -193,12 +193,9 @@ inline void fd_batch::add(int pollfd, const fd_update& fdu, int old_mask) {
     epoll_event epev;
     epev.events = mask_out(fdu.mask);
     epev.data.u64 = fdu.fd | (uint64_t(fdu.epoch) << 32);
-    if (!fdu.mask) {
-        epoll_ctl(pollfd, EPOLL_CTL_DEL, fdu.fd, &epev);
-    } else if (!old_mask) {
-        epoll_ctl(pollfd, EPOLL_CTL_ADD, fdu.fd, &epev);
-    } else {
-        epoll_ctl(pollfd, EPOLL_CTL_MOD, fdu.fd, &epev);
+    int op = fdu.mask ? (old_mask ? EPOLL_CTL_MOD : EPOLL_CTL_ADD) : EPOLL_CTL_DEL;
+    if (epoll_ctl(pollfd, op, fdu.fd, &epev) < 0) {
+        throw errno_error();
     }
 #else
     (void) pollfd, (void) fdu, (void) old_mask;
@@ -324,6 +321,11 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     batch.size = batch.ev.size();
 #endif
     batch.index = 0;
+
+    // check for unexpected error
+    if (batch.size < 0 && errno != EINTR) {
+        throw errno_error();
+    }
 
 #if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
     wakefd_.store(-1, std::memory_order_relaxed);

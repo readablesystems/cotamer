@@ -387,9 +387,10 @@ when it is destroyed with `t.destroy()`, or when its coroutine is moved to
 another task object with `std::move`. Test for task emptiness with `t.empty()`.
 Empty tasks are not `done()` and their `completion()` events never trigger.
 
-Within a coroutine, the expression `co_await cotamer::interest_event{}` returns
-an `event` that becomes triggered once another coroutine is interested in the
-current coroutine’s result. Thus, a coroutine can use its interest event’s
-`triggered()` function to test whether interest has materialized. Note that
-`co_await cotamer::interest_event{}` always returns immediately without
-suspending.
+Within a coroutine, the expression `co_await cotamer::interest_event{}`
+immediately returns an `event` that exposes the `interest{}` state.
+Specifically, a coroutine’s `interest_event` event triggers when a different
+coroutine starts waiting for the first coroutine’s result. Note, however, that
+an `interest_event` cannot trigger until its coroutine suspends for the first
+time. (Before that first suspension, the coroutine cannot tell whether its
+caller is interested in its result.)
