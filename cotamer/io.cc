@@ -289,6 +289,9 @@ void driver::apply_fd_update(detail::fd_batch& batch,
 }
 
 bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
+    // Ensure pollfd if we are asked to block before any fd registrations
+    (void) pollfd();
+
 #if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
     wakefd_.store(pollfd_, std::memory_order_seq_cst);
     if (lock_.load(std::memory_order_seq_cst)) {
