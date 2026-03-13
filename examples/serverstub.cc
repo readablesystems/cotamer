@@ -1,5 +1,5 @@
 #include "rpcgame.hh"
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include "message_stream.hh"
 
 namespace cot = cotamer;

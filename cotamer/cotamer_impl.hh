@@ -1220,11 +1220,13 @@ inline bool driver::poll() {
 
 inline driver_guard::driver_guard()
     : drv_(driver::current.get()) {
-    ++drv_->guard_count_;
+    if (!drv_->clearing()) {
+        ++drv_->guard_count_;
+    }
 }
 
 inline driver_guard::~driver_guard() {
-    if (drv_) {
+    if (drv_ && !drv_->clearing()) {
         --drv_->guard_count_;
     }
 }
@@ -1234,7 +1236,7 @@ inline driver_guard::driver_guard(driver_guard&& x)
 }
 
 inline driver_guard& driver_guard::operator=(driver_guard&& x) {
-    if (drv_) {
+    if (drv_ && !drv_->clearing()) {
         --drv_->guard_count_;
     }
     drv_ = std::exchange(x.drv_, nullptr);
@@ -1399,6 +1401,37 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
         co_return locked_mutex_t<shared>{e.mutex()};
     }
     co_return std::nullopt;
+}
+
+
+// first(t, ...)
+//    Runs several tasks in parallel, and returns the result of the first
+//    to complete, cancelling the others. Returns `std::variant<T...>`.
+
+namespace detail {
+template <typename Variant, typename T, typename... Rest>
+task<Variant> first_find_done(task<T> t, task<Rest>... rest) {
+    if (t.done()) {
+        (rest.destroy(), ...);
+        co_return Variant(std::in_place_type<T>, co_await t);
+    }
+    t.destroy();
+    co_return co_await first_find_done<Variant>(std::move(rest)...);
+}
+}
+
+template <typename... Ts>
+task<std::variant<Ts...>> first(task<Ts>... ts) {
+    // Start all tasks that aren't already done
+    ((!ts.done() ? (ts.start(), 0) : 0), ...);
+
+    // Wait until at least one completes
+    co_await any(ts.completion()...);
+
+    // Find the first completed task, co_await it, destroy the rest
+    co_return co_await detail::first_find_done<std::variant<Ts...>>(
+        std::move(ts)...
+    );
 }
 
 

@@ -20,7 +20,7 @@ is the type of the `co_return` value. (Tasks that produce no value return
 Here is a complete program with two tasks:
 
 ```cpp
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include <print>
 namespace cot = cotamer;
 using namespace std::chrono_literals;

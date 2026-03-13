@@ -11,7 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "rpcgame.hh"
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 extern size_t sent, received;
 
 using steady_time_point = std::chrono::time_point<std::chrono::steady_clock>;

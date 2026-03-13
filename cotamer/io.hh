@@ -1,5 +1,5 @@
 #pragma once
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/types.h>

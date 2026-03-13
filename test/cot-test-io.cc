@@ -1,4 +1,4 @@
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include "examples/message_stream.hh"
 #include <atomic>
 #include <cassert>

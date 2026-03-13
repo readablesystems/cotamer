@@ -17,7 +17,7 @@
 #include "cotamer/timer_heap.hh"
 #include "cotamer/event_handle.hh"
 
-// cotamer.hh
+// cotamer/cotamer.hh
 //    Public interface to the Cotamer coroutine library.
 
 // Define COTAMER_STATS to 1 to collect statistics.

@@ -1,4 +1,4 @@
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include <atomic>
 #include <cassert>
 #include <cstring>

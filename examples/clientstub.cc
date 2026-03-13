@@ -1,5 +1,5 @@
 #include "rpcgame.hh"
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include "message_stream.hh"
 size_t sent = 0, received = 0;
 
