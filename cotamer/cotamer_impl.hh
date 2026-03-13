@@ -1218,10 +1218,13 @@ inline bool driver::poll() {
 
 // driver_guard
 
-inline driver_guard::driver_guard()
-    : drv_(driver::current.get()) {
-    if (!drv_->clearing()) {
-        ++drv_->guard_count_;
+inline driver_guard::driver_guard() {
+    auto drv = driver::current.get();
+    if (drv && !drv->clearing()) {
+        drv_ = drv;
+        ++drv->guard_count_;
+    } else {
+        drv_ = nullptr;
     }
 }
 

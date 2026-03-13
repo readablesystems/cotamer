@@ -60,6 +60,11 @@ private:
     detail::event_handle ep_;
 };
 
+// triggered_event - return an event that is already triggered().
+inline event triggered_event() {
+    return event{nullptr};
+}
+
 
 // task<T>
 //    A coroutine that produces a value of type T (or void). Tasks start
