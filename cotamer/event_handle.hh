@@ -106,11 +106,4 @@ private:
 struct fd_batch;
 
 }
-
-
-template <typename T>
-struct promote_void {
-    using type = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
-};
-
 }

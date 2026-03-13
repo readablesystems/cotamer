@@ -152,7 +152,8 @@ if (result) {
 value of the first one to complete. `co_await first(task<T>, task<U>, ...)`
 returns a `std::variant<T, U, ...>`; the `index()` of the returned variant is
 the parameter index of the first task to complete. As soon as one of the task
-arguments completes, the others are cancelled.
+arguments completes, the others are cancelled. You can mix tasks and events;
+events (and `task<void>`) are represented in the variant by `std::monostate`.
 
 `cotamer::race(task1, task2, ...)` is like `cotamer::first`, but all tasks
 must have the same type. Its return value is the return value of the first

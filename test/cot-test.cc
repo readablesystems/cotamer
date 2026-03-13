@@ -1369,6 +1369,134 @@ cot::task<> test_race_void() {
     std::cerr << "test_race_void: ok\n";
 }
 
+// TEST: first() with event that wins over a task
+cot::task<> test_first_event_wins() {
+    auto slow_int = []() -> cot::task<int> {
+        co_await cot::after(10h);
+        co_return 999;
+    };
+    auto start = cot::now();
+    auto result = co_await cot::first(slow_int(), cot::after(1h));
+    // event completes first — variant holds monostate at index 1
+    assert(result.index() == 1);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_first_event_wins: ok\n";
+}
+
+// TEST: first() with task that wins over an event
+cot::task<> test_first_task_beats_event() {
+    auto fast_int = []() -> cot::task<int> {
+        co_await cot::after(1h);
+        co_return 42;
+    };
+    auto start = cot::now();
+    auto result = co_await cot::first(fast_int(), cot::after(10h));
+    // task completes first — variant holds int at index 0
+    assert(result.index() == 0);
+    assert(std::get<0>(result) == 42);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_first_task_beats_event: ok\n";
+}
+
+// TEST: first() with event as first argument, task second
+cot::task<> test_first_event_first_arg() {
+    auto slow_str = []() -> cot::task<std::string> {
+        co_await cot::after(10h);
+        co_return std::string("slow");
+    };
+    auto start = cot::now();
+    auto result = co_await cot::first(cot::after(1h), slow_str());
+    // event (index 0) wins
+    assert(result.index() == 0);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_first_event_first_arg: ok\n";
+}
+
+// TEST: first() with event first, task wins
+cot::task<> test_first_event_first_task_wins() {
+    auto fast_int = []() -> cot::task<int> {
+        co_await cot::after(1h);
+        co_return 77;
+    };
+    auto start = cot::now();
+    auto result = co_await cot::first(cot::after(10h), fast_int());
+    // task (index 1) wins
+    assert(result.index() == 1);
+    assert(std::get<1>(result) == 77);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_first_event_first_task_wins: ok\n";
+}
+
+// TEST: first() with multiple events and tasks
+cot::task<> test_first_mixed_three() {
+    auto slow_int = []() -> cot::task<int> {
+        co_await cot::after(10h);
+        co_return 999;
+    };
+    auto start = cot::now();
+    // task<int>, event(fast), event(slow) — middle event wins
+    auto result = co_await cot::first(slow_int(), cot::after(2h), cot::after(8h));
+    assert(result.index() == 1);
+    assert(cot::now() - start >= 2h && cot::now() - start < 3h);
+    std::cerr << "test_first_mixed_three: ok\n";
+}
+
+// TEST: first() with immediate task mixed with event
+cot::task<> test_first_immediate_task_with_event() {
+    auto imm = []() -> cot::task<int> { co_return 42; };
+    auto start = cot::now();
+    auto result = co_await cot::first(imm(), cot::after(10h));
+    assert(result.index() == 0);
+    assert(std::get<0>(result) == 42);
+    assert(cot::now() == start);
+    std::cerr << "test_first_immediate_task_with_event: ok\n";
+}
+
+// TEST: race() with event first, then void task — event wins
+cot::task<> test_race_event_wins() {
+    auto slow_void = []() -> cot::task<> { co_await cot::after(10h); };
+    auto start = cot::now();
+    co_await cot::race(cot::after(1h), slow_void());
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_race_event_wins: ok\n";
+}
+
+// TEST: race() with event first, then void task — task wins
+cot::task<> test_race_event_first_task_wins() {
+    auto fast_void = []() -> cot::task<> { co_await cot::after(1h); };
+    auto start = cot::now();
+    co_await cot::race(cot::after(10h), fast_void());
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_race_event_first_task_wins: ok\n";
+}
+
+// TEST: race() with void task first, then event
+cot::task<> test_race_void_task_with_event() {
+    auto slow_void = []() -> cot::task<> { co_await cot::after(10h); };
+    auto start = cot::now();
+    co_await cot::race(slow_void(), cot::after(1h));
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_race_void_task_with_event: ok\n";
+}
+
+// TEST: race() with multiple events and void tasks
+cot::task<> test_race_mixed_many() {
+    auto slow1 = []() -> cot::task<> { co_await cot::after(10h); };
+    auto slow2 = []() -> cot::task<> { co_await cot::after(8h); };
+    auto start = cot::now();
+    co_await cot::race(cot::after(5h), slow1(), cot::after(2h), slow2());
+    assert(cot::now() - start >= 2h && cot::now() - start < 3h);
+    std::cerr << "test_race_mixed_many: ok\n";
+}
+
+// TEST: race() with two events
+cot::task<> test_race_two_events() {
+    auto start = cot::now();
+    co_await cot::race(cot::after(5h), cot::after(1h));
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_race_two_events: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -1450,6 +1578,17 @@ int main(int argc, char* argv[]) {
     run("race_last_wins", test_race_last_wins);
     run("race_single", test_race_single);
     run("race_void", test_race_void);
+    run("first_event_wins", test_first_event_wins);
+    run("first_task_beats_event", test_first_task_beats_event);
+    run("first_event_first_arg", test_first_event_first_arg);
+    run("first_event_first_task_wins", test_first_event_first_task_wins);
+    run("first_mixed_three", test_first_mixed_three);
+    run("first_immediate_task_with_event", test_first_immediate_task_with_event);
+    run("race_event_wins", test_race_event_wins);
+    run("race_event_first_task_wins", test_race_event_first_task_wins);
+    run("race_void_task_with_event", test_race_void_task_with_event);
+    run("race_mixed_many", test_race_mixed_many);
+    run("race_two_events", test_race_two_events);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");
