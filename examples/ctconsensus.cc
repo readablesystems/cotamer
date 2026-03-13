@@ -1,4 +1,4 @@
-#include "cotamer.hh"
+#include "cotamer/cotamer.hh"
 #include "netsim.hh"
 #include "ctconsensus_msgs.hh"
 #include <list>

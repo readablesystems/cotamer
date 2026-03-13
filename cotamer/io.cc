@@ -1,4 +1,3 @@
-#include "cotamer.hh"
 #include "cotamer/io.hh"
 #include <sstream>
 #include <thread>

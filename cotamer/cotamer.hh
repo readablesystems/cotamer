@@ -17,7 +17,7 @@
 #include "cotamer/timer_heap.hh"
 #include "cotamer/event_handle.hh"
 
-// cotamer.hh
+// cotamer/cotamer.hh
 //    Public interface to the Cotamer coroutine library.
 
 // Define COTAMER_STATS to 1 to collect statistics.
@@ -126,6 +126,17 @@ template <typename T, typename... Es>
 [[nodiscard]] task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
 template <typename... Es>
 [[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
+
+// first(task...) - run several tasks and return the result of the first one
+// that completes (wrapped in variant).
+template <typename... Ts>
+[[nodiscard]] task<std::variant<typename promote_void<Ts>::type...>> first(task<Ts>... ts);
+
+// race(task...) - run several tasks, all of the same type, and return the result
+// of the first one that completes (unwrapped).
+template <typename T, typename... Ts>
+[[nodiscard]] task<T> race(task<T>, task<Ts>... rest);
+[[nodiscard]] inline task<> race();
 
 
 // driver
@@ -523,6 +534,7 @@ template <typename T> constexpr bool is_task_v = is_task<T>::value;
 inline constexpr bool is_task_value(const auto& v) {
     return is_task_v<decltype(v)>;
 }
+template <typename T> concept task_type = is_task_v<T>;
 
 }
 
