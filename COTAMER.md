@@ -68,12 +68,13 @@ represent these occurrences.
 
 Each event starts in the **untriggered** state and then transitions to the
 **triggered** state. Once triggered, an event stays triggered forever: events
-are one-shot notifications. A task can wait for an event with `co_await e`.
+are one-shot notifications. A task can wait for an event to trigger with
+`co_await e` or test its triggered state with `e.triggered()`.
 
-Cotamer functions can create events associated with specific future
+Cotamer functions can create primitive events associated with specific future
 occurrences:
 
-| Function                   | Returns an event that triggers...           |
+| Function                   | Returns a primitive event that triggers...  |
 |:---------------------------|:--------------------------------------------|
 | `cotamer::after(duration)` | after the given duration elapses            |
 | `cotamer::at(time_point)`  | at the given absolute time                  |
@@ -82,9 +83,12 @@ occurrences:
 | `cotamer::writable(fd)`    | when `::write(fd)` wouldn’t block           |
 | `cotamer::closed(fd)`      | when `fd` errors or closes                  |
 
-An event can also be created explicitly with `cotamer::event e` and triggered
-with `e.trigger()`. The `e.triggered()` function tests whether an event has
-triggered yet.
+Primitive events associated with I/O [are described
+separately](../cotamer-io/).
+
+An independent event can be created with `cotamer::event e` and triggered with
+`e.trigger()`. Since Cotamer’s event loop has no visibility into such events,
+a [driver guard](#event-loop) may be required to prevent premature exit.
 
 Copies of an event object refer to the same underlying occurrence: triggering
 one copy triggers all of them. Events are automatically reference counted, and
@@ -116,7 +120,7 @@ int main() {
 ```
 
 
-## Combinators: `any`, `all`, and `attempt`
+## Combinators: `any`, `all`, `attempt`, `first`, `race`
 
 `cotamer::any()` and `cotamer::all()` combine multiple events into one; you
 can supply as many events as you like.
@@ -143,6 +147,17 @@ if (result) {
     // task did not complete before the timeout
 }
 ```
+
+`cotamer::first(task1, task2, ...)` runs tasks concurrently and returns the
+value of the first one to complete. `co_await first(task<T>, task<U>, ...)`
+returns a `std::variant<T, U, ...>`; the `index()` of the returned variant is
+the parameter index of the first task to complete. As soon as one of the task
+arguments completes, the others are cancelled.
+
+`cotamer::race(task1, task2, ...)` is like `cotamer::first`, but all tasks
+must have the same type. Its return value is the return value of the first
+completed task; there’s no additional wrapping, so no immediate way to tell
+which task won the race.
 
 
 ## Task lifetime

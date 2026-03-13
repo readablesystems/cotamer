@@ -1409,29 +1409,92 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
 //    to complete, cancelling the others. Returns `std::variant<T...>`.
 
 namespace detail {
-template <typename Variant, typename T, typename... Rest>
-task<Variant> first_find_done(task<T> t, task<Rest>... rest) {
-    if (t.done()) {
-        (rest.destroy(), ...);
-        co_return Variant(std::in_place_type<T>, co_await t);
-    }
-    t.destroy();
-    co_return co_await first_find_done<Variant>(std::move(rest)...);
+inline size_t first_done(size_t offset) {
+    return offset;
 }
+
+template <typename T, typename... Trest>
+inline size_t first_done(size_t offset, task<T>&& t0, task<Trest>&&... trest) {
+    if (t0.done()) {
+        return offset;
+    }
+    return first_done(offset + 1, std::forward<task<Trest>>(trest)...);
+}
+
+template <typename Variant, size_t I, typename T>
+inline task<Variant> first_complete(size_t, task<T>& t0) {
+    if constexpr (std::is_void_v<T>) {
+        co_await t0;
+        co_return Variant{std::in_place_index<I>, std::monostate{}};
+    } else {
+        co_return Variant{std::in_place_index<I>, co_await t0};
+    }
+}
+
+template <typename Variant, size_t I, typename T, typename... Trest>
+inline task<Variant> first_complete(size_t index, task<T>& t0, task<Trest>&... trest) {
+    if (index == I) {
+        ((trest.destroy()), ...);
+        if constexpr (std::is_void_v<T>) {
+            co_await t0;
+            co_return Variant{std::in_place_index<I>, std::monostate{}};
+        } else {
+            co_return Variant{std::in_place_index<I>, co_await t0};
+        }
+    } else {
+        t0.destroy();
+        co_return co_await first_complete<Variant, I + 1>(index, std::forward<task<Trest>&>(trest)...);
+    }
+}
+
+template <size_t I, typename T>
+inline task<T> race_complete(size_t, task<T>& t0) {
+    co_return co_await t0;
+}
+
+template <size_t I, typename T, typename... Trest>
+inline task<T> race_complete(size_t index, task<T>& t0, task<Trest>&... trest) {
+    if (index == I) {
+        ((trest.destroy()), ...);
+        co_return co_await t0;
+    } else {
+        t0.destroy();
+        co_return co_await race_complete<I + 1>(index, std::forward<task<Trest>&>(trest)...);
+    }
+}
+
+}
+
+inline task<> first() {
+    return task<>();
 }
 
 template <typename... Ts>
-task<std::variant<Ts...>> first(task<Ts>... ts) {
-    // Start all tasks that aren't already done
-    ((!ts.done() ? (ts.start(), 0) : 0), ...);
+task<std::variant<typename promote_void<Ts>::type...>> first(task<Ts>... ts) {
+    using Variant = std::variant<typename promote_void<Ts>::type...>;
+    size_t done = detail::first_done(0, std::forward<task<Ts>>(ts)...);
+    if (done == sizeof...(ts)) {
+        ((ts.start()), ...);
+        co_await any(ts.completion()...);
+        done = detail::first_done(0, std::forward<task<Ts>>(ts)...);
+    }
+    co_return co_await detail::first_complete<Variant, 0>(done, std::forward<task<Ts>&>(ts)...);
+}
 
-    // Wait until at least one completes
-    co_await any(ts.completion()...);
+inline task<> race() {
+    return task<>();
+}
 
-    // Find the first completed task, co_await it, destroy the rest
-    co_return co_await detail::first_find_done<std::variant<Ts...>>(
-        std::move(ts)...
-    );
+template <typename T, typename... Trest>
+task<T> race(task<T> t0, task<Trest>... ts) {
+    size_t done = detail::first_done(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
+    if (done == 1 + sizeof...(ts)) {
+        t0.start();
+        ((ts.start()), ...);
+        co_await any(t0.completion(), ts.completion()...);
+        done = detail::first_done(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
+    }
+    co_return co_await detail::race_complete<0>(done, t0, std::forward<task<Trest>&>(ts)...);
 }
 
 
