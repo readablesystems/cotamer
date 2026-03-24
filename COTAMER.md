@@ -333,7 +333,7 @@ cot::task<> background_worker() {
         }
         auto item = std::move(work_queue.front());
         work_queue.pop_front();
-        // ... process item ...
+        // ... perform work specified by `item` ...
     }
 }
 
@@ -343,8 +343,7 @@ void enqueue_work(Item item) {
 }
 ```
 
-Since `arm()` may reassign the event, it is not thread-safe. It only
-modifies `e`—other copies of the original event are unaffected:
+`arm()` only modifies `e`—other copies of the original event are unaffected:
 
 ```cpp
 void test_event_arm_copies() {
@@ -359,6 +358,59 @@ void test_event_arm_copies() {
     assert(!e.triggered() && e_copy.triggered());
 }
 ```
+
+
+### Resolution
+
+`co_await cotamer::resolve{}` introduces a **resolution point**: the coroutine
+signals readiness to complete, then suspends; the caller decides whether to
+**resolve** the task (resuming it past the resolution point to commit side
+effects) or destroy it.
+
+Resolution points support tasks that have risky side effects associated with
+returning. For example, consider a `dequeue_work()` function. `dequeue_work()`
+should only remove an item from the `work_queue` if that item will be
+processed. Unfortunately, combinators like `cot::first()` can throw away task
+return values:
+
+```cpp
+auto x = cot::first(fast_task(), dequeue_work());
+  // If `fast_task()` and `dequeue_work()` become ready simultaneously, then
+  // `dequeue_work`’s return value will be ignored in favor of `fast_task`’s!
+```
+
+`co_await cot::resolve{}` works with combinators to ensure that work items are
+never dropped.
+
+```cpp
+cot::task<Item> dequeue_work() {
+    do {
+        while (work_queue.empty()) {
+            co_await work_queue_wakeup.arm();
+        }
+        co_await cot::resolve{};    // wait until return value wanted
+        // If we get here in `cot::first` or `cot::race`, then this task has
+        // won the race, so any value it returns will be used.
+    } while (work_queue.empty());   // re-check emptiness after `cot::resolve`
+    auto item = std::move(work_queue.front());
+    work_queue.pop_front();
+    co_return item;
+}
+```
+
+`cot::first` and `cot::race` resolve at most one task, so a `dequeue_work`
+whose value isn’t needed is safely destroyed without side effects. The
+`do`/`while` re-check is essential: between the resolution point and
+resumption, another task may have invalidated the precondition.
+
+When a task is directly `co_await`ed, the resolution point is a no-op—the
+coroutine continues without suspending. A task is free to suspend again after
+`co_await cot::resolve{}`, and can `co_await cot::resolve{}` multiple times.
+
+`t.resolvable()` returns true if task `t` has completed or is suspended at a
+resolution point. `t.resolve()` resumes `t` past any pending resolution
+points, then returns true if the task completed. `t.resolution()` returns an
+event that triggers when the task becomes `resolvable()`.
 
 
 ### Lazy tasks
@@ -399,17 +451,13 @@ may also test whether two events refer to the same underlying occurrence with
 ### Task construction and introspection
 
 The `t.done()` function call returns true if task `t` has completed.
-`t.completion()` returns an event that triggers when the task completes.
-Although a task’s return value can be harvested at most once (with `co_await
-t`), any number of coroutines can wait for a task to complete (with `co_await
-t.completion()`).
 
 Most `cotamer::task` objects are constructed automatically by calling a
 coroutine, but default construction with `task<T>()` produces an empty task
 with no associated coroutine. A non-empty task becomes empty when it is
 detached, when it is destroyed with `t.destroy()`, or when its coroutine is
 moved to another task object with `std::move`. Test for task emptiness with
-`t.empty()`. Empty tasks are not `done()` and their `completion()` events
+`t.empty()`. Empty tasks are not `done()` and their `resolution()` events
 never trigger.
 
 Within a coroutine, the expression `co_await cotamer::interest_event{}`
