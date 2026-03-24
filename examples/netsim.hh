@@ -151,12 +151,17 @@ cot::task<> channel<T>::send_after(cot::duration delay, message_type m) {
 
 template <typename T>
 cot::task<T> port<T>::receive() {
-    // sleep until there’s a message
-    while (messageq_.empty()) {
-        // Register an event that senders will trigger on delivery.
-        // Need a new one every time because events are one-shot.
-        co_await receiver_event_.arm();
-    }
+    do {
+        // sleep until there’s a message
+        while (messageq_.empty()) {
+            // Register an event that senders will trigger on delivery.
+            // Need a new one every time because events are one-shot.
+            co_await receiver_event_.arm();
+        }
+        // NB could also model receive_delay_, like `send()`’s send_delay_,
+        // but don’t bother in handout code
+        co_await cot::resolve{};
+    } while (messageq_.empty());
 
     auto m = std::move(messageq_.front());
     messageq_.pop_front();
@@ -165,9 +170,6 @@ cot::task<T> port<T>::receive() {
         std::print("{}: {} ← \"{}\"\n", cot::now(), id(),
                    message_traits_type::print_transform(m));
     }
-
-    // NB could also model receive_delay_, like `send()`’s send_delay_,
-    // but don’t bother in handout code
 
     co_return m;
 }
