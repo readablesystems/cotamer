@@ -92,9 +92,11 @@ public:
     inline void start();               // start task if waiting for interest{}
     inline void detach();              // coroutine will survive task<> deletion
     inline bool done() const;          // has coroutine completed?
-    inline bool resolvable() const;    // is coroutine completed or awaiting resolution{}?
-    inline bool resolve();             // has coroutine completed after resuming resolution{}?
-    inline event completion();         // event that triggers on resolvable()
+    inline bool resolvable() const;    // is coroutine completed or awaiting resolve{}?
+    inline bool resolve();             // resume resolve{}, then test done()
+    inline event resolution();         // event that triggers on resolvable()
+    [[deprecated("Prefer task::resolution()")]]
+    inline event completion();
     inline void destroy();             // destroy associated coroutine
 
     detail::task_awaiter<T> operator co_await() const noexcept;
@@ -108,10 +110,10 @@ private:
 // Sentinel types used with `co_await`:
 // co_await interest{} — suspend until someone awaits this task
 // co_await interest_event{} — obtain the interest event without suspending
-// co_await resolution{} - suspend until someone can consume the value of this task
+// co_await resolve{} - suspend until someone can consume the value of this task
 struct interest {};
 struct interest_event {};
-struct resolution {};
+struct resolve {};
 
 // Event combinators.
 // any(e1, e2, ...) — triggers when any one of its arguments triggers.

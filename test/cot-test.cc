@@ -268,7 +268,7 @@ cot::task<> test_lazy_await() {
     std::cerr << "lazy_await: " << val << "\n";
 }
 
-// TEST: Lazy task with start() and completion()
+// TEST: Lazy task with start() and resolution()
 bool lazy_comp_ran = false;
 cot::task<int> lazy_comp_task() {
     co_await cot::interest{};
@@ -283,7 +283,7 @@ cot::task<> test_lazy_completion() {
     co_await cot::after(10h);  // advance virtual time; task still blocked on interest
     assert(!lazy_comp_ran && "lazy task should not have run yet");
     t.start();
-    auto ev = t.completion();
+    auto ev = t.resolution();
     co_await ev;
     assert(lazy_comp_ran && "lazy task should have run after start()");
     auto val = co_await t;
@@ -292,7 +292,7 @@ cot::task<> test_lazy_completion() {
     std::cerr << "lazy_completion: " << val << "\n";
 }
 
-// TEST: Lazy task with attempt — attempt triggers interest via completion()
+// TEST: Lazy task with attempt — attempt triggers interest via resolution()
 cot::task<int> lazy_attempt_task() {
     co_await cot::interest{};
     co_await cot::after(1h);
@@ -1369,9 +1369,9 @@ cot::task<> test_race_void() {
     std::cerr << "test_race_void: ok\n";
 }
 
-// resolution{} tests
+// resolve{} tests
 
-// A simple message port using resolution{} to avoid dropping messages
+// A simple message port using resolve{} to avoid dropping messages
 struct port {
     std::deque<int> mq;
     cot::event e;
@@ -1385,7 +1385,7 @@ struct port {
                 cot::driver_guard guard;
                 co_await e.arm();
             }
-            co_await cot::resolution{};
+            co_await cot::resolve{};
         } while (mq.empty());
         auto m = mq.front();
         mq.pop_front();
@@ -1452,10 +1452,10 @@ cot::task<> test_resolution_attempt_delayed() {
     std::cerr << "test_resolution_attempt_delayed: ok\n";
 }
 
-// TEST: task using resolution{} is cancelled before reaching resolution
+// TEST: task using resolve{} is cancelled before reaching resolution
 cot::task<> test_resolution_cancelled_before() {
     port p;
-    // no messages — recv() blocks on co_await e.arm(), never reaches resolution{}
+    // no messages — recv() blocks on co_await e.arm(), never reaches resolve{}
     auto result = co_await cot::attempt(p.recv(), cot::after(1h));
     assert(!result.has_value());
     // queue is untouched
@@ -1467,7 +1467,7 @@ cot::task<> test_resolution_cancelled_before() {
     std::cerr << "test_resolution_cancelled_before: ok\n";
 }
 
-// TEST: direct co_await of a task using resolution{} — resolution is a no-op
+// TEST: direct co_await of a task using resolve{} — resolution is a no-op
 cot::task<> test_resolution_direct_await() {
     port p;
     p.enq(42);
@@ -1477,19 +1477,19 @@ cot::task<> test_resolution_direct_await() {
     std::cerr << "test_resolution_direct_await: ok\n";
 }
 
-// TEST: resolution{} revocation — loser in first() doesn't consume
+// TEST: resolve{} revocation — loser in first() doesn't consume
 cot::task<> test_resolution_revocation() {
     port p;
     p.enq(1);
     p.enq(2);
-    // two recv() tasks both see non-empty queue and reach resolution{}.
+    // two recv() tasks both see non-empty queue and reach resolve{}.
     // first() resolves the winner (consumes message 1); the loser is
     // destroyed at its resolution point without consuming.
     auto result = co_await cot::first(p.recv(), p.recv());
     assert(result.index() == 0);
     assert(std::get<0>(result) == 1);
-    // without resolution{}, both tasks would dequeue — losing message 2.
-    // with resolution{}, only the winner consumed, so message 2 remains.
+    // without resolve{}, both tasks would dequeue — losing message 2.
+    // with resolve{}, only the winner consumed, so message 2 remains.
     assert(p.mq.size() == 1);
     assert(p.mq.front() == 2);
     std::cerr << "test_resolution_revocation: ok\n";
@@ -1513,11 +1513,11 @@ cot::task<> test_resolution_api() {
 
     // task at resolution point: resolvable but not done until resolved
     p.enq(5);
-    // recv() sees the message and hits resolution{}, which triggers completion
-    co_await t2.completion();
+    // recv() sees the message and hits resolve{}, which triggers completion
+    co_await t2.resolution();
     assert(!t2.done());
     assert(t2.resolvable());
-    // resolve() resumes the coroutine past resolution{}, it dequeues and completes
+    // resolve() resumes the coroutine past resolve{}, it dequeues and completes
     assert(t2.resolve());
     assert(t2.done());
     auto m = co_await t2;
@@ -1527,13 +1527,13 @@ cot::task<> test_resolution_api() {
     std::cerr << "test_resolution_api: ok\n";
 }
 
-// TEST: resolution{} with detach — detached task at resolution point is destroyed
+// TEST: resolve{} with detach — detached task at resolution point is destroyed
 cot::task<> test_resolution_detach() {
     port p;
     p.enq(1);
     auto t = p.recv();
     // wait for the task to reach its resolution point
-    co_await t.completion();
+    co_await t.resolution();
     assert(t.resolvable());
     // detaching a resolvable task destroys it; message is NOT consumed
     t.detach();
@@ -1542,11 +1542,11 @@ cot::task<> test_resolution_detach() {
     std::cerr << "test_resolution_detach: ok\n";
 }
 
-// TEST: resolution{} with void task
+// TEST: resolve{} with void task
 cot::task<> test_resolution_void() {
     int count = 0;
     auto guarded_increment = [&]() -> cot::task<> {
-        co_await cot::resolution{};
+        co_await cot::resolve{};
         ++count;
     };
     // first() with two void tasks — only one should increment
@@ -1555,18 +1555,18 @@ cot::task<> test_resolution_void() {
     std::cerr << "test_resolution_void: ok\n";
 }
 
-// TEST: multiple resolution{} points in sequence
+// TEST: multiple resolve{} points in sequence
 cot::task<> test_resolution_multiple() {
     int phase = 0;
     auto multi_resolve = [&]() -> cot::task<int> {
-        co_await cot::resolution{};
+        co_await cot::resolve{};
         phase = 1;
-        co_await cot::resolution{};
+        co_await cot::resolve{};
         phase = 2;
         co_return 99;
     };
     auto t = multi_resolve();
-    co_await t.completion();
+    co_await t.resolution();
     assert(t.resolvable());
     assert(phase == 0);
     assert(t.resolve());

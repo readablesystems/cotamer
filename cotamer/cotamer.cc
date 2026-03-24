@@ -237,7 +237,7 @@ bool task_promise_base::resolve() {
         handle();
     }
     if (!handle.done()) {
-        completion_ = event_handle(nullptr);
+        resolution_ = event_handle(nullptr);
     }
     return handle.done();
 }
