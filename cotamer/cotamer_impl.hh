@@ -1277,10 +1277,13 @@ inline bool driver::poll() {
 
 // driver_guard
 
-inline driver_guard::driver_guard()
-    : drv_(driver::current.get()) {
-    if (!drv_->clearing()) {
-        ++drv_->guard_count_;
+inline driver_guard::driver_guard() {
+    auto drv = driver::current.get();
+    if (drv && !drv->clearing()) {
+        drv_ = drv;
+        ++drv->guard_count_;
+    } else {
+        drv_ = nullptr;
     }
 }
 
@@ -1469,17 +1472,46 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
 //    to complete, cancelling the others. Returns `std::variant<T...>`.
 
 namespace detail {
-inline size_t first_resolve(size_t offset) {
+
+// Forward declarations for mixed task/event recursion.
+template <typename... Trest>
+inline size_t find_resolved(size_t offset, event&& e0, Trest&&... trest);
+template <typename Variant, size_t I, typename... Trest>
+inline task<Variant> complete_first(size_t index, event&, Trest&... trest);
+template <size_t I, typename... Trest>
+inline task<> complete_race(size_t index, event&, Trest&... trest);
+
+inline size_t find_resolved(size_t offset) {
     return offset;
 }
 
 template <typename T, typename... Trest>
-inline size_t first_resolve(size_t offset, task<T>&& t0, task<Trest>&&... trest) {
+inline size_t find_resolved(size_t offset, task<T>&& t0, Trest&&... trest) {
     if (t0.resolve()) {
         return offset;
     }
-    return first_resolve(offset + 1, std::forward<task<Trest>>(trest)...);
+    return find_resolved(offset + 1, std::forward<Trest>(trest)...);
 }
+
+template <typename... Trest>
+inline size_t find_resolved(size_t offset, event&& e0, Trest&&... trest) {
+    if (e0.triggered()) {
+        return offset;
+    }
+    return find_resolved(offset + 1, std::forward<Trest>(trest)...);
+}
+
+template <typename T>
+inline void destroy_task(task<T>& t) { t.destroy(); }
+inline void destroy_task(event&) { }
+
+template <typename T>
+inline void start_task(task<T>& t) { t.start(); }
+inline void start_task(event&) { }
+
+template <typename T>
+inline event make_resolution(task<T>& t) { return t.resolution(); }
+inline event make_resolution(event& e) { return e; }
 
 template <typename Variant, size_t I, typename T>
 inline task<Variant> complete_first(size_t, task<T>& t0) {
@@ -1491,10 +1523,15 @@ inline task<Variant> complete_first(size_t, task<T>& t0) {
     }
 }
 
+template <typename Variant, size_t I>
+inline task<Variant> complete_first(size_t, event&) {
+    co_return Variant{std::in_place_index<I>, std::monostate{}};
+}
+
 template <typename Variant, size_t I, typename T, typename... Trest>
-inline task<Variant> complete_first(size_t index, task<T>& t0, task<Trest>&... trest) {
+inline task<Variant> complete_first(size_t index, task<T>& t0, Trest&... trest) {
     if (index == I) {
-        ((trest.destroy()), ...);
+        ((destroy_task(trest)), ...);
         if constexpr (std::is_void_v<T>) {
             co_await t0;
             co_return Variant{std::in_place_index<I>, std::monostate{}};
@@ -1503,7 +1540,17 @@ inline task<Variant> complete_first(size_t index, task<T>& t0, task<Trest>&... t
         }
     } else {
         t0.destroy();
-        co_return co_await complete_first<Variant, I + 1>(index, std::forward<task<Trest>&>(trest)...);
+        co_return co_await complete_first<Variant, I+1>(index, std::forward<Trest&>(trest)...);
+    }
+}
+
+template <typename Variant, size_t I, typename... Trest>
+inline task<Variant> complete_first(size_t index, event&, Trest&... trest) {
+    if (index == I) {
+        ((destroy_task(trest)), ...);
+        co_return Variant{std::in_place_index<I>, std::monostate{}};
+    } else {
+        co_return co_await complete_first<Variant, I+1>(index, std::forward<Trest&>(trest)...);
     }
 }
 
@@ -1512,14 +1559,29 @@ inline task<T> complete_race(size_t, task<T>& t0) {
     co_return co_await t0;
 }
 
+template <size_t I>
+inline task<> complete_race(size_t, event&) {
+    co_return;
+}
+
 template <size_t I, typename T, typename... Trest>
-inline task<T> complete_race(size_t index, task<T>& t0, task<Trest>&... trest) {
+inline task<T> complete_race(size_t index, task<T>& t0, Trest&... trest) {
     if (index == I) {
-        ((trest.destroy()), ...);
+        ((destroy_task(trest)), ...);
         co_return co_await t0;
     } else {
         t0.destroy();
-        co_return co_await complete_race<I + 1>(index, std::forward<task<Trest>&>(trest)...);
+        co_return co_await complete_race<I+1>(index, std::forward<Trest&>(trest)...);
+    }
+}
+
+template <size_t I, typename... Trest>
+inline task<> complete_race(size_t index, event&, Trest&... trest) {
+    if (index == I) {
+        ((destroy_task(trest)), ...);
+        co_return;
+    } else {
+        co_return co_await complete_race<I+1>(index, std::forward<Trest&>(trest)...);
     }
 }
 
@@ -1530,15 +1592,16 @@ inline task<> first() {
 }
 
 template <typename... Ts>
-task<std::variant<typename promote_void<Ts>::type...>> first(task<Ts>... ts) {
-    using Variant = std::variant<typename promote_void<Ts>::type...>;
-    size_t resolve = detail::first_resolve(0, std::forward<task<Ts>>(ts)...);
-    while (resolve == sizeof...(ts)) {
-        ((ts.start()), ...);
-        co_await any(ts.resolution()...);
-        resolve = detail::first_resolve(0, std::forward<task<Ts>>(ts)...);
+task<std::variant<typename first_type<Ts>::type...>> first(Ts... ts) {
+    using Variant = std::variant<typename first_type<Ts>::type...>;
+    while (true) {
+        size_t ridx = detail::find_resolved(0, std::forward<Ts>(ts)...);
+        if (ridx != sizeof...(ts)) {
+            co_return co_await detail::complete_first<Variant, 0>(ridx, std::forward<Ts&>(ts)...);
+        }
+        ((detail::start_task(ts)), ...);
+        co_await any(detail::make_resolution(ts)...);
     }
-    co_return co_await detail::complete_first<Variant, 0>(resolve, std::forward<task<Ts>&>(ts)...);
 }
 
 inline task<> race() {
@@ -1546,15 +1609,28 @@ inline task<> race() {
 }
 
 template <typename T, typename... Trest>
-task<T> race(task<T> t0, task<Trest>... ts) {
-    size_t resolve = detail::first_resolve(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
-    while (resolve == 1 + sizeof...(ts)) {
+task<T> race(task<T> t0, Trest... ts) {
+    while (true) {
+        size_t ridx = detail::find_resolved(0, std::forward<task<T>>(t0), std::forward<Trest>(ts)...);
+        if (ridx != 1 + sizeof...(ts)) {
+            co_return co_await detail::complete_race<0>(ridx, t0, std::forward<Trest&>(ts)...);
+        }
         t0.start();
-        ((ts.start()), ...);
-        co_await any(t0.resolution(), ts.resolution()...);
-        resolve = detail::first_resolve(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
+        ((detail::start_task(ts)), ...);
+        co_await any(t0.resolution(), detail::make_resolution(ts)...);
     }
-    co_return co_await detail::complete_race<0>(resolve, t0, std::forward<task<Trest>&>(ts)...);
+}
+
+template <typename... Trest>
+task<> race(event e0, Trest... ts) {
+    while (true) {
+        size_t ridx = detail::find_resolved(0, std::forward<event>(e0), std::forward<Trest>(ts)...);
+        if (ridx != 1 + sizeof...(ts)) {
+            co_return co_await detail::complete_race<0>(ridx, e0, std::forward<Trest&>(ts)...);
+        }
+        ((detail::start_task(ts)), ...);
+        co_await any(e0, detail::make_resolution(ts)...);
+    }
 }
 
 

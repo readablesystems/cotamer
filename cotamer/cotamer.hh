@@ -60,6 +60,11 @@ private:
     detail::event_handle ep_;
 };
 
+// triggered_event - return an event that is already triggered().
+inline event triggered_event() {
+    return event{nullptr};
+}
+
 
 // task<T>
 //    A coroutine that produces a value of type T (or void). Tasks start
@@ -135,13 +140,19 @@ template <typename... Es>
 
 // first(task...) - run several tasks and return the result of the first one
 // that completes (wrapped in variant).
+
+template <typename T> struct first_type {};
+template <typename T> struct first_type<task<T>> { using type = T; };
+template <> struct first_type<task<void>> { using type = std::monostate; };
+template <> struct first_type<event> { using type = std::monostate; };
+
 template <typename... Ts>
-[[nodiscard]] task<std::variant<typename promote_void<Ts>::type...>> first(task<Ts>... ts);
+[[nodiscard]] task<std::variant<typename first_type<Ts>::type...>> first(Ts... ts);
 
 // race(task...) - run several tasks, all of the same type, and return the result
-// of the first one that completes. (There’s no way to tell which that was.)
+// of the first one that completes (unwrapped).
 template <typename T, typename... Ts>
-[[nodiscard]] task<T> race(task<T>, task<Ts>... rest);
+[[nodiscard]] task<T> race(task<T>, Ts... rest);
 [[nodiscard]] inline task<> race();
 
 

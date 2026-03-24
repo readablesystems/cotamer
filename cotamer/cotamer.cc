@@ -194,6 +194,7 @@ void driver::clear() {
 void driver::process_clearing() {
     assert(clearing_);
     keepalives_.clear();
+    guard_count_ = 0;
 
     // trigger all fd events (but coroutines throw rather than running)
     int fd = -1;
