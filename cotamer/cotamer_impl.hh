@@ -1592,8 +1592,8 @@ inline task<> first() {
 }
 
 template <typename... Ts>
-task<std::variant<typename first_type<Ts>::type...>> first(Ts... ts) {
-    using Variant = std::variant<typename first_type<Ts>::type...>;
+task<std::variant<task_return_type_t<Ts>...>> first(Ts... ts) {
+    using Variant = std::variant<task_return_type_t<Ts>...>;
     while (true) {
         size_t ridx = detail::find_resolved(0, std::forward<Ts>(ts)...);
         if (ridx != sizeof...(ts)) {

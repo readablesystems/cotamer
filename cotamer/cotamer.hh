@@ -141,13 +141,14 @@ template <typename... Es>
 // first(task...) - run several tasks and return the result of the first one
 // that completes (wrapped in variant).
 
-template <typename T> struct first_type {};
-template <typename T> struct first_type<task<T>> { using type = T; };
-template <> struct first_type<task<void>> { using type = std::monostate; };
-template <> struct first_type<event> { using type = std::monostate; };
+template <typename T> struct task_return_type {};
+template <typename T> struct task_return_type<task<T>> { using type = T; };
+template <> struct task_return_type<task<void>> { using type = std::monostate; };
+template <> struct task_return_type<event> { using type = std::monostate; };
+template <typename T> using task_return_type_t = typename task_return_type<T>::type;
 
 template <typename... Ts>
-[[nodiscard]] task<std::variant<typename first_type<Ts>::type...>> first(Ts... ts);
+[[nodiscard]] task<std::variant<task_return_type_t<Ts>...>> first(Ts... ts);
 
 // race(task...) - run several tasks, all of the same type, and return the result
 // of the first one that completes (unwrapped).
