@@ -412,3 +412,45 @@ coroutine starts waiting for the first coroutine’s result. Note, however, that
 an `interest_event` cannot trigger until its coroutine suspends for the first
 time. (Before that first suspension, the coroutine cannot tell whether its
 caller is interested in its result.)
+
+
+### Resolution points
+
+Sometimes, a task should perform certain side effects only if its return value
+will actually be used. `co_await cotamer::resolution{}` introduces a
+**resolution point**: the coroutine signals readiness, then suspends. The
+caller decides whether to **resolve** the task (resuming it past the resolution
+point to commit side effects) or destroy it.
+
+Work queues are a natural example. When `dequeue()` is used in `cot::first`
+or `cot::race`, multiple tasks may find an available item—but only the winner’s
+result is kept. The resolution point ensures that the losers don’t actually
+dequeue.
+
+```cpp
+cot::event work_queue_wakeup;
+std::deque<Item> work_queue;
+
+cot::task<Item> dequeue() {
+    do {
+        while (work_queue.empty()) {
+            co_await work_queue_wakeup.arm();
+        }
+        co_await cot::resolution{};
+    } while (work_queue.empty());   // re-check after resolution
+    auto item = std::move(work_queue.front());
+    work_queue.pop_front();
+    co_return item;
+}
+```
+
+The `do`/`while` re-check is essential: between the resolution point and
+resumption, another task may have invalidated the precondition.
+
+When a task is directly `co_await`ed, the resolution point is a
+no-op—the coroutine continues without suspending.
+
+`t.resolvable()` returns true if task `t` has completed or is suspended at a
+resolution point. `t.resolve()` resumes past resolution points and returns
+true if the task completed. `t.completion()` triggers when the task becomes
+resolvable.

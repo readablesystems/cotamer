@@ -141,6 +141,7 @@ struct fd_body {
 struct task_promise_base {
     bool detached_ = false;                // is this task detached?
     bool has_interest_ = false;            // has interest been requested?
+    bool resolving_ = false;               // is task awaiting resolution{}?
     driver* home_;                         // coroutine home driver
     event_handle completion_;              // completion event (lazily created)
     event_handle interest_;                // interest event (lazily created)
@@ -156,6 +157,7 @@ struct task_promise_base {
     }
 
     inline event_handle& make_interest();
+    bool resolve();
 };
 
 template <typename T>
@@ -172,13 +174,14 @@ struct task_promise : public task_promise_base {
     task_mutex_event_awaiter<T, false> await_transform(mutex&);
     inline task_event_awaiter<T> await_transform(interest);
     inline interest_event_awaiter await_transform(interest_event);
+    inline task_resolution_awaiter await_transform(resolution);
     template <typename Aw>
     Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
     // - Handle `co_return V` or throwing an exception in the coroutine:
     void return_value(T value) { result_.template emplace<1>(std::move(value)); }
     void unhandled_exception() noexcept { result_.template emplace<2>(std::current_exception()); }
     // - Behavior after coroutine exits:
-    task_final_awaiter<T> final_suspend() noexcept;
+    task_final_awaiter final_suspend() noexcept;
     // - Export coroutine return value to `co_await`er:
     inline T result();
 
@@ -219,6 +222,7 @@ struct task_promise<void> : public task_promise_base {
     inline task_mutex_event_awaiter<void, false> await_transform(mutex&);
     inline task_event_awaiter<void> await_transform(interest);
     inline interest_event_awaiter await_transform(interest_event);
+    inline task_resolution_awaiter await_transform(resolution);
     template <typename Aw>
     Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
     void return_void() noexcept { }
@@ -228,7 +232,7 @@ struct task_promise<void> : public task_promise_base {
             std::rethrow_exception(std::move(exception_));
         }
     }
-    inline task_final_awaiter<void> final_suspend() noexcept;
+    inline task_final_awaiter final_suspend() noexcept;
 
     std::exception_ptr exception_;
 };
@@ -246,7 +250,7 @@ inline task<void> task_promise<void>::get_return_object() noexcept {
 //    C++ runtime calls their methods to determine whether to suspend, how
 //    to handle a suspension (including what to run next), and how to resume.
 //
-//    task_awaiter<T> awaits a task. We also define task_final_awaiter<T>,
+//    task_awaiter<T> awaits a task. We also define task_final_awaiter,
 //    which handles the implicit final suspension when a coroutine completes;
 //    task_event_awaiter<T>, which awaits an event; and a few others.
 
@@ -254,7 +258,7 @@ template <typename T>
 struct task_awaiter {
     // - Return true if `co_await` should not suspend
     bool await_ready() noexcept {
-        return self_.done();
+        return self_.done() || self_.promise().resolve();
     }
     // - Suspend this coroutine and return the next coroutine to execute
     template <typename U>
@@ -281,11 +285,11 @@ struct task_awaiter {
 
 
 // Awaiter for the implicit final suspension when a coroutine completes.
-template <typename T>
 struct task_final_awaiter {
     bool await_ready() noexcept {
         return false;
     }
+    template <typename T>
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
         auto& promise = self.promise();
         // trigger completion event, since the task is done
@@ -309,12 +313,47 @@ struct task_final_awaiter {
 };
 
 template <typename T>
-inline task_final_awaiter<T> task_promise<T>::final_suspend() noexcept {
+inline task_final_awaiter task_promise<T>::final_suspend() noexcept {
     return {};
 }
 
-inline task_final_awaiter<void> task_promise<void>::final_suspend() noexcept {
+inline task_final_awaiter task_promise<void>::final_suspend() noexcept {
     return {};
+}
+
+
+// Awaiter for `cot::resolution{}`.
+struct task_resolution_awaiter {
+    bool await_ready() noexcept {
+        return false;
+    }
+    template <typename T>
+    inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
+        auto& promise = self.promise();
+        if (promise.continuation_) {
+            // someone wants our value already, so keep running
+            return self;
+        }
+        if (promise.completion_) {
+            promise.completion_->trigger();
+        }
+        promise.resolving_ = true;
+        if (promise.detached_) {
+            self.destroy();
+        }
+        return std::noop_coroutine();
+    }
+    void await_resume() noexcept {
+    }
+};
+
+template <typename T>
+inline task_resolution_awaiter task_promise<T>::await_transform(resolution) {
+    return task_resolution_awaiter{};
+}
+
+inline task_resolution_awaiter task_promise<void>::await_transform(resolution) {
+    return task_resolution_awaiter{};
 }
 
 
@@ -1035,7 +1074,7 @@ inline task<T>::~task() {
 
 template <typename T>
 inline task<T>::operator bool() const noexcept {
-    return handle_;
+    return !!handle_;
 }
 
 template <typename T>
@@ -1049,13 +1088,27 @@ inline bool task<T>::done() const {
 }
 
 template <typename T>
+inline bool task<T>::resolvable() const {
+    return handle_ && (handle_.done() || handle_.promise().resolving_);
+}
+
+template <typename T>
+inline bool task<T>::resolve() {
+    if (handle_ && handle_.promise().resolving_) {
+        handle_.promise().resolve();
+    }
+    return handle_ && handle_.done();
+}
+
+template <typename T>
 inline event task<T>::completion() {
     if (!handle_) {
         return event();
-    } else if (handle_.done()) {
-        return event(nullptr);
     }
     auto& p = handle_.promise();
+    if (handle_.done() || p.resolving_) {
+        return event(nullptr);
+    }
     if (!p.completion_) {
         p.completion_ = detail::event_handle(new detail::event_body);
     }
@@ -1080,8 +1133,9 @@ inline void task<T>::detach() {
     if (!handle_) {
         return;
     }
-    handle_.promise().detached_ = true;
-    if (handle_.done()) {
+    auto& p = handle_.promise();
+    p.detached_ = true;
+    if (handle_.done() || p.resolving_) {
         handle_.destroy();
     }
     handle_ = nullptr;
@@ -1350,46 +1404,47 @@ inline event all() {
 //    task was cancelled.
 
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<T> t, Es&&... es) {
-    if (!t.done()) {
+task<std::optional<T>> attempt(task<T> t, Es... es) {
+    while (!t.resolve()) {
         t.start();
-        co_await any(t.completion(), std::forward<Es>(es)...);
+        co_await any(t.completion(), es...);
+        if (!t.resolvable()) {
+            // `t` is a parameter, so its destructor will not run immediately
+            // upon co_return (it is destroyed with the coroutine state). But
+            // we want to destroy it now, because no one cares about its
+            // result.
+            t.destroy();
+            co_return std::nullopt;
+        }
     }
-    if (t.done()) {
-        co_return co_await t;
-    }
-    // `t` is a parameter, so its destructor will not run immediately upon
-    // co_return (it is destroyed with the coroutine state). But we want to
-    // destroy it now, because no one cares about its result.
-    t.destroy();
-    co_return std::nullopt;
+    co_return co_await t;
 }
 
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es) {
-    if (!t.done()) {
+task<std::optional<T>> attempt(task<std::optional<T>> t, Es... es) {
+    while (!t.resolve()) {
         t.start();
-        co_await any(t.completion(), std::forward<Es>(es)...);
+        co_await any(t.completion(), es...);
+        if (!t.resolvable()) {
+            t.destroy();
+            co_return std::nullopt;
+        }
     }
-    if (t.done()) {
-        co_return co_await t;
-    }
-    t.destroy();
-    co_return std::nullopt;
+    co_return co_await t;
 }
 
 template <typename... Es>
-task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es) {
-    if (!t.done()) {
+task<std::optional<std::monostate>> attempt(task<void> t, Es... es) {
+    while (!t.resolve()) {
         t.start();
-        co_await any(t.completion(), std::forward<Es>(es)...);
+        co_await any(t.completion(), es...);
+        if (!t.resolvable()) {
+            t.destroy();
+            co_return std::nullopt;
+        }
     }
-    if (t.done()) {
-        co_await t;
-        co_return std::monostate{};
-    }
-    t.destroy();
-    co_return std::nullopt;
+    co_await t;
+    co_return std::monostate{};
 }
 
 template <bool shared, typename... Es>
@@ -1397,10 +1452,10 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
     if (!e.triggered()) {
         co_await any(event(e.handle()), std::forward<Es>(es)...);
     }
-    if (e.triggered()) {
-        co_return locked_mutex_t<shared>{e.mutex()};
+    if (!e.triggered()) {
+        co_return std::nullopt;
     }
-    co_return std::nullopt;
+    co_return locked_mutex_t<shared>{e.mutex()};
 }
 
 
@@ -1409,16 +1464,16 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
 //    to complete, cancelling the others. Returns `std::variant<T...>`.
 
 namespace detail {
-inline size_t first_done(size_t offset) {
+inline size_t first_resolve(size_t offset) {
     return offset;
 }
 
 template <typename T, typename... Trest>
-inline size_t first_done(size_t offset, task<T>&& t0, task<Trest>&&... trest) {
-    if (t0.done()) {
+inline size_t first_resolve(size_t offset, task<T>&& t0, task<Trest>&&... trest) {
+    if (t0.resolve()) {
         return offset;
     }
-    return first_done(offset + 1, std::forward<task<Trest>>(trest)...);
+    return first_resolve(offset + 1, std::forward<task<Trest>>(trest)...);
 }
 
 template <typename Variant, size_t I, typename T>
@@ -1472,13 +1527,13 @@ inline task<> first() {
 template <typename... Ts>
 task<std::variant<typename promote_void<Ts>::type...>> first(task<Ts>... ts) {
     using Variant = std::variant<typename promote_void<Ts>::type...>;
-    size_t done = detail::first_done(0, std::forward<task<Ts>>(ts)...);
-    if (done == sizeof...(ts)) {
+    size_t resolve = detail::first_resolve(0, std::forward<task<Ts>>(ts)...);
+    while (resolve == sizeof...(ts)) {
         ((ts.start()), ...);
         co_await any(ts.completion()...);
-        done = detail::first_done(0, std::forward<task<Ts>>(ts)...);
+        resolve = detail::first_resolve(0, std::forward<task<Ts>>(ts)...);
     }
-    co_return co_await detail::first_complete<Variant, 0>(done, std::forward<task<Ts>&>(ts)...);
+    co_return co_await detail::first_complete<Variant, 0>(resolve, std::forward<task<Ts>&>(ts)...);
 }
 
 inline task<> race() {
@@ -1487,14 +1542,14 @@ inline task<> race() {
 
 template <typename T, typename... Trest>
 task<T> race(task<T> t0, task<Trest>... ts) {
-    size_t done = detail::first_done(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
-    if (done == 1 + sizeof...(ts)) {
+    size_t resolve = detail::first_resolve(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
+    while (resolve == 1 + sizeof...(ts)) {
         t0.start();
         ((ts.start()), ...);
         co_await any(t0.completion(), ts.completion()...);
-        done = detail::first_done(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
+        resolve = detail::first_resolve(0, std::forward<task<T>>(t0), std::forward<task<Trest>>(ts)...);
     }
-    co_return co_await detail::race_complete<0>(done, t0, std::forward<task<Trest>&>(ts)...);
+    co_return co_await detail::race_complete<0>(resolve, t0, std::forward<task<Trest>&>(ts)...);
 }
 
 

@@ -223,6 +223,27 @@ void reset() {
 }
 
 
+// task functions
+
+namespace detail {
+
+bool task_promise_base::resolve() {
+    std::coroutine_handle<task_promise_base> handle = std::coroutine_handle<task_promise_base>::from_promise(*this);
+    while (!handle.done() && resolving_) {
+        if (home_ != driver::current.get()) {
+            throw cotamer_error(cotamer_errc::cross_driver_await);
+        }
+        resolving_ = false;
+        handle();
+    }
+    if (!handle.done()) {
+        completion_ = event_handle(nullptr);
+    }
+    return handle.done();
+}
+
+}
+
 
 // event functions
 

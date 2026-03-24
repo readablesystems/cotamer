@@ -92,7 +92,9 @@ public:
     inline void start();               // start task if waiting for interest{}
     inline void detach();              // coroutine will survive task<> deletion
     inline bool done() const;          // has coroutine completed?
-    inline event completion();         // event that triggers on done()
+    inline bool resolvable() const;    // is coroutine completed or awaiting resolution{}?
+    inline bool resolve();             // has coroutine completed after resuming resolution{}?
+    inline event completion();         // event that triggers on resolvable()
     inline void destroy();             // destroy associated coroutine
 
     detail::task_awaiter<T> operator co_await() const noexcept;
@@ -106,8 +108,10 @@ private:
 // Sentinel types used with `co_await`:
 // co_await interest{} — suspend until someone awaits this task
 // co_await interest_event{} — obtain the interest event without suspending
+// co_await resolution{} - suspend until someone can consume the value of this task
 struct interest {};
 struct interest_event {};
+struct resolution {};
 
 // Event combinators.
 // any(e1, e2, ...) — triggers when any one of its arguments triggers.
@@ -121,11 +125,11 @@ template <typename... Es> inline event all(Es&&... es);
 // result (wrapped in optional) if the task completes first, or nullopt if
 // one of the events triggers first.
 template <typename T, typename... Es>
-[[nodiscard]] task<std::optional<T>> attempt(task<T> t, Es&&... es);
+[[nodiscard]] task<std::optional<T>> attempt(task<T> t, Es... es);
 template <typename T, typename... Es>
-[[nodiscard]] task<std::optional<T>> attempt(task<std::optional<T>> t, Es&&... es);
+[[nodiscard]] task<std::optional<T>> attempt(task<std::optional<T>> t, Es... es);
 template <typename... Es>
-[[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es&&... es);
+[[nodiscard]] task<std::optional<std::monostate>> attempt(task<void> t, Es... es);
 
 // first(task...) - run several tasks and return the result of the first one
 // that completes (wrapped in variant).
@@ -206,7 +210,7 @@ private:
     friend struct detail::event_body;
     friend struct detail::fd_body;
     friend class driver_guard;
-    template <typename T> friend struct detail::task_final_awaiter;
+    friend struct detail::task_final_awaiter;
     friend void set_clock(cotamer::clock);
 
     system_time_point virtual_epoch_;
