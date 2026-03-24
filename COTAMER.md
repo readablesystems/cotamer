@@ -120,7 +120,7 @@ int main() {
 ```
 
 
-## Combinators: `any`, `all`, `attempt`, `first`, `race`
+## Combinators: `any`, `all`, `attempt`, `first`, `race` {#combinators}
 
 `cotamer::any()` and `cotamer::all()` combine multiple events into one; you
 can supply as many events as you like.
@@ -155,10 +155,16 @@ the parameter index of the first task to complete. As soon as one of the task
 arguments completes, the others are cancelled. You can mix tasks and events;
 events (and `task<void>`) are represented in the variant by `std::monostate`.
 
+```cpp
+auto result = co_await cot::first(int_task(), string_task());
+if (result.index() == 0) {
+    std::print("int_task completed first, value {:d}\n", std::get<0>(result));
+}
+```
+
 `cotamer::race(task1, task2, ...)` is like `cotamer::first`, but all tasks
-must have the same type. Its return value is the return value of the first
-completed task; there’s no additional wrapping, so no immediate way to tell
-which task won the race.
+must have the same type, and `race`’s return type is not wrapped. It returns
+the value of the first `task` parameter to complete.
 
 
 ## Task lifetime
