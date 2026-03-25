@@ -232,21 +232,22 @@ call resolves.
 
 ```cpp
 cot::task<struct stat> nonblocking_stat(std::string path) {
-    cot::event notifier;           // communicate from thread to coroutine
-    cot::driver_guard guard;       // prevent early exit from event loop
     // receive return value from thread
     // (The shared_ptr avoids undefined behavior if the coroutine is cancelled
     // while the thread is still running.)
     struct result_struct { struct stat st; int status; int err; };
     auto result = std::make_shared<result_struct>();
 
+    cot::event notifier;           // communicate from thread to coroutine
     std::thread([=] () mutable {
         result->status = stat(path.c_str(), &result->st);
         result->err = errno;
         notifier.trigger();
     }).detach();
 
+    cot::driver_guard guard;       // prevent early exit from event loop
     co_await notifier;             // coroutine waits for thread
+
     if (result->status != 0) {
         throw std::system_error(result->err, std::generic_category());
     }
@@ -364,14 +365,12 @@ void test_event_arm_copies() {
 
 `co_await cotamer::resolve{}` introduces a **resolution point**: the coroutine
 signals readiness to complete, then suspends; the caller decides whether to
-**resolve** the task (resuming it past the resolution point to commit side
-effects) or destroy it.
+resolve the task or to destroy it.
 
-Resolution points support tasks that have risky side effects associated with
-returning. For example, consider a `dequeue_work()` function. `dequeue_work()`
-should only remove an item from the `work_queue` if that item will be
-processed. Unfortunately, combinators like `cot::first()` can throw away task
-return values:
+Resolution can protect tasks from risky side effects associated with
+returning. For example, a `dequeue_work()` function should only remove an item
+from the `work_queue` if that item will be processed. Unfortunately,
+combinators like `cot::first()` can throw away task return values:
 
 ```cpp
 auto x = cot::first(fast_task(), dequeue_work());
@@ -391,21 +390,23 @@ cot::task<Item> dequeue_work() {
         co_await cot::resolve{};    // wait until return value wanted
         // If we get here in `cot::first` or `cot::race`, then this task has
         // won the race, so any value it returns will be used.
-    } while (work_queue.empty());   // re-check emptiness after `cot::resolve`
+    } while (work_queue.empty());   // must re-check after resumption
     auto item = std::move(work_queue.front());
     work_queue.pop_front();
     co_return item;
 }
 ```
 
-`cot::first` and `cot::race` resolve at most one task, so a `dequeue_work`
-whose value isn’t needed is safely destroyed without side effects. The
-`do`/`while` re-check is essential: between the resolution point and
-resumption, another task may have invalidated the precondition.
+`cot::first` and `cot::race` move at most one task past a resolution point to
+completion, so a surplus `dequeue_work` is safely destroyed without side
+effects. `work_queue.empty()` must be re-checked after `co_await
+cot::resolve{}` because another task may have re-emptied the work queue in the
+meantime. `co_await dequeue_work()` without combinators works as before: the
+coroutine continues past the resolution point without suspending.
 
-When a task is directly `co_await`ed, the resolution point is a no-op—the
-coroutine continues without suspending. A task is free to suspend again after
-`co_await cot::resolve{}`, and can `co_await cot::resolve{}` multiple times.
+Resolution points signal that a task *may* be able to complete, not that it
+*must* complete. It is safe to suspend again after `co_await cot::resolve{}`,
+and a task can `co_await cot::resolve{}` multiple times.
 
 `t.resolvable()` returns true if task `t` has completed or is suspended at a
 resolution point. `t.resolve()` resumes `t` past any pending resolution
