@@ -1369,11 +1369,11 @@ inline event closed(const fd& f) {
 // any(), all()
 //    Multi-argument forms create a quorum_event_body. Single-argument forms
 //    pass through to make_event (no quorum needed). Zero-argument forms
-//    return an already-triggered event.
+//    return an appropriate event.
 
-template <typename E0, typename... Es>
-inline event any(E0 e0, Es&&... es) {
-    auto q = new detail::quorum_event_body(1, std::forward<E0>(e0), std::forward<Es>(es)...);
+template <typename... Es>
+inline event any(Es&&... es) {
+    auto q = new detail::quorum_event_body(1, std::forward<Es>(es)...);
     return detail::event_handle(q);
 }
 
@@ -1383,10 +1383,8 @@ inline event any(E&& e) {
 }
 
 inline event any() {
-    // any() with no arguments returns an already-triggered event.
-    // An alternate design would treat any() as an untriggered event (like
-    // how false is the identity for logical or).
-    return event(nullptr);
+    // An untriggered event (false is the identity for logical or)
+    return event();
 }
 
 
@@ -1402,6 +1400,7 @@ inline event all(E&& e) {
 }
 
 inline event all() {
+    // A triggered event (true is the identity for logical and)
     return event(nullptr);
 }
 

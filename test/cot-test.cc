@@ -147,14 +147,6 @@ cot::task<> test_move_only() {
     assert(cot::now() - start >= 1h && cot::now() - start < 2h);
 }
 
-// TEST: any() with no events does not wait
-cot::task<> test_any0() {
-    auto start = cot::now();
-    co_await cot::any();
-    std::cerr << "any\n";
-    assert(start == cot::now());
-}
-
 // TEST: attempt succeeds — task completes before timeout
 cot::task<int> slow_value() {
     co_await cot::after(1h);
@@ -1741,7 +1733,6 @@ int main(int argc, char* argv[]) {
     run("racers", test_racers);
     run("any_all_asap", test_any_all_asap);
     run("move_only", test_move_only);
-    run("any0", test_any0);
     run("attempt_success", test_attempt_success);
     run("attempt_cancelled", test_attempt_cancelled);
     run("attempt_already_done", test_attempt_already_done);
