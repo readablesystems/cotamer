@@ -1512,6 +1512,12 @@ struct port {
         mq.pop_front();
         co_return m;
     }
+    cot::task<int> recv2() {
+        co_return co_await recv();
+    }
+    cot::task<int> recv3() {
+        co_return co_await recv2();
+    }
 };
 
 // TEST: first(recv(), recv()) does not drop messages
@@ -1699,6 +1705,21 @@ cot::task<> test_resolution_multiple() {
     std::cerr << "test_resolution_multiple: ok\n";
 }
 
+// TEST: race(recv2(), recv2()) does not drop messages
+cot::task<> test_resolution_race_transparent() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    auto m1 = co_await cot::race(p.recv2(), p.recv2());
+    assert(m1 == 1);
+    auto m2 = co_await cot::race(p.recv2(), p.recv2());
+    assert(m2 == 2);
+    auto m3 = co_await cot::race(p.recv2());
+    assert(m3 == 3);
+    std::cerr << "test_resolution_race_transparent: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -1801,6 +1822,7 @@ int main(int argc, char* argv[]) {
     run("resolution_detach", test_resolution_detach);
     run("resolution_void", test_resolution_void);
     run("resolution_multiple", test_resolution_multiple);
+    run("resolution_race_transparent", test_resolution_race_transparent);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");
