@@ -138,6 +138,14 @@ struct fd_body {
 //    defined by the C++ language standard; the runtime calls its methods in
 //    specific situations, such as when a `co_await` expression is evaluated.
 
+// Generic coroutine functionality involving suspension, resumption, resolution,
+// and interest is in the common `task_promise_base`; and we use functions like
+// std::coroutine_handle::from_address() to obtain a task_promise_base without
+// needing the precise type of the task. This is strictly speaking UB -- one can
+// only call coroutine_handle<T>::from_address() if T is the actual promise type
+// or void -- but it works on GCC and Clang when the actual promise type and the
+// base type have the same alignment. We check the alignment with static_assert.
+
 struct task_promise_base {
     bool detached_ = false;                // is this task detached?
     bool has_interest_ = false;            // has interest been requested?
@@ -157,8 +165,10 @@ struct task_promise_base {
     }
 
     inline event_handle& make_interest();
+    inline event resolution();
     bool resolve();
 };
+
 
 template <typename T>
 struct task_promise : public task_promise_base {
@@ -190,12 +200,6 @@ struct task_promise : public task_promise_base {
 
 template <typename T>
 inline task<T> task_promise<T>::get_return_object() noexcept {
-    // When an event schedules a task_promise, it needs the task's home driver.
-    // It uses coroutine_handle<task_promise_base>::from_address() to get it.
-    // That is strictly speaking UB -- one can only call
-    // coroutine_handle<T>::from_address() if T is the actual promise type or
-    // void -- but it works on GCC and Clang when the actual promise type
-    // and the base type have the same alignment.
     static_assert(alignof(task_promise<T>) == alignof(task_promise_base));
     return task<T>{std::coroutine_handle<task_promise<T>>::from_promise(*this)};
 }
@@ -238,7 +242,6 @@ struct task_promise<void> : public task_promise_base {
 };
 
 inline task<void> task_promise<void>::get_return_object() noexcept {
-    // See comment in task_promise<T>::get_return_object.
     static_assert(alignof(task_promise<void>) == alignof(task_promise_base));
     return task<void>{std::coroutine_handle<task_promise<void>>::from_promise(*this)};
 }
@@ -266,7 +269,7 @@ struct task_awaiter {
         if (awaiting.promise().home_ != self_.promise().home_) {
             throw cotamer_error(cotamer_errc::cross_driver_await);
         }
-        // XXX UB, but see task_promise<T>::get_return_object
+        static_assert(alignof(task_promise<U>) == alignof(task_promise_base));
         std::coroutine_handle<task_promise_base> base_awaiting =
             std::coroutine_handle<task_promise_base>::from_address(awaiting.address());
         self_.promise().continuation_ = base_awaiting;
@@ -293,6 +296,7 @@ struct task_final_awaiter {
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
         auto& promise = self.promise();
         // trigger resolution event, since the task is done
+        promise.resolving_ = true;
         if (promise.resolution_) {
             promise.resolution_->trigger();
         }
@@ -334,10 +338,10 @@ struct task_resolution_awaiter {
             // someone wants our value already, so keep running
             return self;
         }
+        promise.resolving_ = true;
         if (promise.resolution_) {
             promise.resolution_->trigger();
         }
-        promise.resolving_ = true;
         if (promise.detached_) {
             self.destroy();
         }
@@ -986,6 +990,19 @@ inline task_mutex_event_awaiter<void, shared> task_promise<void>::await_transfor
     return task_mutex_event_awaiter<void, shared>{{std::move(ev).handle(), nullptr}, ev.mutex()};
 }
 
+
+// task_promise_base methods
+
+inline event task_promise_base::resolution() {
+    if (resolving_) {
+        return event(nullptr);
+    }
+    if (!resolution_) {
+        resolution_ = event_handle(new event_body);
+    }
+    return event(resolution_);
+}
+
 }
 
 
@@ -1102,17 +1119,7 @@ inline bool task<T>::resolve() {
 
 template <typename T>
 inline event task<T>::resolution() {
-    if (!handle_) {
-        return event();
-    }
-    auto& p = handle_.promise();
-    if (handle_.done() || p.resolving_) {
-        return event(nullptr);
-    }
-    if (!p.resolution_) {
-        p.resolution_ = detail::event_handle(new detail::event_body);
-    }
-    return event(p.resolution_);
+    return handle_ ? handle_.promise().resolution() : event();
 }
 
 template <typename T>
