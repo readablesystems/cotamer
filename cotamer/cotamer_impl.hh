@@ -987,10 +987,7 @@ inline task_mutex_event_awaiter<void, shared> task_promise<void>::await_transfor
 // task_promise_base methods
 
 inline event task_promise_base::resolution() {
-    if (resolving_) {
-        return event(nullptr);
-    }
-    if (!resolution_) {
+    if (!resolution_ && !resolving_) {
         resolution_ = event_handle(new event_body);
     }
     return event(resolution_);
