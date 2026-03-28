@@ -168,6 +168,8 @@ struct task_promise_base {
     inline event resolution();
     bool resolve();
     inline void set_awaiter(task_promise_base&);
+    template <typename T>
+    inline std::coroutine_handle<> complete(std::coroutine_handle<T>);
 };
 
 
@@ -287,23 +289,7 @@ struct task_final_awaiter {
     }
     template <typename T>
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
-        auto& promise = self.promise();
-        // trigger resolution event, since the task is done
-        promise.resolving_ = true;
-        if (promise.resolution_) {
-            promise.resolution_->trigger();
-        }
-        // if another coroutine wants this task's result, resume it directly
-        // (cross-driver awaits are rejected at co_await time, so the
-        // continuation is always on the same driver)
-        if (promise.awaiter_) {
-            return std::exchange(promise.awaiter_, nullptr);
-        }
-        // destroy if detached and then return to event loop
-        if (promise.detached_) {
-            self.destroy();
-        }
-        return std::noop_coroutine();
+        return self.promise().complete(self);
     }
     void await_resume() noexcept {
     }
@@ -1001,6 +987,26 @@ inline void task_promise_base::set_awaiter(task_promise_base& awaiter) {
     if (interest_) {
         interest_->trigger();
     }
+}
+
+template <typename T>
+inline std::coroutine_handle<> task_promise_base::complete(std::coroutine_handle<T> self) {
+    // trigger resolution event, since the task is done
+    resolving_ = true;
+    if (resolution_) {
+        resolution_->trigger();
+    }
+    // if another coroutine wants this task's result, resume it directly
+    // (cross-driver awaits are rejected at co_await time, so the continuation
+    // is always on the same driver)
+    if (awaiter_) {
+        return std::exchange(awaiter_, nullptr);
+    }
+    // destroy if detached and then return to event loop
+    if (detached_) {
+        self.destroy();
+    }
+    return std::noop_coroutine();
 }
 
 }
