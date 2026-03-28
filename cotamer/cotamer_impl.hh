@@ -1632,6 +1632,11 @@ task<> race(event e0, Trest... ts) {
     }
 }
 
+template <typename T>
+task<T> forward(task<T> t) {
+    return t;
+}
+
 
 // driver functions
 

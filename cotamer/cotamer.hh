@@ -156,6 +156,12 @@ template <typename T, typename... Ts>
 [[nodiscard]] task<T> race(task<T>, Ts... rest);
 [[nodiscard]] inline task<> race();
 
+// forward(task) — marks a task so that co_await sets up a forwarding link
+// instead of a continuation.  Use as `co_return co_await forward(t)` to make
+// a wrapper coroutine transparent to race/first/attempt resolution.
+template <typename T>
+task<T> forward(task<T> t);
+
 
 // driver
 //    The event loop. Maintains a queue of ready coroutines, a queue of
