@@ -153,8 +153,7 @@ struct task_promise_base {
     driver* home_;                         // coroutine home driver
     event_handle resolution_;              // resolution event (lazily created)
     event_handle interest_;                // interest event (lazily created)
-    // coroutine awaiting me, if any
-    std::coroutine_handle<task_promise_base> awaiter_;
+    task_promise_base* awaiter_ = nullptr; // coroutine awaing me, if any
 
     inline task_promise_base()
         : home_(driver::current.get()) {
@@ -168,8 +167,10 @@ struct task_promise_base {
     inline event resolution();
     bool resolve();
     inline void set_awaiter(task_promise_base&);
-    template <typename T>
-    inline std::coroutine_handle<> complete(std::coroutine_handle<T>);
+    template <typename X>
+    inline std::coroutine_handle<> resolution_point(std::coroutine_handle<X>);
+    template <typename X>
+    inline std::coroutine_handle<> complete(std::coroutine_handle<X>);
 };
 
 
@@ -312,19 +313,7 @@ struct task_resolution_awaiter {
     }
     template <typename T>
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
-        auto& promise = self.promise();
-        if (promise.awaiter_) {
-            // someone wants our value already, so keep running
-            return self;
-        }
-        promise.resolving_ = true;
-        if (promise.resolution_) {
-            promise.resolution_->trigger();
-        }
-        if (promise.detached_) {
-            self.destroy();
-        }
-        return std::noop_coroutine();
+        return self.promise().resolution_point(self);
     }
     void await_resume() noexcept {
     }
@@ -983,14 +972,30 @@ inline void task_promise_base::set_awaiter(task_promise_base& awaiter) {
     if (home_ != awaiter.home_) {
         throw cotamer_error(cotamer_errc::cross_driver_await);
     }
-    awaiter_ = std::coroutine_handle<task_promise_base>::from_promise(awaiter);
+    awaiter_ = &awaiter;
     if (interest_) {
         interest_->trigger();
     }
 }
 
-template <typename T>
-inline std::coroutine_handle<> task_promise_base::complete(std::coroutine_handle<T> self) {
+template <typename X>
+inline std::coroutine_handle<> task_promise_base::resolution_point(std::coroutine_handle<X> self) {
+    if (awaiter_) {
+        // someone wants our value already, so keep running
+        return self;
+    }
+    resolving_ = true;
+    if (resolution_) {
+        resolution_->trigger();
+    }
+    if (detached_) {
+        self.destroy();
+    }
+    return std::noop_coroutine();
+}
+
+template <typename X>
+inline std::coroutine_handle<> task_promise_base::complete(std::coroutine_handle<X> self) {
     // trigger resolution event, since the task is done
     resolving_ = true;
     if (resolution_) {
@@ -1000,7 +1005,9 @@ inline std::coroutine_handle<> task_promise_base::complete(std::coroutine_handle
     // (cross-driver awaits are rejected at co_await time, so the continuation
     // is always on the same driver)
     if (awaiter_) {
-        return std::exchange(awaiter_, nullptr);
+        return std::coroutine_handle<task_promise_base>::from_promise(
+            *std::exchange(awaiter_, nullptr)
+        );
     }
     // destroy if detached and then return to event loop
     if (detached_) {
