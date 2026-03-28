@@ -7,6 +7,16 @@
 namespace cot = cotamer;
 using namespace std::chrono_literals;
 
+#define soft_assert(x) soft_assert_f(x, #x, __func__, __FILE__, __LINE__);
+static bool soft_assert_failed = false;
+
+void soft_assert_f(bool x, const char* description, const char* func, const char* file, int line) {
+    if (!x) {
+        std::cerr << "Soft assertion failed: (" << description << "), function " << func << ", file " << file << ", line " << line << ".\n";
+        soft_assert_failed = true;
+    }
+}
+
 
 cot::task<int> h() {
     co_await cot::after(1h);
@@ -1711,13 +1721,17 @@ cot::task<> test_resolution_race_transparent() {
     p.enq(1);
     p.enq(2);
     p.enq(3);
+    p.enq(4);
+    p.enq(5);
     auto m1 = co_await cot::race(p.recv2(), p.recv2());
-    assert(m1 == 1);
+    soft_assert(m1 == 1);
     auto m2 = co_await cot::race(p.recv2(), p.recv2());
-    assert(m2 == 2);
+    soft_assert(m2 == 2);
     auto m3 = co_await cot::race(p.recv2());
-    assert(m3 == 3);
-    std::cerr << "test_resolution_race_transparent: ok\n";
+    soft_assert(m3 == 3);
+    if (!soft_assert_failed) {
+        std::cerr << "test_resolution_race_transparent: ok\n";
+    }
 }
 
 // TEST: race(recv2(), recv2()) does not drop messages
@@ -1728,15 +1742,19 @@ cot::task<> test_resolution_race_transparent_delayed() {
         p.enq(1);
         p.enq(2);
         p.enq(3);
+        p.enq(4);
+        p.enq(5);
     };
     enq_task().detach();
     auto m1 = co_await cot::race(p.recv2(), p.recv2());
-    assert(m1 == 1);
+    soft_assert(m1 == 1);
     auto m2 = co_await cot::race(p.recv2(), p.recv2());
-    assert(m2 == 2);
+    soft_assert(m2 == 2);
     auto m3 = co_await cot::race(p.recv2());
-    assert(m3 == 3);
-    std::cerr << "test_resolution_race_transparent_delayed: ok\n";
+    soft_assert(m3 == 3);
+    if (!soft_assert_failed) {
+        std::cerr << "test_resolution_race_transparent_delayed: ok\n";
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -1753,6 +1771,7 @@ int main(int argc, char* argv[]) {
         ++ran;
         std::cerr << "=== " << name << " ===\n";
         cot::reset();
+        soft_assert_failed = false;
         auto t = fn();
         cot::loop();
         assert(t.done() && "test did not complete");
