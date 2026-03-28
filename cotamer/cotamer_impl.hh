@@ -154,7 +154,7 @@ struct task_promise_base {
     event_handle resolution_;              // resolution event (lazily created)
     event_handle interest_;                // interest event (lazily created)
     // coroutine awaiting me, if any
-    std::coroutine_handle<task_promise_base> continuation_;
+    std::coroutine_handle<task_promise_base> awaiter_;
 
     inline task_promise_base()
         : home_(driver::current.get()) {
@@ -167,6 +167,7 @@ struct task_promise_base {
     inline event_handle& make_interest();
     inline event resolution();
     bool resolve();
+    inline void set_awaiter(task_promise_base&);
 };
 
 
@@ -261,29 +262,21 @@ template <typename T>
 struct task_awaiter {
     // - Return true if `co_await` should not suspend
     bool await_ready() noexcept {
-        return self_.done() || self_.promise().resolve();
+        return awaitee_.done() || awaitee_.promise().resolve();
     }
     // - Suspend this coroutine and return the next coroutine to execute
     template <typename U>
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiting) {
-        if (awaiting.promise().home_ != self_.promise().home_) {
-            throw cotamer_error(cotamer_errc::cross_driver_await);
-        }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiter) {
         static_assert(alignof(task_promise<U>) == alignof(task_promise_base));
-        std::coroutine_handle<task_promise_base> base_awaiting =
-            std::coroutine_handle<task_promise_base>::from_address(awaiting.address());
-        self_.promise().continuation_ = base_awaiting;
-        if (self_.promise().interest_) {
-            self_.promise().interest_->trigger();
-        }
+        awaitee_.promise().set_awaiter(awaiter.promise());
         return std::noop_coroutine();
     }
     // - Resume this coroutine, returning the `co_await` expression’s result
     T await_resume() {
-        return self_.promise().result();
+        return awaitee_.promise().result();
     }
 
-    std::coroutine_handle<task_promise<T>> self_;
+    std::coroutine_handle<task_promise<T>> awaitee_;
 };
 
 
@@ -303,8 +296,8 @@ struct task_final_awaiter {
         // if another coroutine wants this task's result, resume it directly
         // (cross-driver awaits are rejected at co_await time, so the
         // continuation is always on the same driver)
-        if (promise.continuation_) {
-            return std::exchange(promise.continuation_, nullptr);
+        if (promise.awaiter_) {
+            return std::exchange(promise.awaiter_, nullptr);
         }
         // destroy if detached and then return to event loop
         if (promise.detached_) {
@@ -334,7 +327,7 @@ struct task_resolution_awaiter {
     template <typename T>
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
         auto& promise = self.promise();
-        if (promise.continuation_) {
+        if (promise.awaiter_) {
             // someone wants our value already, so keep running
             return self;
         }
@@ -1001,6 +994,16 @@ inline event task_promise_base::resolution() {
         resolution_ = event_handle(new event_body);
     }
     return event(resolution_);
+}
+
+inline void task_promise_base::set_awaiter(task_promise_base& awaiter) {
+    if (home_ != awaiter.home_) {
+        throw cotamer_error(cotamer_errc::cross_driver_await);
+    }
+    awaiter_ = std::coroutine_handle<task_promise_base>::from_promise(awaiter);
+    if (interest_) {
+        interest_->trigger();
+    }
 }
 
 }
