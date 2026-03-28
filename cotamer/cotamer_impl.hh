@@ -1112,7 +1112,7 @@ inline bool task<T>::done() const {
 
 template <typename T>
 inline bool task<T>::resolvable() const {
-    return handle_ && (handle_.done() || handle_.promise().resolving_);
+    return handle_ && handle_.promise().resolving_;
 }
 
 template <typename T>
@@ -1153,7 +1153,7 @@ inline void task<T>::detach() {
     }
     auto& p = handle_.promise();
     p.detached_ = true;
-    if (handle_.done() || p.resolving_) {
+    if (p.resolving_) {
         handle_.destroy();
     }
     handle_ = nullptr;
