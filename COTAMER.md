@@ -364,8 +364,8 @@ void test_event_arm_copies() {
 ### Resolution
 
 `co_await cotamer::resolve{}` introduces a **resolution point**: the coroutine
-signals readiness to complete, then suspends; the caller decides whether to
-resolve the task or to destroy it.
+signals readiness to complete, then optionally suspends until some consumer
+actively requests its return value.
 
 Resolution can protect tasks from risky side effects associated with
 returning. For example, a `dequeue_work()` function should only remove an item
@@ -399,19 +399,38 @@ cot::task<Item> dequeue_work() {
 
 `cot::first` and `cot::race` move at most one task past a resolution point to
 completion, so a surplus `dequeue_work` is safely destroyed without side
-effects. `work_queue.empty()` must be re-checked after `co_await
-cot::resolve{}` because another task may have re-emptied the work queue in the
-meantime. `co_await dequeue_work()` without combinators works as before: the
-coroutine continues past the resolution point without suspending.
+effects. `work_queue.empty()` must be re-checked after `co_await cot::resolve{}`
+because another task may have re-emptied the work queue in the meantime. A
+direct call to `co_await dequeue_work()` works as before: the `dequeue_work`
+coroutine continues past its resolution point without suspending.
 
-Resolution points signal that a task *may* be able to complete, not that it
-*must* complete. It is safe to suspend again after `co_await cot::resolve{}`,
-and a task can `co_await cot::resolve{}` multiple times.
+It is safe to suspend again after `co_await cot::resolve{}`, and a task can
+`co_await cot::resolve{}` multiple times.
 
 `t.resolvable()` returns true if task `t` has completed or is suspended at a
 resolution point. `t.resolve()` resumes `t` past any pending resolution
 points, then returns true if the task completed. `t.resolution()` returns an
 event that triggers when the task becomes `resolvable()`.
+
+
+### Forwarding
+
+`cotamer::forward(t)` transparently forwards task `t`’s resolution points to the
+calling coroutine. This lets a thin wrapper preserve the resolution semantics of
+the task it wraps:
+
+```cpp
+cot::task<Item> dequeue_work_logged() {
+    auto item = co_await cot::forward(dequeue_work());
+    log_work(item);
+    co_return item;
+}
+```
+
+Without `cot::forward`, `co_await dequeue_work()` could immediately dequeue a
+work item, making `dequeue_work_logged()` unsafe in combinators. With
+`cot::forward`, though, `dequeue_work_logged()` waits for resolution just like
+`dequeue_work()` and can be safely cancelled.
 
 
 ### Lazy tasks

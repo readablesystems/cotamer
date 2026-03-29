@@ -76,6 +76,7 @@ template <typename T>
 struct port {
     using message_type = T;
     using message_traits_type = message_traits<T>;
+    using message_with_id_type = std::pair<T, id_type>;
 
     inline port(id_type id, network<T>& net);
     ~port() {
@@ -95,7 +96,8 @@ struct port {
     void set_verbose(bool verbose) noexcept { verbose_ = verbose; }
 
     // receive a message on this port
-    cot::task<T> receive();
+    cot::task<message_with_id_type> receive_with_id();
+    cot::task<message_type> receive();
 
 
 private:
@@ -105,7 +107,7 @@ private:
     bool verbose_;
     network<T>& net_;
 
-    std::deque<message_type> messageq_;
+    std::deque<message_with_id_type> messageq_;
     cot::event receiver_event_;
 };
 
@@ -139,7 +141,7 @@ cot::task<> channel<T>::send_after(cot::duration delay, message_type m) {
     co_await cot::after(delay);
 
     // record this message in the destination message queue
-    to_port_.messageq_.emplace_back(std::move(m));
+    to_port_.messageq_.emplace_back(std::move(m), source());
 
     // wake up a blocked receiver
     to_port_.receiver_event_.trigger();
@@ -150,7 +152,7 @@ cot::task<> channel<T>::send_after(cot::duration delay, message_type m) {
 //    Suspend until a message is available, then dequeue and return it.
 
 template <typename T>
-cot::task<T> port<T>::receive() {
+auto port<T>::receive_with_id() -> cot::task<message_with_id_type> {
     do {
         // sleep until there’s a message
         while (messageq_.empty()) {
@@ -167,13 +169,17 @@ cot::task<T> port<T>::receive() {
     messageq_.pop_front();
 
     if (verbose_) {
-        std::print("{}: {} ← \"{}\"\n", cot::now(), id(),
-                   message_traits_type::print_transform(m));
+        std::print("{}: {} ← {} \"{}\"\n", cot::now(), id(), m.second,
+                   message_traits_type::print_transform(m.first));
     }
 
     co_return m;
 }
 
+template <typename T>
+cot::task<T> port<T>::receive() {
+    co_return (co_await receive_with_id()).first;
+}
 
 
 // network<T>

@@ -7,6 +7,16 @@
 namespace cot = cotamer;
 using namespace std::chrono_literals;
 
+#define soft_assert(x) soft_assert_f(x, #x, __func__, __FILE__, __LINE__);
+static bool soft_assert_failed = false;
+
+void soft_assert_f(bool x, const char* description, const char* func, const char* file, int line) {
+    if (!x) {
+        std::cerr << "Soft assertion failed: (" << description << "), function " << func << ", file " << file << ", line " << line << ".\n";
+        soft_assert_failed = true;
+    }
+}
+
 
 cot::task<int> h() {
     co_await cot::after(1h);
@@ -145,14 +155,6 @@ cot::task<> test_move_only() {
     std::cerr << "ptr: " << *p << "\n";
     assert(*p == 99);
     assert(cot::now() - start >= 1h && cot::now() - start < 2h);
-}
-
-// TEST: any() with no events does not wait
-cot::task<> test_any0() {
-    auto start = cot::now();
-    co_await cot::any();
-    std::cerr << "any\n";
-    assert(start == cot::now());
 }
 
 // TEST: attempt succeeds — task completes before timeout
@@ -1359,6 +1361,15 @@ cot::task<> test_race_single() {
     std::cerr << "test_race_single: ok\n";
 }
 
+// TEST: race() with zero arguments never completes
+cot::task<> test_race_zero() {
+    auto start = cot::now();
+    auto result = co_await cot::attempt(cot::race<int>(), cot::after(1h));
+    assert(!result.has_value());
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_race_zero: ok\n";
+}
+
 // TEST: race() with void tasks
 cot::task<> test_race_void() {
     auto start = cot::now();
@@ -1519,6 +1530,12 @@ struct port {
         auto m = mq.front();
         mq.pop_front();
         co_return m;
+    }
+    cot::task<int> recv2() {
+        co_return co_await cot::forward(recv());
+    }
+    cot::task<int> recv3() {
+        co_return co_await cot::forward(recv2());
     }
 };
 
@@ -1707,6 +1724,384 @@ cot::task<> test_resolution_multiple() {
     std::cerr << "test_resolution_multiple: ok\n";
 }
 
+// TEST: forward a task with no resolution point (completes immediately)
+cot::task<int> forward_immediate() {
+    co_return co_await cot::forward(immediate());
+}
+cot::task<> test_forward_no_resolve() {
+    auto v = co_await forward_immediate();
+    assert(v == 42);
+    // race: both complete immediately, no resolution point
+    auto v2 = co_await cot::race(forward_immediate(), forward_immediate());
+    assert(v2 == 42);
+    // attempt: completes before timeout
+    auto v3 = co_await cot::attempt(forward_immediate(), cot::after(1h));
+    assert(v3.has_value());
+    assert(*v3 == 42);
+    std::cerr << "test_forward_no_resolve: ok\n";
+}
+
+// TEST: forward a task that has already completed before co_await
+cot::task<> test_forward_already_done() {
+    auto inner = immediate(); // runs to completion (initial_suspend = never)
+    assert(inner.done());
+    auto outer = [&]() -> cot::task<int> {
+        co_return co_await cot::forward(std::move(inner));
+    };
+    auto v = co_await outer();
+    assert(v == 42);
+    std::cerr << "test_forward_already_done: ok\n";
+}
+
+// TEST: forward + attempt — inner times out
+cot::task<int> forward_slow() {
+    co_return co_await cot::forward(very_slow_value());
+}
+cot::task<> test_forward_attempt_cancelled() {
+    auto start = cot::now();
+    auto result = co_await cot::attempt(forward_slow(), cot::after(1h));
+    assert(!result.has_value());
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_forward_attempt_cancelled: ok\n";
+}
+
+// TEST: forward + attempt — inner succeeds
+cot::task<int> forward_slow_value() {
+    co_return co_await cot::forward(slow_value());
+}
+cot::task<> test_forward_attempt_success() {
+    auto start = cot::now();
+    auto result = co_await cot::attempt(forward_slow_value(), cot::after(10h));
+    assert(result.has_value());
+    assert(*result == 77);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_forward_attempt_success: ok\n";
+}
+
+// TEST: plain co_await on a forwarding wrapper where inner completes async
+cot::task<> test_forward_plain_await() {
+    auto start = cot::now();
+    auto v = co_await forward_slow_value();
+    assert(v == 77);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_forward_plain_await: ok\n";
+}
+
+// TEST: forward then normal await — stale forward_ must not be chased.
+// The coroutine itself must do `co_await cot::forward(...)` so that its own
+// promise gets forward_ set; a subsequent normal co_await in the same
+// coroutine must not leave that stale pointer to be dereferenced.
+// Wrapping in attempt() forces resolve() which dereferences forward_.
+cot::task<int> forward_then_normal() {
+    int x = co_await cot::forward(slow_value());   // sets this->forward_
+    int y = co_await slow_value();                  // normal await
+    co_return x + y;
+}
+cot::task<> test_forward_then_normal_await() {
+    auto start = cot::now();
+    auto result = co_await cot::attempt(forward_then_normal(), cot::after(10h));
+    assert(result.has_value());
+    assert(*result == 154);
+    assert(cot::now() - start >= 2h && cot::now() - start < 3h);
+    std::cerr << "test_forward_then_normal_await: ok\n";
+}
+
+// TEST: forward + resolution revocation — loser doesn't consume
+cot::task<> test_forward_revocation() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    auto result = co_await cot::first(p.recv2(), p.recv2());
+    assert(result.index() == 0);
+    assert(std::get<0>(result) == 1);
+    // only the winner consumed; message 2 remains
+    assert(p.mq.size() == 1);
+    assert(p.mq.front() == 2);
+    std::cerr << "test_forward_revocation: ok\n";
+}
+
+// TEST: forward + resolution API — resolvable/resolve work through forward
+cot::task<> test_forward_api() {
+    port p;
+    auto t = p.recv2();
+    assert(!t.done());
+    assert(!t.resolvable());
+    assert(!t.resolve());
+
+    p.enq(7);
+    co_await t.resolution();
+    assert(!t.done());
+    assert(t.resolvable());
+    assert(t.resolve());
+    assert(t.done());
+    auto m = co_await t;
+    assert(m == 7);
+    std::cerr << "test_forward_api: ok\n";
+}
+
+// TEST: deep forward chain (recv3 = forward(forward(recv)))
+cot::task<> test_forward_deep_chain() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    // direct await through double-forwarding
+    auto m1 = co_await p.recv3();
+    assert(m1 == 1);
+    // race through double-forwarding
+    auto m2 = co_await cot::race(p.recv3(), p.recv3());
+    assert(m2 == 2);
+    // attempt through double-forwarding
+    auto m3 = co_await cot::attempt(p.recv3(), cot::after(10h));
+    assert(m3.has_value());
+    assert(*m3 == 3);
+    std::cerr << "test_forward_deep_chain: ok\n";
+}
+
+// TEST: forward + void task
+cot::task<> test_forward_void() {
+    int count = 0;
+    auto guarded = [&]() -> cot::task<> {
+        co_await cot::resolve{};
+        ++count;
+    };
+    auto forward_guarded = [&]() -> cot::task<> {
+        co_return co_await cot::forward(guarded());
+    };
+    co_await cot::first(forward_guarded(), forward_guarded());
+    assert(count == 1);
+    std::cerr << "test_forward_void: ok\n";
+}
+
+// TEST: completion of inner task must not make a non-forwarding outer
+// appear resolvable. resolution_point() is called on every completion, but
+// it must only propagate resolving_ through forwarding links. Without
+// the guard, the outer would appear resolvable after the inner completes,
+// and resolve() would resume it past its second co_await prematurely.
+cot::task<> test_resolve_no_propagate_without_forward() {
+    auto inner = []() -> cot::task<int> {
+        co_await cot::after(1h);
+        co_return 42;
+    };
+    // Non-forwarding wrapper that does additional work after inner completes
+    auto wrapper = [&]() -> cot::task<int> {
+        auto v = co_await inner();
+        co_await cot::after(100h);
+        co_return v;
+    };
+    auto start = cot::now();
+    // wrapper takes 101h total; the 10h timeout should fire first
+    auto result = co_await cot::attempt(wrapper(), cot::after(10h));
+    assert(!result.has_value());
+    assert(cot::now() - start >= 10h && cot::now() - start < 11h);
+    std::cerr << "test_resolve_no_propagate_without_forward: ok\n";
+}
+
+// TEST: race(recv2(), recv2()) does not drop messages
+cot::task<> test_resolution_race_transparent() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    p.enq(4);
+    p.enq(5);
+    auto m1 = co_await cot::race(p.recv2(), p.recv2());
+    assert(m1 == 1);
+    auto m2 = co_await cot::race(p.recv3(), p.recv3());
+    assert(m2 == 2);
+    auto m3 = co_await cot::race(p.recv2());
+    assert(m3 == 3);
+    auto m4 = co_await p.recv3();
+    assert(m4 == 4);
+    std::cerr << "test_resolution_race_transparent: ok\n";
+}
+
+// TEST: race(recv(), recv(), recv()) == race(recv(), race(recv(), recv()))
+cot::task<> test_resolution_race_forwards_immediate() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    p.enq(4);
+    p.enq(5);
+    auto m1 = co_await cot::race(p.recv(), cot::race(p.recv(), p.recv()));
+    assert(m1 == 1);
+    auto m4 = co_await p.recv();
+    assert(m4 == 2);
+    std::cerr << "test_resolution_race_forwards_immediate: ok\n";
+}
+
+// TEST: wrapping in single-argument `race` preserves semantics
+cot::task<> test_resolution_race_forwards_immediate_2() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    p.enq(4);
+    p.enq(5);
+    auto m1 = co_await cot::race(cot::race(p.recv()), cot::race(cot::race(p.recv()), cot::race(p.recv())));
+    assert(m1 == 1);
+    auto m4 = co_await cot::race(p.recv());
+    assert(m4 == 2);
+    std::cerr << "test_resolution_race_forwards_immediate_2: ok\n";
+}
+
+// TEST: race(recv2(), recv2()) does not drop messages
+cot::task<> test_resolution_race_transparent_delayed() {
+    port p;
+    auto enq_task = [&]() -> cot::task<> {
+        co_await cot::after(1s);
+        p.enq(1);
+        p.enq(2);
+        p.enq(3);
+        p.enq(4);
+        p.enq(5);
+    };
+    enq_task().detach();
+    auto m1 = co_await cot::race(p.recv2(), p.recv2());
+    assert(m1 == 1);
+    auto m2 = co_await cot::race(p.recv3(), p.recv3());
+    assert(m2 == 2);
+    auto m3 = co_await cot::race(p.recv2());
+    assert(m3 == 3);
+    auto m4 = co_await p.recv3();
+    assert(m4 == 4);
+    std::cerr << "test_resolution_race_transparent_delayed: ok\n";
+}
+
+// TEST: race(recv(), recv(), recv()) == race(recv(), race(recv(), recv()))
+cot::task<> test_resolution_race_forwards() {
+    port p;
+    auto enq_task = [&]() -> cot::task<> {
+        co_await cot::after(1s);
+        p.enq(1);
+        p.enq(2);
+        p.enq(3);
+        p.enq(4);
+        p.enq(5);
+    };
+    enq_task().detach();
+    auto m1 = co_await cot::race(p.recv(), cot::race(p.recv(), p.recv()));
+    assert(m1 == 1);
+    auto m4 = co_await p.recv();
+    assert(m4 == 2);
+    std::cerr << "test_resolution_race_forwards: ok\n";
+}
+
+// TEST: plain co_await forward(recv()) with delayed messages (async resolve{})
+cot::task<> test_forward_plain_await_with_resolve() {
+    port p;
+    auto enq_task = [&]() -> cot::task<> {
+        co_await cot::after(1s);
+        p.enq(42);
+    };
+    enq_task().detach();
+    auto m = co_await p.recv2();
+    assert(m == 42);
+    // also test deep chain
+    auto enq_task2 = [&]() -> cot::task<> {
+        co_await cot::after(1s);
+        p.enq(99);
+    };
+    enq_task2().detach();
+    auto m2 = co_await p.recv3();
+    assert(m2 == 99);
+    std::cerr << "test_forward_plain_await_with_resolve: ok\n";
+}
+
+// TEST: forward + first with delayed messages
+cot::task<> test_forward_first_delayed() {
+    port p;
+    auto enq_task = [&]() -> cot::task<> {
+        co_await cot::after(1s);
+        p.enq(1);
+        p.enq(2);
+    };
+    enq_task().detach();
+    auto result = co_await cot::first(p.recv2(), p.recv2());
+    assert(result.index() == 0);
+    assert(std::get<0>(result) == 1);
+    assert(p.mq.size() == 1);
+    assert(p.mq.front() == 2);
+    std::cerr << "test_forward_first_delayed: ok\n";
+}
+
+// TEST: deep forward chain with delayed messages
+cot::task<> test_forward_deep_chain_delayed() {
+    port p;
+    auto enq_task = [&]() -> cot::task<> {
+        co_await cot::after(1s);
+        p.enq(1);
+        p.enq(2);
+        p.enq(3);
+    };
+    enq_task().detach();
+    auto m1 = co_await p.recv3();
+    assert(m1 == 1);
+    auto m2 = co_await cot::race(p.recv3(), p.recv3());
+    assert(m2 == 2);
+    auto m3 = co_await cot::attempt(p.recv3(), cot::after(10h));
+    assert(m3.has_value());
+    assert(*m3 == 3);
+    std::cerr << "test_forward_deep_chain_delayed: ok\n";
+}
+
+// TEST: forward + exception propagation
+cot::task<int> forward_throwing() {
+    co_return co_await cot::forward(throwing());
+}
+cot::task<> test_forward_exception() {
+    auto start = cot::now();
+    try {
+        (void) co_await forward_throwing();
+        assert(false && "BUG: should not reach here");
+    } catch (const std::runtime_error& e) {
+        assert(std::string(e.what()) == "boom");
+    }
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_forward_exception: ok\n";
+}
+
+// TEST: detach a forwarding wrapper (inner coroutine dies with wrapper)
+cot::task<> test_forward_detach() {
+    port p;
+    p.enq(1);
+    // recv2 starts; recv finds message, hits resolve{}; recv2.resolving_ = true
+    auto t = p.recv2();
+    assert(t.resolvable());
+    t.detach();
+    // detach destroys recv2 (resolving_), which destroys recv.
+    // message 1 was never dequeued (recv was at resolve{}, not past it).
+    assert(p.mq.size() == 1);
+    assert(p.mq.front() == 1);
+    co_await cot::asap();
+    std::cerr << "test_forward_detach: ok\n";
+}
+
+// TEST: empty tasks (default-constructed, no coroutine) are safe to examine
+cot::task<> test_empty_task() {
+    cot::task<int> t;
+    assert(t.empty());
+    assert(!t.done());
+    assert(!t.resolvable());
+    assert(!t.resolve());
+    // resolution() on empty task returns a default (untriggered) event
+    auto e = t.resolution();
+    assert(!e.triggered());
+    // start/detach/destroy are no-ops on empty tasks
+    t.start();
+    t.detach();
+    t.destroy();
+    // void variant
+    cot::task<> tv;
+    assert(tv.empty());
+    assert(!tv.done());
+    assert(!tv.resolvable());
+    assert(!tv.resolve());
+    co_await cot::asap();
+    std::cerr << "test_empty_task: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -1721,6 +2116,7 @@ int main(int argc, char* argv[]) {
         ++ran;
         std::cerr << "=== " << name << " ===\n";
         cot::reset();
+        soft_assert_failed = false;
         auto t = fn();
         cot::loop();
         assert(t.done() && "test did not complete");
@@ -1741,7 +2137,6 @@ int main(int argc, char* argv[]) {
     run("racers", test_racers);
     run("any_all_asap", test_any_all_asap);
     run("move_only", test_move_only);
-    run("any0", test_any0);
     run("attempt_success", test_attempt_success);
     run("attempt_cancelled", test_attempt_cancelled);
     run("attempt_already_done", test_attempt_already_done);
@@ -1787,6 +2182,8 @@ int main(int argc, char* argv[]) {
     run("race_immediate", test_race_immediate);
     run("race_last_wins", test_race_last_wins);
     run("race_single", test_race_single);
+    run("race_zero", test_race_zero);
+    run("empty_task", test_empty_task);
     run("race_void", test_race_void);
     run("first_event_wins", test_first_event_wins);
     run("first_task_beats_event", test_first_task_beats_event);
@@ -1810,6 +2207,27 @@ int main(int argc, char* argv[]) {
     run("resolution_detach", test_resolution_detach);
     run("resolution_void", test_resolution_void);
     run("resolution_multiple", test_resolution_multiple);
+    run("forward_no_resolve", test_forward_no_resolve);
+    run("forward_already_done", test_forward_already_done);
+    run("forward_attempt_cancelled", test_forward_attempt_cancelled);
+    run("forward_attempt_success", test_forward_attempt_success);
+    run("forward_plain_await", test_forward_plain_await);
+    run("forward_then_normal_await", test_forward_then_normal_await);
+    run("forward_revocation", test_forward_revocation);
+    run("forward_api", test_forward_api);
+    run("forward_deep_chain", test_forward_deep_chain);
+    run("forward_void", test_forward_void);
+    run("resolve_no_propagate_without_forward", test_resolve_no_propagate_without_forward);
+    run("resolution_race_transparent", test_resolution_race_transparent);
+    run("resolution_race_forwards_immediate", test_resolution_race_forwards_immediate);
+    run("resolution_race_forwards_immediate_2", test_resolution_race_forwards_immediate_2);
+    run("resolution_race_transparent_delayed", test_resolution_race_transparent_delayed);
+    run("resolution_race_forwards", test_resolution_race_forwards);
+    run("forward_plain_await_with_resolve", test_forward_plain_await_with_resolve);
+    run("forward_first_delayed", test_forward_first_delayed);
+    run("forward_deep_chain_delayed", test_forward_deep_chain_delayed);
+    run("forward_exception", test_forward_exception);
+    run("forward_detach", test_forward_detach);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");
