@@ -85,6 +85,7 @@ public:
 
     inline task() noexcept = default;  // construct empty task
     explicit inline task(handle_type handle) noexcept;
+    inline task(event e) noexcept requires std::is_void_v<T>;
     inline task(task&& x) noexcept;
     inline task& operator=(task&& x) noexcept;
     task(const task&) = delete;

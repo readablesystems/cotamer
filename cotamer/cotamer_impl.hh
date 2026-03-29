@@ -1088,9 +1088,20 @@ inline detail::event_handle&& event::handle() && noexcept {
 
 // task methods
 
+namespace detail {
+inline task<> make_task(event e) {
+    co_await e;
+}
+}
+
 template <typename T>
 inline task<T>::task(handle_type handle) noexcept
     : handle_(handle) {
+}
+
+template <typename T>
+inline task<T>::task(event e) noexcept requires std::is_void_v<T>
+    : task(detail::make_task(std::move(e))) {
 }
 
 template <typename T>
