@@ -139,7 +139,7 @@ struct fd_body {
 //    specific situations, such as when a `co_await` expression is evaluated.
 
 // Generic coroutine functionality involving suspension, resumption, resolution,
-// and interest is in the common `task_promise_base`; and we use functions like
+// and interest is in the common `task_promise_base`, and we use functions like
 // std::coroutine_handle::from_address() to obtain a task_promise_base without
 // needing the precise type of the task. This is strictly speaking UB -- one can
 // only call coroutine_handle<T>::from_address() if T is the actual promise type
@@ -151,6 +151,7 @@ struct task_promise_base {
     bool has_interest_ = false;            // has interest been requested?
     bool resolving_ = false;               // is task awaiting resolve{}?
     bool forwarded_ = false;               // is task subject to cot::forward()?
+    bool in_resolve_ = false;              // is resolve() currently driving me?
     driver* home_;                         // coroutine home driver
     event_handle resolution_;              // resolution event (lazily created)
     event_handle interest_;                // interest event (lazily created)
@@ -168,6 +169,14 @@ struct task_promise_base {
     inline std::coroutine_handle<> base_handle() {
         return std::coroutine_handle<task_promise_base>::from_promise(*this);
     }
+    inline constexpr bool active_awaiter() const noexcept {
+        auto* a = awaiter_;
+        while (a && a->forward_) {
+            a = a->awaiter_;
+        }
+        return a;
+    }
+
     inline event_handle& make_interest();
     inline event resolution();
     bool resolve();
@@ -315,8 +324,8 @@ struct task_resolution_awaiter {
     template <typename T>
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
         auto& p = self.promise();
-        if (p.awaiter_ && !p.awaiter_->forward_) {
-            // someone wants our value already, so keep running
+        if (p.active_awaiter()) {
+            // someone actively wants our value, so keep running
             return self;
         }
         p.resolution_point();
@@ -1010,13 +1019,9 @@ inline std::coroutine_handle<> task_final_awaiter::await_suspend(std::coroutine_
     auto& p = self.promise();
     // trigger resolution event, since the task is done
     p.resolution_point();
-    // if we have a non-forwarded awaiter, resume it directly
-    if (p.awaiter_ && !p.awaiter_->forward_) {
+    // resume awaiter directly, unless resolve() is driving the chain
+    if (p.awaiter_ && !p.in_resolve_) {
         return p.awaiter_->base_handle();
-    }
-    // propagate completion to forwarding outer task
-    if (p.awaiter_) {
-        p.awaiter_->resolution_point();
     }
     // destroy if detached and then return to event loop
     if (p.detached_) {
@@ -1623,6 +1628,7 @@ template <typename... Ts>
 task<std::variant<task_return_type_t<Ts>...>> first(Ts... ts) {
     using Variant = std::variant<task_return_type_t<Ts>...>;
     while (true) {
+        co_await resolve{};
         size_t ridx = detail::find_resolved(0, std::forward<Ts>(ts)...);
         if (ridx != sizeof...(ts)) {
             co_return co_await detail::complete_first<Variant, 0>(ridx, std::forward<Ts&>(ts)...);

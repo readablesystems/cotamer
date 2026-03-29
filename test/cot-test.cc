@@ -1769,6 +1769,15 @@ cot::task<> test_forward_attempt_success() {
     std::cerr << "test_forward_attempt_success: ok\n";
 }
 
+// TEST: plain co_await on a forwarding wrapper where inner completes async
+cot::task<> test_forward_plain_await() {
+    auto start = cot::now();
+    auto v = co_await forward_slow_value();
+    assert(v == 77);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_forward_plain_await: ok\n";
+}
+
 // TEST: forward + resolution revocation — loser doesn't consume
 cot::task<> test_forward_revocation() {
     port p;
@@ -2058,6 +2067,7 @@ int main(int argc, char* argv[]) {
     run("forward_already_done", test_forward_already_done);
     run("forward_attempt_cancelled", test_forward_attempt_cancelled);
     run("forward_attempt_success", test_forward_attempt_success);
+    run("forward_plain_await", test_forward_plain_await);
     run("forward_revocation", test_forward_revocation);
     run("forward_api", test_forward_api);
     run("forward_deep_chain", test_forward_deep_chain);

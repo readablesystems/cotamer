@@ -254,7 +254,9 @@ bool task_promise_base::resolve() {
             if (home_ != driver::current.get()) {
                 throw cotamer_error(cotamer_errc::cross_driver_await);
             }
+            in_resolve_ = true;
             handle();
+            in_resolve_ = false;
         }
     }
 }
