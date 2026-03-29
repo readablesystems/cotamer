@@ -2078,6 +2078,63 @@ cot::task<> test_forward_detach() {
     std::cerr << "test_forward_detach: ok\n";
 }
 
+// TEST: start() is called before the combinator loop. A lazy task that
+// becomes resolvable (not just done) after start+resume should be found
+// by the combinator on its second iteration, without needing start()
+// to be called again inside the loop.
+cot::task<int> lazy_value(int v) {
+    co_await cot::interest{};
+    co_return v;
+}
+cot::task<> test_start_before_resolve() {
+    // lazy_value suspends at interest{}. race starts it before the loop.
+    // On the first iteration, lazy_value hasn't resumed yet (interest just
+    // schedules it), so immediate() wins via find_resolved. This verifies
+    // that start() happened (lazy_value would never complete without it).
+    auto v = co_await cot::race(lazy_value(10), immediate());
+    assert(v == 42);
+    // The critical scenario: a lazy task modifies global state after
+    // interest{}, and code between creating the combinator and co_awaiting
+    // it depends on that state change. If start() happens after resolve{},
+    // the combinator suspends at resolve{} (no awaiter yet) before starting
+    // the lazy task, so the state change never happens → deadlock.
+    cot::event ready;
+    auto lazy_setup = [&]() -> cot::task<int> {
+        co_await cot::interest{};
+        ready.trigger();
+        co_await cot::after(1h);
+        co_return 99;
+    };
+    auto slow = []() -> cot::task<int> {
+        co_await cot::after(100h);
+        co_return 0;
+    };
+    auto raced = cot::race(lazy_setup(), slow());
+    co_await ready;
+    auto v2 = co_await raced;
+    assert(v2 == 99);
+    std::cerr << "test_start_before_resolve: ok\n";
+}
+
+// TEST: attempt needs co_await resolve{} so outer combinators can revoke it.
+// Without resolve{} in attempt, both attempts would drive their recv() to
+// completion (dequeuing both messages) before first could intervene.
+cot::task<> test_attempt_needs_resolve() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    auto result = co_await cot::first(
+        cot::attempt(p.recv(), cot::after(10h)),
+        cot::attempt(p.recv(), cot::after(10h))
+    );
+    // first should only let one attempt complete; the other is revoked
+    auto v = (result.index() == 0) ? *std::get<0>(result) : *std::get<1>(result);
+    assert(v == 1 || v == 2);
+    // one message must remain unconsumed
+    assert(p.mq.size() == 1);
+    std::cerr << "test_attempt_needs_resolve: ok\n";
+}
+
 // TEST: empty tasks (default-constructed, no coroutine) are safe to examine
 cot::task<> test_empty_task() {
     cot::task<int> t;
@@ -2183,6 +2240,8 @@ int main(int argc, char* argv[]) {
     run("race_last_wins", test_race_last_wins);
     run("race_single", test_race_single);
     run("race_zero", test_race_zero);
+    run("start_before_resolve", test_start_before_resolve);
+    run("attempt_needs_resolve", test_attempt_needs_resolve);
     run("empty_task", test_empty_task);
     run("race_void", test_race_void);
     run("first_event_wins", test_first_event_wins);
