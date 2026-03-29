@@ -169,7 +169,7 @@ struct task_promise_base {
     inline std::coroutine_handle<> base_handle() {
         return std::coroutine_handle<task_promise_base>::from_promise(*this);
     }
-    inline constexpr bool active_awaiter() const noexcept {
+    inline constexpr task_promise_base* active_awaiter() const noexcept {
         auto* a = awaiter_;
         while (a && a->forward_) {
             a = a->awaiter_;
@@ -287,7 +287,6 @@ struct task_awaiter {
     }
     // - Resume this coroutine, returning the `co_await` expression’s result
     T await_resume() {
-        awaitee_.promise().forward_ = nullptr;
         return awaitee_.promise().result();
     }
 
@@ -994,6 +993,7 @@ inline void task_promise_base::set_awaiter(task_promise_base& awaiter) {
         throw cotamer_error(cotamer_errc::detached_await);
     }
     awaiter_ = &awaiter;
+    awaiter.forward_ = nullptr;
     if (interest_) {
         interest_->trigger();
     }
@@ -1638,8 +1638,10 @@ task<std::variant<task_return_type_t<Ts>...>> first(Ts... ts) {
     }
 }
 
-inline task<> race() {
-    return task<>();
+template <typename T>
+inline task<T> race() {
+    co_await event(); // never resumes
+    throw cotamer_error(cotamer_errc::unreachable);
 }
 
 template <typename T>

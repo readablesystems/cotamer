@@ -141,7 +141,6 @@ template <typename... Es>
 
 // first(task...) - run several tasks and return the result of the first one
 // that completes (wrapped in variant).
-
 template <typename T> struct task_return_type {};
 template <typename T> struct task_return_type<task<T>> { using type = T; };
 template <> struct task_return_type<task<void>> { using type = std::monostate; };
@@ -155,11 +154,10 @@ template <typename... Ts>
 // of the first one that completes (unwrapped).
 template <typename T, typename... Ts>
 [[nodiscard]] task<T> race(task<T>, Ts... rest);
-[[nodiscard]] inline task<> race();
+template <typename T>
+[[nodiscard]] task<T> race();
 
-// forward(task) — marks a task so that co_await sets up a forwarding link
-// instead of a continuation.  Use as `co_return co_await forward(t)` to make
-// a wrapper coroutine transparent to race/first/attempt resolution.
+// forward(t) — forward t’s resolution points into the current coroutine.
 template <typename T>
 task<T> forward(task<T> t);
 
@@ -526,7 +524,8 @@ private:
 
 enum class cotamer_errc {
     cross_driver_await = 1,
-    detached_await = 2
+    detached_await = 2,
+    unreachable = 3
 };
 
 struct cotamer_error : std::logic_error {

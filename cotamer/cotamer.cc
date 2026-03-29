@@ -237,9 +237,8 @@ bool task_promise_base::resolve() {
             return true;
         }
         if (!resolving_) {
-            // not resolved, or resolution was revoked; clear stale resolution
-            // event if any
-            resolution_ = event_handle(nullptr);
+            // unresolved or resolution revoked; clear stale resolution event
+            resolution_ = nullptr;
             return false;
         }
         if (forwarded_) {
@@ -334,6 +333,8 @@ constexpr const char* cotamer_error::message(cotamer_errc ec) noexcept {
         return "cannot co_await a task created on a different driver";
     case cotamer_errc::detached_await:
         return "cannot co_await a detached task";
+    case cotamer_errc::unreachable:
+        return "executing unreachable code";
     default:
         return "unknown cotamer error";
     }
