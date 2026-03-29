@@ -150,10 +150,12 @@ struct task_promise_base {
     bool detached_ = false;                // is this task detached?
     bool has_interest_ = false;            // has interest been requested?
     bool resolving_ = false;               // is task awaiting resolve{}?
+    bool forwarded_ = false;               // is task subject to cot::forward()?
     driver* home_;                         // coroutine home driver
     event_handle resolution_;              // resolution event (lazily created)
     event_handle interest_;                // interest event (lazily created)
-    task_promise_base* awaiter_ = nullptr; // coroutine awaing me, if any
+    task_promise_base* awaiter_ = nullptr; // coroutine awaiting me, if any
+    task_promise_base* forward_ = nullptr; // awaited forward coroutine, if any
 
     inline task_promise_base()
         : home_(driver::current.get()) {
@@ -163,14 +165,14 @@ struct task_promise_base {
         COTAMER_STAT_INCR(promises_destroyed);
     }
 
+    inline std::coroutine_handle<> base_handle() {
+        return std::coroutine_handle<task_promise_base>::from_promise(*this);
+    }
     inline event_handle& make_interest();
     inline event resolution();
     bool resolve();
     inline void set_awaiter(task_promise_base&);
-    template <typename X>
-    inline std::coroutine_handle<> resolution_point(std::coroutine_handle<X>);
-    template <typename X>
-    inline std::coroutine_handle<> complete(std::coroutine_handle<X>);
+    inline void resolution_point();
 };
 
 
@@ -276,6 +278,7 @@ struct task_awaiter {
     }
     // - Resume this coroutine, returning the `co_await` expression’s result
     T await_resume() {
+        awaitee_.promise().forward_ = nullptr;
         return awaitee_.promise().result();
     }
 
@@ -289,9 +292,7 @@ struct task_final_awaiter {
         return false;
     }
     template <typename T>
-    inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
-        return self.promise().complete(self);
-    }
+    inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept;
     void await_resume() noexcept {
     }
 };
@@ -313,7 +314,16 @@ struct task_resolution_awaiter {
     }
     template <typename T>
     inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
-        return self.promise().resolution_point(self);
+        auto& p = self.promise();
+        if (p.awaiter_ && !p.awaiter_->forward_) {
+            // someone wants our value already, so keep running
+            return self;
+        }
+        p.resolution_point();
+        if (p.detached_) {
+            self.destroy();
+        }
+        return std::noop_coroutine();
     }
     void await_resume() noexcept {
     }
@@ -971,46 +981,45 @@ inline event task_promise_base::resolution() {
 inline void task_promise_base::set_awaiter(task_promise_base& awaiter) {
     if (home_ != awaiter.home_) {
         throw cotamer_error(cotamer_errc::cross_driver_await);
+    } else if (detached_) {
+        throw cotamer_error(cotamer_errc::detached_await);
     }
     awaiter_ = &awaiter;
     if (interest_) {
         interest_->trigger();
     }
+    if (forwarded_) {
+        forwarded_ = false;
+        awaiter.forward_ = this;
+        awaiter.resolving_ = resolving_;
+    }
 }
 
-template <typename X>
-inline std::coroutine_handle<> task_promise_base::resolution_point(std::coroutine_handle<X> self) {
-    if (awaiter_) {
-        // someone wants our value already, so keep running
-        return self;
-    }
+inline void task_promise_base::resolution_point() {
     resolving_ = true;
     if (resolution_) {
         resolution_->trigger();
     }
-    if (detached_) {
-        self.destroy();
+    if (awaiter_ && awaiter_->forward_) {
+        awaiter_->resolution_point();
     }
-    return std::noop_coroutine();
 }
 
-template <typename X>
-inline std::coroutine_handle<> task_promise_base::complete(std::coroutine_handle<X> self) {
+template <typename T>
+inline std::coroutine_handle<> task_final_awaiter::await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
+    auto& p = self.promise();
     // trigger resolution event, since the task is done
-    resolving_ = true;
-    if (resolution_) {
-        resolution_->trigger();
+    p.resolution_point();
+    // if we have a non-forwarded awaiter, resume it directly
+    if (p.awaiter_ && !p.awaiter_->forward_) {
+        return p.awaiter_->base_handle();
     }
-    // if another coroutine wants this task's result, resume it directly
-    // (cross-driver awaits are rejected at co_await time, so the continuation
-    // is always on the same driver)
-    if (awaiter_) {
-        return std::coroutine_handle<task_promise_base>::from_promise(
-            *std::exchange(awaiter_, nullptr)
-        );
+    // propagate completion to forwarding outer task
+    if (p.awaiter_) {
+        p.awaiter_->resolution_point();
     }
     // destroy if detached and then return to event loop
-    if (detached_) {
+    if (p.detached_) {
         self.destroy();
     }
     return std::noop_coroutine();
@@ -1627,9 +1636,15 @@ inline task<> race() {
     return task<>();
 }
 
+template <typename T>
+inline task<T> race(task<T> t) {
+    return t;
+}
+
 template <typename T, typename... Trest>
 task<T> race(task<T> t0, Trest... ts) {
     while (true) {
+        co_await resolve{};
         size_t ridx = detail::find_resolved(0, std::forward<task<T>>(t0), std::forward<Trest>(ts)...);
         if (ridx != 1 + sizeof...(ts)) {
             co_return co_await detail::complete_race<0>(ridx, t0, std::forward<Trest&>(ts)...);
@@ -1643,6 +1658,7 @@ task<T> race(task<T> t0, Trest... ts) {
 template <typename... Trest>
 task<> race(event e0, Trest... ts) {
     while (true) {
+        co_await resolve{};
         size_t ridx = detail::find_resolved(0, std::forward<event>(e0), std::forward<Trest>(ts)...);
         if (ridx != 1 + sizeof...(ts)) {
             co_return co_await detail::complete_race<0>(ridx, e0, std::forward<Trest&>(ts)...);
@@ -1654,6 +1670,9 @@ task<> race(event e0, Trest... ts) {
 
 template <typename T>
 task<T> forward(task<T> t) {
+    if (!t.done()) {
+        t.handle_.promise().forwarded_ = true;
+    }
     return t;
 }
 

@@ -108,6 +108,7 @@ public:
 
 private:
     friend struct detail::task_promise<T>;
+    friend task<T> forward<>(task<T>);
     handle_type handle_;
 };
 
@@ -524,7 +525,8 @@ private:
 // Error codes and exception type.
 
 enum class cotamer_errc {
-    cross_driver_await = 1
+    cross_driver_await = 1,
+    detached_await = 2
 };
 
 struct cotamer_error : std::logic_error {
