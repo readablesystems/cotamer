@@ -1842,6 +1842,95 @@ cot::task<> test_forward_triggers_resolution() {
     test_incomplete = false;
 }
 
+// TEST: forward resolution propagates when no active awaiter (else-if branch)
+// Inner resolves, is forwarded to main, but nobody co_awaits main yet.
+// Resolution should propagate up via resolution_point().
+cot::task<> test_forward_resolution_no_active_awaiter() {
+    test_incomplete = true;
+    auto resolve_then_immediate = []() -> cot::task<int> {
+        co_await cot::resolve{};
+        co_return co_await immediate();
+    };
+    // main forwards inner; inner hits resolve{} eagerly before anyone awaits main
+    auto mainf = [&]() -> cot::task<int> {
+        co_return co_await cot::forward(resolve_then_immediate());
+    };
+    auto main = mainf();
+    // main is not yet co_awaited; inner resolved, forward link exists,
+    // but no active awaiter. resolution should have propagated.
+    assert(main.resolvable());
+    auto re = main.resolution();
+    assert(re.triggered());
+    // now co_await to drive to completion
+    auto result = co_await main;
+    assert(result == 42);
+    std::cerr << "test_forward_resolution_no_active_awaiter: ok\n";
+    test_incomplete = false;
+}
+
+// TEST: resolution event obtained before forward link, then forward resolves
+cot::task<> test_forward_resolution_event_before_link() {
+    test_incomplete = true;
+    port p;
+    auto mainf = [&]() -> cot::task<int> {
+        co_return co_await cot::forward(p.recv());
+    };
+    auto main = mainf();
+    // get resolution event before inner has resolved
+    auto re = main.resolution();
+    assert(!re.triggered());
+    // deliver a message and yield so recv runs and hits resolve{}
+    p.enq(99);
+    co_await cot::asap();
+    // resolution should have propagated through the forward chain
+    assert(re.triggered());
+    auto result = co_await main;
+    assert(result == 99);
+    std::cerr << "test_forward_resolution_event_before_link: ok\n";
+    test_incomplete = false;
+}
+
+// TEST: multiple sequential resolve points through forward
+// After driving past the first resolve point, the task waits on a timer,
+// then hits a second resolve point. Verify that both resolution events
+// fire and that resolve() drives the task to completion.
+cot::task<> test_forward_multiple_resolve_points() {
+    test_incomplete = true;
+    int resolve_count = 0;
+    auto multi_resolve = [&]() -> cot::task<int> {
+        co_await cot::resolve{};
+        ++resolve_count;
+        co_await cot::after(1h);
+        co_await cot::resolve{};
+        ++resolve_count;
+        co_return 42;
+    };
+    auto mainf = [&]() -> cot::task<int> {
+        co_return co_await cot::forward(multi_resolve());
+    };
+    auto main = mainf();
+    // first resolve point reached
+    assert(main.resolvable());
+    // drive past first resolve
+    main.resolve();
+    assert(resolve_count == 1);
+    // task is now suspended on after(1h); not resolvable
+    assert(!main.resolvable());
+    assert(!main.done());
+    // wait for second resolve (timer fires, then second resolve{} is hit)
+    co_await main.resolution();
+    assert(main.resolvable());
+    assert(resolve_count == 1);
+    // drive past second resolve — task completes
+    assert(main.resolve());
+    assert(resolve_count == 2);
+    assert(main.done());
+    auto result = co_await main;
+    assert(result == 42);
+    std::cerr << "test_forward_multiple_resolve_points: ok\n";
+    test_incomplete = false;
+}
+
 // TEST: after prepare_awaiter drives a forwarded inner past its first resolve
 // point (via the active_awaiter path), inner's resolving_ and resolution_
 // must be cleared. Otherwise, when inner hits a second resolve point, the
@@ -2352,6 +2441,9 @@ int main(int argc, char* argv[]) {
     run("forward_plain_await", test_forward_plain_await);
     run("forward_then_normal_await", test_forward_then_normal_await);
     run("forward_triggers_resolution", test_forward_triggers_resolution);
+    run("forward_resolution_no_active_awaiter", test_forward_resolution_no_active_awaiter);
+    run("forward_resolution_event_before_link", test_forward_resolution_event_before_link);
+    run("forward_multiple_resolve_points", test_forward_multiple_resolve_points);
     run("forward_stale_resolving", test_forward_stale_resolving);
     run("forward_revocation", test_forward_revocation);
     run("forward_api", test_forward_api);
