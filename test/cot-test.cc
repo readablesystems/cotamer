@@ -6,10 +6,12 @@
 
 namespace cot = cotamer;
 using namespace std::chrono_literals;
+bool test_incomplete = false;
 
+// soft_assert - a version of `assert` that does not call abort()
+// To be used temporarily on tests that are known to fail.
 #define soft_assert(x) soft_assert_f(x, #x, __func__, __FILE__, __LINE__);
 static bool soft_assert_failed = false;
-
 void soft_assert_f(bool x, const char* description, const char* func, const char* file, int line) {
     if (!x) {
         std::cerr << "Soft assertion failed: (" << description << "), function " << func << ", file " << file << ", line " << line << ".\n";
@@ -1798,12 +1800,14 @@ cot::task<int> forward_then_normal() {
     co_return x + y;
 }
 cot::task<> test_forward_then_normal_await() {
+    test_incomplete = true;
     auto start = cot::now();
     auto result = co_await cot::attempt(forward_then_normal(), cot::after(10h));
     assert(result.has_value());
     assert(*result == 154);
     assert(cot::now() - start >= 2h && cot::now() - start < 3h);
     std::cerr << "test_forward_then_normal_await: ok\n";
+    test_incomplete = false;
 }
 
 // TEST: forward + resolution revocation — loser doesn't consume
@@ -2176,7 +2180,7 @@ int main(int argc, char* argv[]) {
         soft_assert_failed = false;
         auto t = fn();
         cot::loop();
-        assert(t.done() && "test did not complete");
+        assert(t.done() && !test_incomplete && "test did not complete");
     };
 
     run("original", []() -> cot::task<> {
