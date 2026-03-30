@@ -63,6 +63,11 @@ add_executable(cot-manual
     $<TARGET_OBJECTS:Cotamer>
 )
 
+add_executable(cot-benchmark
+    test/cot-benchmark.cc
+    $<TARGET_OBJECTS:Cotamer>
+)
+
 add_executable(ctconsensus
     examples/ctconsensus.cc
     $<TARGET_OBJECTS:Cotamer>
