@@ -4,6 +4,9 @@
 #include <memory>
 #include <stdexcept>
 
+// Many of the tests in this file were written with, or by, Claude Code.
+// Thanks, Claude Code!
+
 namespace cot = cotamer;
 using namespace std::chrono_literals;
 bool test_incomplete = false;
@@ -2026,6 +2029,121 @@ cot::task<> test_forward_deep_chain() {
     std::cerr << "test_forward_deep_chain: ok\n";
 }
 
+// TEST: deep forward chain + resolution API — resolution()/resolvable()/resolve()
+// must work through a double-forward chain (recv3 = forward(forward(recv))).
+// active_awaiter() must walk two forward_ pointers to find the real awaiter.
+cot::task<> test_forward_deep_chain_resolution() {
+    test_incomplete = true;
+    port p;
+    auto t = p.recv3();
+    assert(!t.done());
+    assert(!t.resolvable());
+    assert(!t.resolve());
+
+    p.enq(7);
+    // resolution must propagate through two forward links
+    co_await t.resolution();
+    assert(!t.done());
+    assert(t.resolvable());
+    // resolve() must walk active_awaiter() through two forward_ pointers
+    assert(t.resolve());
+    assert(t.done());
+    auto m = co_await t;
+    assert(m == 7);
+    std::cerr << "test_forward_deep_chain_resolution: ok\n";
+    test_incomplete = false;
+}
+
+// TEST: resolution event obtained on deep forward chain, then task destroyed
+// before inner resolves. The resolution event must not fire, no crash, and
+// a concurrent observer holding the event must time out.
+cot::task<> test_forward_deep_resolution_vs_destroy() {
+    test_incomplete = true;
+    port p;
+
+    // Part 1: destroy before resolve, resolution event must not fire
+    {
+        auto t = p.recv3();
+        auto re = t.resolution();
+        assert(!re.triggered());
+        t.destroy();
+        assert(!re.triggered());
+    }
+
+    // Part 2: detach at resolution point through deep chain — message
+    // must not be consumed (extends test_forward_detach to double-forward)
+    {
+        p.enq(1);
+        auto t = p.recv3();
+        co_await t.resolution();
+        assert(t.resolvable());
+        t.detach();
+        assert(p.mq.size() == 1);
+        assert(p.mq.front() == 1);
+        p.mq.clear();
+    }
+
+    // Part 3: concurrent observer holds resolution event; task is destroyed
+    // via timer. Observer must time out, not hang.
+    {
+        auto t = p.recv3();
+        auto re = t.resolution();
+        auto destroyer = [&]() -> cot::task<> {
+            co_await cot::after(30min);
+            t.destroy();
+        };
+        destroyer().detach();
+        auto wait_for_re = [&]() -> cot::task<> {
+            co_await re;
+        };
+        auto obs_result = co_await cot::attempt(wait_for_re(), cot::after(1h));
+        // should timeout at 1h since task was destroyed at 30min
+        assert(!obs_result.has_value());
+    }
+
+    std::cerr << "test_forward_deep_resolution_vs_destroy: ok\n";
+    test_incomplete = false;
+}
+
+// TEST: all() with resolution events from forwarded tasks at different depths.
+// Two forwarded tasks (recv2 and recv3) resolve at different times. Using
+// all(t1.resolution(), t2.resolution()) must wait for both resolution events
+// to propagate through their respective forward chains.
+cot::task<> test_forward_all_resolution() {
+    test_incomplete = true;
+    port p1, p2;
+    auto t1 = p1.recv2();  // single forward
+    auto t2 = p2.recv3();  // double forward
+
+    // obtain resolution events before any messages arrive
+    auto both = cot::all(t1.resolution(), t2.resolution());
+
+    // deliver messages at different times
+    auto deliverer = [&]() -> cot::task<> {
+        p1.enq(10);
+        co_await cot::after(1h);
+        p2.enq(20);
+    };
+    deliverer().detach();
+
+    auto start = cot::now();
+    co_await both;
+    // all() must not fire until the second message propagates through
+    // the double-forward chain at 1h
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+
+    assert(t1.resolvable());
+    assert(t2.resolvable());
+    assert(t1.resolve());
+    assert(t2.resolve());
+    auto v1 = co_await t1;
+    auto v2 = co_await t2;
+    assert(v1 == 10);
+    assert(v2 == 20);
+    std::cerr << "test_forward_all_resolution: ok\n";
+    test_incomplete = false;
+}
+
 // TEST: forward + void task
 cot::task<> test_forward_void() {
     int count = 0;
@@ -2448,6 +2566,9 @@ int main(int argc, char* argv[]) {
     run("forward_revocation", test_forward_revocation);
     run("forward_api", test_forward_api);
     run("forward_deep_chain", test_forward_deep_chain);
+    run("forward_deep_chain_resolution", test_forward_deep_chain_resolution);
+    run("forward_deep_resolution_vs_destroy", test_forward_deep_resolution_vs_destroy);
+    run("forward_all_resolution", test_forward_all_resolution);
     run("forward_void", test_forward_void);
     run("resolve_no_propagate_without_forward", test_resolve_no_propagate_without_forward);
     run("resolution_race_transparent", test_resolution_race_transparent);
