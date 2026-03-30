@@ -1810,6 +1810,38 @@ cot::task<> test_forward_then_normal_await() {
     test_incomplete = false;
 }
 
+// TEST: awaiting a resolved forward() triggers resolution event
+cot::task<> test_forward_triggers_resolution() {
+    test_incomplete = true;
+    auto resolve_then_immediate = [&]() -> cot::task<int> {
+        co_await cot::describe("resolve_then_immediate");
+        co_await cot::resolve{};
+        co_return co_await immediate();
+    };
+    cot::event e1, e2;
+    auto mainf = [&]() -> cot::task<int> {
+        co_await cot::describe("main");
+        co_await e1;
+        auto i = co_await cot::forward(resolve_then_immediate());
+        co_await e2;
+        co_return i;
+    };
+    auto main = mainf();
+    auto resolver = [&]() -> cot::task<> {
+        co_await cot::describe("resolver");
+        auto re = main.resolution();
+        e1.trigger();
+        co_await re;
+        e2.trigger();
+    };
+    resolver().detach();
+    cot::driver_guard guard;
+    auto result = co_await main;
+    assert(result == 42);
+    std::cerr << "test_forward_triggers_resolution: ok\n";
+    test_incomplete = false;
+}
+
 // TEST: forward + resolution revocation — loser doesn't consume
 cot::task<> test_forward_revocation() {
     port p;
@@ -2276,6 +2308,7 @@ int main(int argc, char* argv[]) {
     run("forward_attempt_success", test_forward_attempt_success);
     run("forward_plain_await", test_forward_plain_await);
     run("forward_then_normal_await", test_forward_then_normal_await);
+    run("forward_triggers_resolution", test_forward_triggers_resolution);
     run("forward_revocation", test_forward_revocation);
     run("forward_api", test_forward_api);
     run("forward_deep_chain", test_forward_deep_chain);
