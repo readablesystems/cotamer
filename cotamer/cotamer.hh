@@ -551,6 +551,10 @@ struct statistics {
 extern statistics stats;
 #endif
 
+// co_await cot::describe(str) - associate str with current task promise
+// (noop unless COTAMER_STATS)
+inline detail::describe_task_awaiter describe(const std::string&);
+
 
 // Metaprogramming.
 

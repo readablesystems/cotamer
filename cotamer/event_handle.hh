@@ -23,6 +23,7 @@ template <typename T, bool shared> struct task_mutex_event_awaiter;
 struct task_resolution_awaiter;
 struct task_final_awaiter;
 struct interest_event_awaiter;
+struct describe_task_awaiter;
 
 class event_handle {
 public:

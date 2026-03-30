@@ -157,6 +157,9 @@ struct task_promise_base {
     event_handle interest_;                // interest event (lazily created)
     task_promise_base* awaiter_ = nullptr; // coroutine awaiting me, if any
     task_promise_base* forward_ = nullptr; // awaited forward coroutine, if any
+#if COTAMER_STATS
+    std::string description_;
+#endif
 
     inline task_promise_base()
         : home_(driver::current.get()) {
@@ -347,6 +350,22 @@ inline task_resolution_awaiter task_promise<T>::await_transform(struct resolve) 
 inline task_resolution_awaiter task_promise<void>::await_transform(struct resolve) {
     return task_resolution_awaiter{};
 }
+
+
+// Awaiter for `cot::describe{}`.
+struct describe_task_awaiter {
+    bool await_ready() noexcept { return false; }
+    template <typename T>
+    inline std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<T>> self) noexcept {
+#if COTAMER_STATS
+        self.promise().description_ = description_;
+#endif
+        return self;
+    }
+    void await_resume() noexcept { }
+
+    std::string description_;
+};
 
 
 // make_event: converts various types into events.
@@ -2189,6 +2208,13 @@ inline task_mutex_event_awaiter<T, false> task_promise<T>::await_transform(mutex
 inline task_mutex_event_awaiter<void, false> task_promise<void>::await_transform(mutex& m) {
     return await_transform(m.lock());
 }
+}
+
+
+// Statistics
+
+inline detail::describe_task_awaiter describe(const std::string& description) {
+    return detail::describe_task_awaiter{description};
 }
 
 }
