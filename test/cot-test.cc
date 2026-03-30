@@ -1842,6 +1842,49 @@ cot::task<> test_forward_triggers_resolution() {
     test_incomplete = false;
 }
 
+// TEST: after prepare_awaiter drives a forwarded inner past its first resolve
+// point (via the active_awaiter path), inner's resolving_ and resolution_
+// must be cleared. Otherwise, when inner hits a second resolve point, the
+// stale resolution_ (already triggered) swallows the notification and
+// anyone awaiting the second resolution event hangs.
+cot::task<> test_forward_stale_resolving() {
+    test_incomplete = true;
+    auto start = cot::now();
+    cot::system_time_point resolved1, resolved2;
+    auto resolve_then_hour_f = [&]() -> cot::task<int> {
+        co_await cot::describe("resolve_then_hour");
+        co_await cot::resolve{};
+        resolved1 = cot::now();
+        co_await cot::after(1h);
+        co_return 42;
+    };
+    auto resolve_then_hour = cot::forward(resolve_then_hour_f());
+
+    auto resolved_at_30m_f = [&]() -> cot::task<> {
+        co_await cot::describe("30m_delayed");
+        co_await cot::after(30min);
+        co_await resolve_then_hour.resolution();
+        resolved2 = cot::now();
+    };
+    resolved_at_30m_f().detach();
+
+    auto forwarder_f = [&]() -> cot::task<int> {
+        co_await cot::describe("forwarder");
+        co_await cot::resolve{};
+        co_await cot::after(1ms);
+        co_return co_await resolve_then_hour;
+    };
+    int x = co_await forwarder_f();
+
+    assert(x == 42);
+    assert(cot::now() - start >= 1h && cot::now() - start < 70min);
+    assert(resolved1 - start < 1s);
+    co_await cot::after(1s);
+    assert(resolved2 - start >= 1h && cot::now() - start < 70min);
+    std::cerr << "test_forward_stale_resolving: ok\n";
+    test_incomplete = false;
+}
+
 // TEST: forward + resolution revocation — loser doesn't consume
 cot::task<> test_forward_revocation() {
     port p;
@@ -2309,6 +2352,7 @@ int main(int argc, char* argv[]) {
     run("forward_plain_await", test_forward_plain_await);
     run("forward_then_normal_await", test_forward_then_normal_await);
     run("forward_triggers_resolution", test_forward_triggers_resolution);
+    run("forward_stale_resolving", test_forward_stale_resolving);
     run("forward_revocation", test_forward_revocation);
     run("forward_api", test_forward_api);
     run("forward_deep_chain", test_forward_deep_chain);
