@@ -180,7 +180,8 @@ struct task_promise_base {
     inline event_handle& make_interest();
     inline event resolution();
     bool resolve();
-    inline void set_awaiter(task_promise_base&);
+    inline void prepare_awaiter(task_promise_base&);
+    inline void clear_awaiter();
     inline void resolution_point();
 };
 
@@ -282,11 +283,12 @@ struct task_awaiter {
     template <typename U>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiter) {
         static_assert(alignof(task_promise<U>) == alignof(task_promise_base));
-        awaitee_.promise().set_awaiter(awaiter.promise());
+        awaitee_.promise().prepare_awaiter(awaiter.promise());
         return std::noop_coroutine();
     }
     // - Resume this coroutine, returning the `co_await` expression’s result
     T await_resume() {
+        awaitee_.promise().clear_awaiter();
         return awaitee_.promise().result();
     }
 
@@ -986,21 +988,28 @@ inline event task_promise_base::resolution() {
     return event(resolution_);
 }
 
-inline void task_promise_base::set_awaiter(task_promise_base& awaiter) {
+inline void task_promise_base::prepare_awaiter(task_promise_base& awaiter) {
     if (home_ != awaiter.home_) {
         throw cotamer_error(cotamer_errc::cross_driver_await);
     } else if (detached_) {
         throw cotamer_error(cotamer_errc::detached_await);
     }
     awaiter_ = &awaiter;
-    awaiter.forward_ = nullptr;
-    if (interest_) {
-        interest_->trigger();
-    }
     if (forwarded_) {
         forwarded_ = false;
         awaiter.forward_ = this;
         awaiter.resolving_ = resolving_;
+    }
+    if (interest_) {
+        interest_->trigger();
+    }
+}
+
+inline void task_promise_base::clear_awaiter() {
+    if (awaiter_ && awaiter_->forward_) {
+        awaiter_->forward_ = nullptr;
+        awaiter_->resolving_ = false;
+        awaiter_->resolution_ = nullptr;
     }
 }
 
