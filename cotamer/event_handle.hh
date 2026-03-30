@@ -38,6 +38,7 @@ public:
     inline ~event_handle();
 
     explicit operator bool() const noexcept { return eb_ != nullptr; }
+    inline bool triggered() const noexcept;
     inline bool empty() const noexcept;
     inline bool idle() const noexcept;
     event_body* get() const noexcept { return eb_; }

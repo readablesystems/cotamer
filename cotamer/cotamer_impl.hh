@@ -823,8 +823,16 @@ inline void event_handle::swap(event_handle& x) noexcept {
     x.eb_ = tmp;
 }
 
+inline bool event_handle::triggered() const noexcept {
+    return !eb_ || eb_->triggered();
+}
+
 inline bool event_handle::empty() const noexcept {
     return !eb_ || eb_->empty();
+}
+
+inline bool event_handle::idle() const noexcept {
+    return !eb_ || eb_->idle();
 }
 
 
@@ -843,7 +851,7 @@ struct task_event_awaiter {
         }
     }
     bool await_ready() noexcept {
-        return !eh_ || eh_->triggered();
+        return eh_.triggered();
     }
     bool await_suspend(std::coroutine_handle<task_promise<T>> awaiting) noexcept {
         event_body* eb = eh_.get();
@@ -1074,16 +1082,16 @@ inline event::event(detail::event_handle ev)
 inline event::event(std::nullptr_t) {
 }
 
+inline bool event::triggered() const noexcept {
+    return ep_.triggered();
+}
+
 inline bool event::empty() const noexcept {
-    return !ep_ || ep_->empty();
+    return ep_.empty();
 }
 
 inline bool event::idle() const noexcept {
-    return !ep_ || ep_->idle();
-}
-
-inline bool event::triggered() const noexcept {
-    return !ep_ || ep_->triggered();
+    return ep_.idle();
 }
 
 inline bool event::trigger() {
@@ -1091,7 +1099,7 @@ inline bool event::trigger() {
 }
 
 inline event& event::arm() {
-    if (!ep_ || ep_->triggered()) {
+    if (ep_.triggered()) {
         std::exchange(ep_, detail::event_handle{new detail::event_body});
     }
     return *this;
