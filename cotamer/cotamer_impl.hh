@@ -488,9 +488,7 @@ struct event_body {
         flags_.store(flags, std::memory_order_release);
     }
 
-    template <typename T>
-    inline void add_listener_unlock(std::coroutine_handle<task_promise<T>> coroutine,
-                                    uint32_t flags) {
+    inline void add_listener_unlock(std::coroutine_handle<> coroutine, uint32_t flags) {
         add_listener_unlock(reinterpret_cast<uintptr_t>(coroutine.address()), flags);
     }
 
@@ -498,8 +496,7 @@ struct event_body {
         add_listener_unlock(reinterpret_cast<uintptr_t>(qb) | lf_quorum, flags);
     }
 
-    template <typename T>
-    inline void remove_listener(std::coroutine_handle<task_promise<T>> coroutine) {
+    inline void remove_listener(std::coroutine_handle<> coroutine) {
         remove_listener_unlock(reinterpret_cast<uintptr_t>(coroutine.address()), lock());
     }
 
