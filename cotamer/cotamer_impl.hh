@@ -191,7 +191,7 @@ struct task_promise_base {
     inline event_handle& make_interest();
     inline event resolution();
     bool resolve();
-    inline void prepare_awaiter(task_promise_base&);
+    inline std::coroutine_handle<> prepare_awaiter(task_promise_base&);
     inline void clear_awaiter();
     inline void resolution_point();
 };
@@ -294,8 +294,7 @@ struct task_awaiter {
     template <typename U>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<task_promise<U>> awaiter) {
         static_assert(alignof(task_promise<U>) == alignof(task_promise_base));
-        awaitee_.promise().prepare_awaiter(awaiter.promise());
-        return std::noop_coroutine();
+        return awaitee_.promise().prepare_awaiter(awaiter.promise());
     }
     // - Resume this coroutine, returning the `co_await` expression’s result
     T await_resume() {
@@ -1023,21 +1022,43 @@ inline event task_promise_base::resolution() {
     return event(resolution_);
 }
 
-inline void task_promise_base::prepare_awaiter(task_promise_base& awaiter) {
+// prepare_awaiter - when coroutine `awaiter` calls `co_await awaitee`, we
+// call `awaitee.promise().prepare_awaiter(awaiter.promise())`
+
+inline std::coroutine_handle<> task_promise_base::prepare_awaiter(task_promise_base& awaiter) {
+    // check task compatibility: same driver, awaitee detached
     if (home_ != awaiter.home_) {
         throw cotamer_error(cotamer_errc::cross_driver_await);
     } else if (detached_) {
         throw cotamer_error(cotamer_errc::detached_await);
     }
-    awaiter_ = &awaiter;
-    if (forwarded_) {
-        forwarded_ = false;
-        awaiter.forward_ = this;
-        awaiter.resolving_ = resolving_;
-    }
+    // awaiter is interested in awaitee
     if (interest_) {
         interest_->trigger();
     }
+    // record awaiter in awaitee’s promise
+    awaiter_ = &awaiter;
+    // mark resolution point forwarding
+    if (forwarded_) {
+        forwarded_ = false;
+        awaiter.forward_ = this;
+    }
+    // Awaitee can be resolving only if awaitee is blocked at a resolution
+    // point, but awaitee was subject to cotamer::forward().
+    if (resolving_) {
+        // assert(awaiter.forward_); - this assertion holds
+        if (active_awaiter()) {
+            // Awaitee is being actively awaited → clear resolution point and
+            // execute it
+            resolving_ = false;
+            resolution_ = nullptr;
+            return base_handle();
+        }
+        // Awaitee is not actively awaited → forward resolution point
+        // (for exposure via resolution())
+        awaiter.resolution_point();
+    }
+    return std::noop_coroutine();
 }
 
 inline void task_promise_base::clear_awaiter() {
