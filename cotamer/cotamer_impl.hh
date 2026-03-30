@@ -179,6 +179,14 @@ struct task_promise_base {
         }
         return a;
     }
+    inline std::string description() const {
+#if COTAMER_STATS
+        if (!description_.empty()) {
+            return description_;
+        }
+#endif
+        return std::format("TP{{{:x}}}", reinterpret_cast<uintptr_t>(this));
+    }
 
     inline event_handle& make_interest();
     inline event resolution();
