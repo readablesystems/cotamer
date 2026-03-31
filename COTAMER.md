@@ -133,11 +133,11 @@ co_await cot::any(cot::after(1h), cot::after(10h));
 co_await cot::all(cot::after(1h), cot::after(10h));
 ```
 
-`cotamer::attempt(task, event...)` runs a task with cancellation: if any of
-the `event`s trigger before the task completes, the task is destroyed.
-`co_await attempt(task<T>, ...)` returns a `std::optional<T>`, which either
-contains the return value from the task or `std::nullopt` if the task was
-cancelled. `attempt` is a natural fit for timeouts:
+`cotamer::attempt(task, event...)` runs a task with early exit: if any of the
+`event`s trigger before the `task` completes, the `attempt` task exits early.
+`co_await attempt(task<T>, ...)` returns a `std::optional<T>`, which contains
+the task’s return value if it completed before the events, or `std::nullopt`
+if an event completed first. `attempt` is a natural fit for timeouts:
 
 ```cpp
 auto result = co_await cot::attempt(slow_task(), cot::after(1h));
@@ -151,9 +151,9 @@ if (result) {
 `cotamer::first(task1, task2, ...)` runs tasks concurrently and returns the
 value of the first one to complete. `co_await first(task<T>, task<U>, ...)`
 returns a `std::variant<T, U, ...>`; the `index()` of the returned variant is
-the parameter index of the first task to complete. As soon as one of the task
-arguments completes, the others are cancelled. You can mix tasks and events;
-events (and `task<void>`) are represented in the variant by `std::monostate`.
+the parameter index of the first task to complete. You can mix tasks and
+events; events (and `task<void>`) are represented in the variant by
+`std::monostate`.
 
 ```cpp
 auto result = co_await cot::first(int_task(), string_task());
@@ -170,9 +170,8 @@ the value of the first `task` parameter to complete.
 ## Task lifetime
 
 Coroutine data, such as local variables, is normally tied to the lifetime of
-the corresponding `task<T>` object. When the `task` goes out of scope (or is
-cancelled by `cotamer::attempt`), all data associated with its coroutine is
-destroyed too.
+the corresponding `task<T>` object. When the `task` goes out of scope or is
+destroyed, all data associated with its coroutine is destroyed too.
 
 ```cpp
 cot::task<> printer(int i) {
@@ -210,6 +209,45 @@ int main() {
 // printer(1) began
 // printer(0) completed
 // printer(1) completed
+```
+
+Task combinators can take their task arguments by value or by reference. Tasks
+passed by value are automatically cancelled if they lose the race (because
+their `task` lifetime is tied to the combinator); tasks passed by reference
+are not.
+
+```cpp
+cot::task<> print_after(cot::duration time, int i) {
+    co_await cot::after(time);
+    std::print("print_after({})\n", i);
+}
+
+cot::task<> print_by_value() {
+    co_await cot::first(print_after(10s, 10), print_after(20s, 20));
+    co_await cot::after(40s);
+    // Outputs:
+    // print_after(10)
+    // (The print_after(20) task is destroyed when cot::first returns.)
+}
+
+cot::task<> print_by_reference() {
+    auto p10 = print_after(10s, 10), p20 = print_after(20s, 20);
+    co_await cot::first(p10, p20);
+    co_await cot::after(40s);
+    // Outputs:
+    // print_after(10)
+    // print_after(20)
+    // (The print_after(20) task is passed by reference, so outlives cot::first.)
+}
+
+cot::task<> print_by_move() {
+    // Use `std::move` to get value-passing semantics for a named task.
+    auto p10 = print_after(10s, 10), p20 = print_after(20s, 20);
+    co_await cot::first(std::move(p10), std::move(p20));
+    co_await cot::after(40s);
+    // Outputs:
+    // print_after(10)
+}
 ```
 
 
@@ -428,10 +466,9 @@ cot::task<Item> dequeue_work_logged() {
 ```
 
 Without `cot::forward`, `co_await dequeue_work()` could immediately dequeue a
-work item, making `dequeue_work_logged()` unsafe to use with combinators like
-`cot::first` and `cot::race`. With `cot::forward`, though,
-`dequeue_work_logged()` waits for resolution just like `dequeue_work()` and can
-be safely cancelled.
+work item, making `dequeue_work_logged()` unsafe in combinators. With
+`cot::forward`, though, `dequeue_work_logged()` waits for resolution just like
+`dequeue_work()` and can be safely cancelled.
 
 
 ### Lazy tasks
