@@ -1562,6 +1562,16 @@ struct port {
     cot::task<int> recv3() {
         co_return co_await cot::forward(recv2());
     }
+    cot::task<int> recvd1() {
+        co_await cot::resolve{};
+        co_await cot::asap();
+        co_return co_await cot::forward(recv());
+    }
+    cot::task<int> recvd2() {
+        co_await cot::resolve{};
+        co_await cot::asap();
+        co_return co_await cot::forward(recvd1());
+    }
 };
 
 // TEST: first(recv(), recv()) does not drop messages
@@ -1747,6 +1757,19 @@ cot::task<> test_resolution_multiple() {
     auto v = co_await t;
     assert(v == 99);
     std::cerr << "test_resolution_multiple: ok\n";
+}
+
+// TEST: cot::race() must resolve multiple times
+cot::task<> test_race_resolution_multiple() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    auto result = co_await cot::first(p.recvd2(), cot::after(10h));
+    assert(result.index() == 0);
+    assert(std::get<0>(result) == 1);
+    assert(p.mq.size() == 1);
+    assert(p.mq.front() == 2);
+    std::cerr << "test_race_resolution_multiple: ok\n";
 }
 
 // TEST: forward a task with no resolution point (completes immediately)
@@ -2573,6 +2596,7 @@ int main(int argc, char* argv[]) {
     run("resolution_detach", test_resolution_detach);
     run("resolution_void", test_resolution_void);
     run("resolution_multiple", test_resolution_multiple);
+    run("race_resolution_multiple", test_race_resolution_multiple);
     run("forward_no_resolve", test_forward_no_resolve);
     run("forward_already_done", test_forward_already_done);
     run("forward_attempt_cancelled", test_forward_attempt_cancelled);
