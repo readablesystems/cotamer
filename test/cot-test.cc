@@ -1604,6 +1604,31 @@ cot::task<> test_resolution_race() {
     std::cerr << "test_resolution_race: ok\n";
 }
 
+// TEST: race works with task references
+cot::task<> test_race_reference() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    auto t1 = p.recv(), t2 = p.recv(), t3 = p.recv();
+    auto m1 = co_await cot::race(t1, t2);
+    assert(t1.done());
+    assert(!t2.done());
+    assert(!t3.done());
+    assert(m1 == 1);
+    auto m2 = co_await cot::race(t3, t2);
+    assert(t3.done());
+    assert(!t2.done());
+    assert(m2 == 2);
+    auto m3 = co_await cot::race(t2);
+    assert(t2.done());
+    assert(m3 == 3);
+    auto m3b = co_await t2;
+    auto m3c = co_await t2;
+    assert(m3b == 3 && m3c == 3);
+    std::cerr << "test_race_reference: ok\n";
+}
+
 // TEST: attempt(recv(), timeout) does not drop messages on success
 cot::task<> test_resolution_attempt() {
     port p;
@@ -2587,6 +2612,7 @@ int main(int argc, char* argv[]) {
     run("race_two_events", test_race_two_events);
     run("port_receive", test_port_receive);
     run("resolution_race", test_resolution_race);
+    run("race_reference", test_race_reference);
     run("resolution_attempt", test_resolution_attempt);
     run("resolution_attempt_delayed", test_resolution_attempt_delayed);
     run("resolution_cancelled_before", test_resolution_cancelled_before);

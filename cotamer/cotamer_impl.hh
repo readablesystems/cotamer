@@ -1552,148 +1552,189 @@ inline event all() {
 // combinator helpers
 
 namespace detail {
+namespace races {
 
-// Forward declarations for mixed task/event recursion.
-template <typename... Trest>
-inline size_t find_resolved(size_t offset, event&& e0, Trest&&... trest);
-template <typename Variant, size_t I, typename... Trest>
-inline task<Variant> complete_first(size_t index, event&, Trest&... trest);
-template <size_t I, typename... Trest>
-inline task<> complete_race(size_t index, event&, Trest&... trest);
+template <typename T> struct param {
+    using type = event;
+    using return_type = void;
+    using alternative_type = std::monostate;
 
-template <typename T>
-inline void race_fill_quorum(quorum_event_body* qeb, uint32_t&, task<T>& t) {
-    if (auto p = t.promise_ptr()) {
-        p->awaiter_ = reinterpret_cast<uintptr_t>(qeb) | 1;
+    template <typename E>
+    static event make(E&& e) {
+        return make_event(std::forward<E>(e));
     }
-}
-template <typename E>
-inline void race_fill_quorum(quorum_event_body* qeb, uint32_t& qf, E& e) {
-    qf = qeb->add_member(qf, e);
+    static void resolve(event&) {
+    }
+    static std::monostate resolve_alternative(event&) {
+        return std::monostate{};
+    }
+};
+template <typename T> struct param<task<T>> {
+    using type = task<T>;
+    using return_type = T;
+    using alternative_type = task_alternative_type_t<task<T>>;
+
+    static task<T> make(task<T>&& t) {
+        t.start();
+        return std::move(t);
+    }
+    static return_type resolve(task<T>& t) {
+        return t.promise_ptr()->result();
+    }
+    static alternative_type resolve_alternative(task<T>& t) {
+        if constexpr (std::is_void_v<return_type>) {
+            t.promise_ptr()->result();
+            return std::monostate{};
+        } else {
+            return t.promise_ptr()->result();
+        }
+    }
+};
+template <typename T> struct param<task<T>&> : param<task<T>> {
+    using type = task<T>&;
+
+    static task<T>& make(task<T>& t) {
+        t.start();
+        return t;
+    }
+};
+template <typename T> struct param<task<T>&&> : param<task<T>> { };
+
+
+struct make_quorum_s {
+    template <typename... Ts>
+    event operator()(Ts&... ts) {
+        quorum_event_body* qeb = new quorum_event_body(1);
+        uint32_t qf = quorum_event_body::ef_initial;
+        ((add(qeb, qf, ts)), ...);
+        qeb->seal(qf);
+        return event_handle(qeb);
+    }
+    template <typename T>
+    void add(quorum_event_body* qeb, uint32_t& qf, T& t) {
+        if constexpr (is_task_v<T>) {
+            if (auto p = t.promise_ptr()) {
+                p->awaiter_ = reinterpret_cast<uintptr_t>(qeb) | 1;
+            }
+        } else {
+            qf = qeb->add_member(qf, t);
+        }
+    }
+};
+
+struct find_resolved_s {
+    template <typename... Ts>
+    size_t operator()(Ts&... ts) {
+        size_t n = 0;
+        ((is_resolved(ts) || (++n, false)) || ...);
+        return n;
+    }
+    template <typename T>
+    bool is_resolved(T& t) {
+        if constexpr (is_task_v<T>) {
+            return t.resolve();
+        } else {
+            return t.triggered();
+        }
+    }
+};
+
+struct select_value_s {
+    size_t index;
+
+    template <typename... Ts>
+    auto operator()(Ts&... ts) -> common_task_value_type_t<Ts...> {
+        using V = common_task_value_type_t<Ts...>;
+        return select<V>(0, ts...);
+    }
+    template <typename V, typename T>
+    V select(size_t, T& t) {
+        return races::param<T>::resolve(t);
+    }
+    template <typename V, typename T, typename... Ts>
+    V select(size_t i, T& t, Ts&... ts) {
+        return i == index ? races::param<T>::resolve(t) : select<V>(i + 1, ts...);
+    }
+};
+
+template <typename Variant>
+struct select_variant_s {
+    size_t index;
+
+    template <typename... Ts>
+    Variant operator()(Ts&... ts) {
+        return select<0>(ts...);
+    }
+    template <size_t I, typename T>
+    Variant select(T& t) {
+        return Variant{std::in_place_index<I>, races::param<T>::resolve_alternative(t)};
+    }
+    template <size_t I, typename T, typename... Ts>
+    Variant select(T& t, Ts&... ts) {
+        if (I == index) {
+            return Variant{std::in_place_index<I>, races::param<T>::resolve_alternative(t)};
+        }
+        return select<I + 1>(ts...);
+    }
+};
+
+struct clear_awaiter_s {
+    template <typename... Ts>
+    void operator()(Ts&... ts) {
+        ((clear(ts)), ...);
+    }
+    template <typename T>
+    void clear(T& t) {
+        if constexpr (is_task_v<T>) {
+            if (auto p = t.promise_ptr()) {
+                p->awaiter_ = 0;
+            }
+        }
+    }
+};
+
 }
 
 template <typename... Ts>
-inline event race_make_quorum(Ts&... ts) {
-    quorum_event_body* qeb = new quorum_event_body(1);
-    uint32_t qf = quorum_event_body::ef_initial;
-    ((race_fill_quorum(qeb, qf, std::forward<Ts&>(ts))), ...);
-    qeb->seal(qf);
-    return event_handle(qeb);
-}
+struct race_params {
+    using first_type = typename std::tuple_element<0, std::tuple<Ts...>>::type;
+    std::tuple<Ts...> args;
+    bool awaited = false;
 
-template <typename T>
-inline void race_clear_awaiter(task<T>& t) {
-    if (auto p = t.promise_ptr()) {
-        p->awaiter_ = 0;
+    template <typename... Us>
+    race_params(Us&&... us)
+        : args(races::param<Us&&>::make(std::forward<Us>(us))...) {
     }
-}
-template <typename E>
-inline void race_clear_awaiter(E&&) {
-}
-
-inline size_t find_resolved(size_t offset) {
-    return offset;
-}
-
-template <typename T, typename... Trest>
-inline size_t find_resolved(size_t offset, task<T>&& t0, Trest&&... trest) {
-    if (t0.resolve()) {
-        return offset;
-    }
-    return find_resolved(offset + 1, std::forward<Trest>(trest)...);
-}
-
-template <typename... Trest>
-inline size_t find_resolved(size_t offset, event&& e0, Trest&&... trest) {
-    if (e0.triggered()) {
-        return offset;
-    }
-    return find_resolved(offset + 1, std::forward<Trest>(trest)...);
-}
-
-template <typename T>
-inline void destroy_task(task<T>& t) { t.destroy(); }
-inline void destroy_task(event&) { }
-
-template <typename T>
-inline void start_task(task<T>& t) { t.start(); }
-inline void start_task(event&) { }
-
-template <typename T>
-inline event make_resolution(task<T>& t) { return t.resolution(); }
-inline event make_resolution(event& e) { return e; }
-
-template <typename Variant, size_t I, typename T>
-inline task<Variant> complete_first(size_t, task<T>& t0) {
-    if constexpr (std::is_void_v<T>) {
-        co_await std::move(t0);
-        co_return Variant{std::in_place_index<I>, std::monostate{}};
-    } else {
-        co_return Variant{std::in_place_index<I>, co_await t0};
-    }
-}
-
-template <typename Variant, size_t I>
-inline task<Variant> complete_first(size_t, event&) {
-    co_return Variant{std::in_place_index<I>, std::monostate{}};
-}
-
-template <typename Variant, size_t I, typename T, typename... Trest>
-inline task<Variant> complete_first(size_t index, task<T>& t0, Trest&... trest) {
-    if (index == I) {
-        ((destroy_task(trest)), ...);
-        if constexpr (std::is_void_v<T>) {
-            co_await std::move(t0);
-            co_return Variant{std::in_place_index<I>, std::monostate{}};
-        } else {
-            co_return Variant{std::in_place_index<I>, co_await t0};
+    ~race_params() {
+        if (awaited) {
+            std::apply(races::clear_awaiter_s{}, args);
         }
-    } else {
-        t0.destroy();
-        co_return co_await complete_first<Variant, I+1>(index, std::forward<Trest&>(trest)...);
     }
-}
-
-template <typename Variant, size_t I, typename... Trest>
-inline task<Variant> complete_first(size_t index, event&, Trest&... trest) {
-    if (index == I) {
-        ((destroy_task(trest)), ...);
-        co_return Variant{std::in_place_index<I>, std::monostate{}};
-    } else {
-        co_return co_await complete_first<Variant, I+1>(index, std::forward<Trest&>(trest)...);
+    size_t find_resolved() {
+        return std::apply(races::find_resolved_s{}, args);
     }
-}
-
-template <size_t I, typename T>
-inline task<T> complete_race(size_t, task<T>& t0) {
-    co_return co_await std::move(t0);
-}
-
-template <size_t I>
-inline task<> complete_race(size_t, event&) {
-    co_return;
-}
-
-template <size_t I, typename T, typename... Trest>
-inline task<T> complete_race(size_t index, task<T>& t0, Trest&... trest) {
-    if (index == I) {
-        ((destroy_task(trest)), ...);
-        co_return co_await std::move(t0);
-    } else {
-        t0.destroy();
-        co_return co_await complete_race<I+1>(index, std::forward<Trest&>(trest)...);
+    task_alternative_type_t<first_type> select_first() {
+        return races::param<first_type>::resolve_alternative(std::get<0>(args));
     }
-}
-
-template <size_t I, typename... Trest>
-inline task<> complete_race(size_t index, event&, Trest&... trest) {
-    if (index == I) {
-        ((destroy_task(trest)), ...);
-        co_return;
-    } else {
-        co_return co_await complete_race<I+1>(index, std::forward<Trest&>(trest)...);
+    auto select_value(size_t index) requires requires { typename common_task_value_type<Ts...>::type; } {
+        return std::apply(races::select_value_s{index}, args);
     }
-}
+    std::variant<task_alternative_type_t<Ts>...> select_variant(size_t index) {
+        using Variant = std::variant<task_alternative_type_t<Ts>...>;
+        return std::apply(races::select_variant_s<Variant>{index}, args);
+    }
+    event make_event() {
+        awaited = true;
+        return std::apply(races::make_quorum_s{}, args);
+    }
+    void after_event() {
+        std::apply(races::clear_awaiter_s{}, args);
+        awaited = false;
+    }
+};
+
+template <typename... Ts>
+using race_params_t = race_params<typename races::param<Ts>::type...>;
 
 }
 
@@ -1703,56 +1744,18 @@ inline task<> complete_race(size_t index, event&, Trest&... trest) {
 //    task was cancelled.
 
 template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<T> t, Es... es) {
-    // make local copy of parameter task so task state is deleted when we
-    // `co_return`. (Parameter copies are deleted later than locals.)
-    task<T> t_(std::move(t));
-    t_.start();
+task<std::optional<task_attempt_type_t<T>>> attempt(T&& t, Es&&... es) {
+    detail::race_params_t<T, Es...> ax(std::forward<T>(t), std::forward<Es>(es)...);
     while (true) {
         co_await resolve{};
-        size_t ridx = detail::find_resolved(0, std::forward<task<T>>(t_), std::forward<Es>(es)...);
+        size_t ridx = ax.find_resolved();
         if (ridx == 0) {
-            co_return t_.promise_ptr()->result();
+            co_return ax.select_first();
         } else if (ridx != 1 + sizeof...(es)) {
             co_return std::nullopt;
         }
-        co_await detail::race_make_quorum(t_, std::forward<Es&>(es)...);
-        detail::race_clear_awaiter(t_);
-    }
-}
-
-template <typename T, typename... Es>
-task<std::optional<T>> attempt(task<std::optional<T>> t, Es... es) {
-    task<std::optional<T>> t_(std::move(t));
-    t_.start();
-    while (true) {
-        co_await resolve{};
-        size_t ridx = detail::find_resolved(0, std::forward<task<std::optional<T>>>(t_), std::forward<Es>(es)...);
-        if (ridx == 0) {
-            co_return t_.promise_ptr()->result();
-        } else if (ridx != 1 + sizeof...(es)) {
-            co_return std::nullopt;
-        }
-        co_await detail::race_make_quorum(t_, std::forward<Es&>(es)...);
-        detail::race_clear_awaiter(t_);
-    }
-}
-
-template <typename... Es>
-task<std::optional<std::monostate>> attempt(task<void> t, Es... es) {
-    task<> t_(std::move(t));
-    t_.start();
-    while (true) {
-        co_await resolve{};
-        size_t ridx = detail::find_resolved(0, std::forward<task<>>(t_), std::forward<Es>(es)...);
-        if (ridx == 0) {
-            t_.promise_ptr()->result();
-            co_return std::monostate{};
-        } else if (ridx != 1 + sizeof...(es)) {
-            co_return std::nullopt;
-        }
-        co_await detail::race_make_quorum(t_, std::forward<Es&>(es)...);
-        detail::race_clear_awaiter(t_);
+        co_await ax.make_event();
+        ax.after_event();
     }
 }
 
@@ -1777,17 +1780,16 @@ inline task<> first() {
 }
 
 template <typename... Ts>
-task<std::variant<task_return_type_t<Ts>...>> first(Ts... ts) {
-    using Variant = std::variant<task_return_type_t<Ts>...>;
-    ((detail::start_task(ts)), ...);
+task<std::variant<task_alternative_type_t<Ts>...>> first(Ts&&... ts) {
+    detail::race_params_t<Ts...> ax(std::forward<Ts>(ts)...);
     while (true) {
         co_await resolve{};
-        size_t ridx = detail::find_resolved(0, std::forward<Ts>(ts)...);
+        size_t ridx = ax.find_resolved();
         if (ridx != sizeof...(ts)) {
-            co_return co_await detail::complete_first<Variant, 0>(ridx, std::forward<Ts&>(ts)...);
+            co_return ax.select_variant(ridx);
         }
-        co_await detail::race_make_quorum(std::forward<Ts&>(ts)...);
-        ((detail::race_clear_awaiter(std::forward<Ts&>(ts))), ...);
+        co_await ax.make_event();
+        ax.after_event();
     }
 }
 
@@ -1798,37 +1800,26 @@ inline task<T> race() {
 }
 
 template <typename T>
-inline task<T> race(task<T> t) {
+inline task<T> race(task<T>&& t) {
+    return std::move(t);
+}
+
+template <typename T>
+inline task<T>& race(task<T>& t) {
     return t;
 }
 
-template <typename T, typename... Trest>
-task<T> race(task<T> t0, Trest... ts) {
-    t0.start();
-    ((detail::start_task(ts)), ...);
+template <typename... Ts>
+task<common_task_value_type_t<Ts...>> race(Ts&&... ts) {
+    detail::race_params_t<Ts...> ax(std::forward<Ts>(ts)...);
     while (true) {
         co_await resolve{};
-        size_t ridx = detail::find_resolved(0, std::forward<task<T>>(t0), std::forward<Trest>(ts)...);
-        if (ridx != 1 + sizeof...(ts)) {
-            co_return co_await detail::complete_race<0>(ridx, t0, std::forward<Trest&>(ts)...);
+        size_t ridx = ax.find_resolved();
+        if (ridx != sizeof...(ts)) {
+            co_return ax.select_value(ridx);
         }
-        co_await detail::race_make_quorum(t0, std::forward<Trest&>(ts)...);
-        detail::race_clear_awaiter(t0);
-        ((detail::race_clear_awaiter(std::forward<Trest&>(ts))), ...);
-    }
-}
-
-template <typename... Trest>
-task<> race(event e0, Trest... ts) {
-    ((detail::start_task(ts)), ...);
-    while (true) {
-        co_await resolve{};
-        size_t ridx = detail::find_resolved(0, std::forward<event>(e0), std::forward<Trest>(ts)...);
-        if (ridx != 1 + sizeof...(ts)) {
-            co_return co_await detail::complete_race<0>(ridx, e0, std::forward<Trest&>(ts)...);
-        }
-        co_await detail::race_make_quorum(e0, std::forward<Trest&>(ts)...);
-        ((detail::race_clear_awaiter(std::forward<Trest&>(ts))), ...);
+        co_await ax.make_event();
+        ax.after_event();
     }
 }
 
