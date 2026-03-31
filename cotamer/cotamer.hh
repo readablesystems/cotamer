@@ -107,6 +107,9 @@ public:
 
     detail::task_awaiter<T> operator co_await() const noexcept;
 
+    inline const promise_type* promise_ptr() const noexcept;
+    inline promise_type* promise_ptr() noexcept;
+
 private:
     friend struct detail::task_promise<T>;
     friend task<T> forward<>(task<T>);
