@@ -199,6 +199,26 @@ cot::task<> test_attempt_already_done() {
     std::cerr << "attempt_already_done: " << *result << "\n";
 }
 
+// TEST: attempt destroys task argument early
+struct live_counter {
+    live_counter() { ++alive; }
+    ~live_counter() { --alive; }
+    static unsigned long alive;
+};
+unsigned long live_counter::alive = 0;
+cot::task<> test_attempt_early_destroy() {
+    auto worker = [&]() -> cot::task<> {
+        live_counter l;
+        co_await cot::after(1h);
+    };
+    assert(live_counter::alive == 0);
+    auto t = cot::attempt(worker(), cot::after(30min));
+    assert(live_counter::alive == 1);
+    co_await t;
+    assert(live_counter::alive == 0);
+    std::cerr << "attempt_early_destroy: ok\n";
+}
+
 // TEST: attempt with nested tasks — cancellation cascades
 cot::task<int> nested_slow() {
     co_await cot::after(50h);
@@ -1542,6 +1562,16 @@ struct port {
     cot::task<int> recv3() {
         co_return co_await cot::forward(recv2());
     }
+    cot::task<int> recvd1() {
+        co_await cot::resolve{};
+        co_await cot::asap();
+        co_return co_await cot::forward(recv());
+    }
+    cot::task<int> recvd2() {
+        co_await cot::resolve{};
+        co_await cot::asap();
+        co_return co_await cot::forward(recvd1());
+    }
 };
 
 // TEST: first(recv(), recv()) does not drop messages
@@ -1572,6 +1602,31 @@ cot::task<> test_resolution_race() {
     auto m3 = co_await cot::race(p.recv());
     assert(m3 == 3);
     std::cerr << "test_resolution_race: ok\n";
+}
+
+// TEST: race works with task references
+cot::task<> test_race_reference() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    p.enq(3);
+    auto t1 = p.recv(), t2 = p.recv(), t3 = p.recv();
+    auto m1 = co_await cot::race(t1, t2);
+    assert(t1.done());
+    assert(!t2.done());
+    assert(!t3.done());
+    assert(m1 == 1);
+    auto m2 = co_await cot::race(t3, t2);
+    assert(t3.done());
+    assert(!t2.done());
+    assert(m2 == 2);
+    auto m3 = co_await cot::race(t2);
+    assert(t2.done());
+    assert(m3 == 3);
+    auto m3b = co_await t2;
+    auto m3c = co_await t2;
+    assert(m3b == 3 && m3c == 3);
+    std::cerr << "test_race_reference: ok\n";
 }
 
 // TEST: attempt(recv(), timeout) does not drop messages on success
@@ -1727,6 +1782,19 @@ cot::task<> test_resolution_multiple() {
     auto v = co_await t;
     assert(v == 99);
     std::cerr << "test_resolution_multiple: ok\n";
+}
+
+// TEST: cot::race() must resolve multiple times
+cot::task<> test_race_resolution_multiple() {
+    port p;
+    p.enq(1);
+    p.enq(2);
+    auto result = co_await cot::first(p.recvd2(), cot::after(10h));
+    assert(result.index() == 0);
+    assert(std::get<0>(result) == 1);
+    assert(p.mq.size() == 1);
+    assert(p.mq.front() == 2);
+    std::cerr << "test_race_resolution_multiple: ok\n";
 }
 
 // TEST: forward a task with no resolution point (completes immediately)
@@ -2483,6 +2551,7 @@ int main(int argc, char* argv[]) {
     run("attempt_success", test_attempt_success);
     run("attempt_cancelled", test_attempt_cancelled);
     run("attempt_already_done", test_attempt_already_done);
+    run("attempt_early_destroy", test_attempt_early_destroy);
     run("attempt_nested", test_attempt_nested);
     run("attempt_optional_success", test_attempt_optional_success);
     run("attempt_optional_cancelled", test_attempt_optional_cancelled);
@@ -2543,6 +2612,7 @@ int main(int argc, char* argv[]) {
     run("race_two_events", test_race_two_events);
     run("port_receive", test_port_receive);
     run("resolution_race", test_resolution_race);
+    run("race_reference", test_race_reference);
     run("resolution_attempt", test_resolution_attempt);
     run("resolution_attempt_delayed", test_resolution_attempt_delayed);
     run("resolution_cancelled_before", test_resolution_cancelled_before);
@@ -2552,6 +2622,7 @@ int main(int argc, char* argv[]) {
     run("resolution_detach", test_resolution_detach);
     run("resolution_void", test_resolution_void);
     run("resolution_multiple", test_resolution_multiple);
+    run("race_resolution_multiple", test_race_resolution_multiple);
     run("forward_no_resolve", test_forward_no_resolve);
     run("forward_already_done", test_forward_already_done);
     run("forward_attempt_cancelled", test_forward_attempt_cancelled);

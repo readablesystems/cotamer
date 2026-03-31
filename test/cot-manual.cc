@@ -170,6 +170,42 @@ int test_event_arm_copies() {
 }
 
 
+// MANUAL:
+cot::task<> print_after(cot::duration time, int i) {
+    co_await cot::after(time);
+    std::print("print_after({})\n", i);
+}
+
+cot::task<> print_by_value() {
+    co_await cot::first(print_after(10s, 10), print_after(20s, 20));
+    co_await cot::after(40s);
+}
+
+// Outputs:
+// print_after(10)
+
+
+cot::task<> print_by_reference() {
+    auto p10 = print_after(10s, 10), p20 = print_after(20s, 20);
+    co_await cot::first(p10, p20);
+    co_await cot::after(40s);
+}
+
+// Outputs:
+// print_after(10)
+// print_after(20)
+
+
+cot::task<> print_by_move() {
+    auto p10 = print_after(10s, 10), p20 = print_after(20s, 20);
+    co_await cot::first(std::move(p10), std::move(p20));
+    co_await cot::after(40s);
+}
+
+// Outputs:
+// print_after(10)
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -199,6 +235,9 @@ int main(int argc, char* argv[]) {
     run("lifetime_3", test_lifetime_3);
     run("long_delay", test_long_delay);
     run("event_arm_copies", test_event_arm_copies);
+    run("print_by_value", print_by_value);
+    run("print_by_reference", print_by_reference);
+    run("print_by_move", print_by_move);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");
