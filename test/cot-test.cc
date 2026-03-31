@@ -199,6 +199,26 @@ cot::task<> test_attempt_already_done() {
     std::cerr << "attempt_already_done: " << *result << "\n";
 }
 
+// TEST: attempt destroys task argument early
+struct live_counter {
+    live_counter() { ++alive; }
+    ~live_counter() { --alive; }
+    static unsigned long alive;
+};
+unsigned long live_counter::alive = 0;
+cot::task<> test_attempt_early_destroy() {
+    auto worker = [&]() -> cot::task<> {
+        live_counter l;
+        co_await cot::after(1h);
+    };
+    assert(live_counter::alive == 0);
+    auto t = cot::attempt(worker(), cot::after(30min));
+    assert(live_counter::alive == 1);
+    co_await t;
+    assert(live_counter::alive == 0);
+    std::cerr << "attempt_early_destroy: ok\n";
+}
+
 // TEST: attempt with nested tasks — cancellation cascades
 cot::task<int> nested_slow() {
     co_await cot::after(50h);
@@ -2483,6 +2503,7 @@ int main(int argc, char* argv[]) {
     run("attempt_success", test_attempt_success);
     run("attempt_cancelled", test_attempt_cancelled);
     run("attempt_already_done", test_attempt_already_done);
+    run("attempt_early_destroy", test_attempt_early_destroy);
     run("attempt_nested", test_attempt_nested);
     run("attempt_optional_success", test_attempt_optional_success);
     run("attempt_optional_cancelled", test_attempt_optional_cancelled);
