@@ -34,9 +34,15 @@ if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
     message(FATAL_ERROR "xxhash not found. Install with: brew install xxhash")
 endif()
 
+# Find llhttp
+find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
+find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
+include_directories(${LLHTTP_INCLUDE_DIR})
+
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
     cotamer/io.cc
+    cotamer/http.cc
 )
 
 add_library(CotamerExamples OBJECT

@@ -1,9 +1,8 @@
 #pragma once
-#include "fd.hh"
-#include "http_parser.h"
+#include "cotamer/io.hh"
+#include "llhttp.h"
 #include <vector>
 #include <string>
-#include <sstream>
 #include <memory>
 #include <ctime>
 namespace cotamer {
@@ -101,10 +100,10 @@ public:
         return pair_ == x.pair_;
     }
 
-    http_header_iterator& operator++() { ++ptr_; return *this; }
+    http_header_iterator& operator++() { ++pair_; return *this; }
     http_header_iterator operator++(int) { auto tmp{*this}; ++pair_; return tmp; }
 
-    http_header_iterator& operator--() { --ptr_; return *this; }
+    http_header_iterator& operator--() { --pair_; return *this; }
     http_header_iterator operator--(int) { auto tmp{*this}; --pair_; return tmp; }
 
     difference_type operator-(const http_header_iterator& x) const noexcept {
@@ -125,14 +124,14 @@ class http_message {
     inline bool ok() const;
     explicit inline operator bool() const;
     inline bool operator!() const;
-    inline enum http_errno error() const;
+    inline llhttp_errno error() const;
 
     inline unsigned http_major() const;
     inline unsigned http_minor() const;
 
     inline unsigned status_code() const;
     inline const std::string& status_message() const;
-    inline enum http_method method() const;
+    inline llhttp_method method() const;
     inline const std::string& url() const;
 
     inline bool has_header(const char* name) const;
@@ -168,10 +167,10 @@ class http_message {
 
     inline http_message& http_major(unsigned v);
     inline http_message& http_minor(unsigned v);
-    inline http_message& error(enum http_errno e);
+    inline http_message& error(llhttp_errno e);
     inline http_message& status_code(unsigned code);
     inline http_message& status_code(unsigned code, std::string message);
-    inline http_message& method(enum http_method method);
+    inline http_message& method(llhttp_method method);
     inline http_message& url(std::string url);
     inline http_message& header(std::string key, std::string value);
     inline http_message& header(std::string key, size_t value);
@@ -205,7 +204,7 @@ class http_message {
 
     std::string url_;
     std::string status_message_;
-    std::string header_;
+    std::string headers_;
     std::vector<http_opair> hpairs_;
     std::string body_;
 
@@ -222,28 +221,29 @@ class http_message {
 
 class http_parser {
 public:
-    http_parser(fd f, enum llhttp_parser_type type);
+    http_parser(fd f, enum llhttp_t_type type);
 
     void clear();
     inline bool ok() const;
     inline enum llhttp_errno error() const;
     inline bool should_keep_alive() const;
 
-    void receive(fd f, event<http_message> done);
-    void send(fd f, const http_message& m, event<> done);
-    static void send_request(fd f, const http_message& m, event<> done);
-    static void send_request(fd f, http_message&& m, event<> done);
-    static void send_response(fd f, const http_message& m, event<> done);
-    static void send_response(fd f, http_message&& m, event<> done);
-    static void send_response_headers(fd f, const http_message& m, event<> done);
-    static void send_response_chunk(fd f, std::string s, event<> done);
-    static void send_response_end(fd f, event<> done);
+    task<http_message> receive(fd f);
+    task<> send(http_message);
+    task<> send_request(http_message);
+    task<> send_response(http_message);
+    task<> send_response_chunk(std::string);
+    task<> send_response_end_chunk(std::string);
 
     inline void clear_should_keep_alive();
 
 private:
+    static constexpr size_t bufsize = 8192;
+
+    ::llhttp_t hp_;
     fd f_;
-    ::llhttp_parser hp_;
+    char buf_[bufsize];
+    size_t pos_ = 0;
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
 
@@ -256,30 +256,19 @@ private:
     };
 
     static const http_parser_settings settings;
-    static http_parser* get_parser(::llhttp_parser* hp);
-    static message_data* get_message_data(::llhttp_parser* hp);
-    static int on_message_begin(::llhttp_parser* hp);
-    static int on_url(::llhttp_parser* hp, const char* s, size_t len);
-    static int on_status(::llhttp_parser* hp, const char* s, size_t len);
-    static int on_header_field(::llhttp_parser* hp, const char* s, size_t len);
-    static int on_header_field_complete(::llhttp_parser* hp);
-    static int on_header_value(::llhttp_parser* hp, const char* s, size_t len);
-    static int on_header_value_complete(::llhttp_parser* hp);
-    static int on_headers_complete(::llhttp_parser* hp);
-    static int on_body(::llhttp_parser* hp, const char* s, size_t len);
-    static int on_message_complete(::llhttp_parser* hp);
+    static http_parser* get_parser(::llhttp_t* hp);
+    static message_data* get_message_data(::llhttp_t* hp);
+    static int on_message_begin(::llhttp_t* hp);
+    static int on_url(::llhttp_t* hp, const char* s, size_t len);
+    static int on_status(::llhttp_t* hp, const char* s, size_t len);
+    static int on_header_field(::llhttp_t* hp, const char* s, size_t len);
+    static int on_header_field_complete(::llhttp_t* hp);
+    static int on_header_value(::llhttp_t* hp, const char* s, size_t len);
+    static int on_header_value_complete(::llhttp_t* hp);
+    static int on_headers_complete(::llhttp_t* hp);
+    static int on_body(::llhttp_t* hp, const char* s, size_t len);
+    static int on_message_complete(::llhttp_t* hp);
     inline void copy_parser_status(message_data& md);
-    static void unparse_request_headers(std::ostringstream& buf,
-                                        const http_message& m);
-    static void unparse_response_headers(std::ostringstream& buf,
-                                         const http_message& m,
-                                         bool include_content_length);
-    static inline std::string prepare_headers(const http_message& m,
-                                              std::string& body,
-                                              bool is_response);
-    static inline void send_message(fd f, std::string headers,
-                                    std::string body, event<> done);
-    static void send_two(fd f, std::string a, std::string b, event<> done);
 };
 
 inline http_message::http_message()
@@ -312,8 +301,8 @@ inline bool http_message::operator!() const {
     return !ok();
 }
 
-inline enum http_errno http_message::error() const {
-    return (enum http_errno) error_;
+inline llhttp_errno http_message::error() const {
+    return (llhttp_errno) error_;
 }
 
 inline unsigned http_message::status_code() const {
@@ -324,8 +313,8 @@ inline const std::string& http_message::status_message() const {
     return status_message_;
 }
 
-inline enum http_method http_message::method() const {
-    return (enum http_method) method_;
+inline llhttp_method http_message::method() const {
+    return (llhttp_method) method_;
 }
 
 inline const std::string& http_message::url() const {
@@ -412,7 +401,7 @@ inline http_message& http_message::clear() {
     return *this;
 }
 
-inline http_message& http_message::error(enum http_errno e) {
+inline http_message& http_message::error(llhttp_errno e) {
     error_ = e;
     return *this;
 }
@@ -429,7 +418,7 @@ inline http_message& http_message::status_code(unsigned code, std::string messag
     return *this;
 }
 
-inline http_message& http_message::method(enum http_method method) {
+inline http_message& http_message::method(llhttp_method method) {
     method_ = (unsigned) method;
     return *this;
 }
@@ -497,8 +486,8 @@ inline bool http_parser::ok() const {
     return hp_.http_errno == (unsigned) HPE_OK;
 }
 
-inline enum http_errno http_parser::error() const {
-    return (enum http_errno) hp_.http_errno;
+inline llhttp_errno http_parser::error() const {
+    return (llhttp_errno) hp_.http_errno;
 }
 
 inline bool http_parser::should_keep_alive() const {
@@ -507,15 +496,6 @@ inline bool http_parser::should_keep_alive() const {
 
 inline void http_parser::clear_should_keep_alive() {
     hp_.flags = (hp_.flags & ~F_CONNECTION_KEEP_ALIVE) | F_CONNECTION_CLOSE;
-}
-
-inline void http_parser::send_message(fd f, std::string headers,
-                                      std::string body, event<> done) {
-    if (body.empty()) {
-        f.write(headers, done);
-    } else {
-        send_two(f, headers, body, done);
-    }
 }
 
 } // namespace cotamer

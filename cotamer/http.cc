@@ -11,20 +11,7 @@
  * notice is a summary of the Tamer LICENSE file; the license in that file is
  * legally binding.
  */
-#include "config.h"
-#include <tamer/http.hh>
-#include <sys/select.h>
-#include <sys/ioctl.h>
-#include <sys/resource.h>
-#include <stdio.h>
-#include <signal.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <tamer/tamer.hh>
-#include <algorithm>
+#include "cotamer/http.hh"
 
 namespace {
 struct status_code_map {
@@ -181,11 +168,16 @@ void http_message::do_clear() {
 }
 
 void http_message::add_header(std::string key, std::string value) {
+    if (headers_.empty()) {
+        headers_.reserve(2048);
+        header_space_ = std::max(256UL, url_.length() + 32UL);
+        headers_.append(0, header_space_);
+    }
     size_t name1 = header_.length(), name2 = name1 + key.length();
     headers_ += key;
-    headers_ += ": ";
+    headers_.append(": ", 2);
     headers_ += value;
-    headers_ += "\r\n";
+    headers_.append("\r\n", 2);
     hpairs_.emplace_back(name1, name2, name2 + 2, name2 + 2 + value.length());
 }
 
@@ -341,13 +333,13 @@ std::string_view http_message::query(std::string_view name) const {
 }
 
 
-http_parser::http_parser(fd f, enum llhttp_parser_type hp_type)
+http_parser::http_parser(fd f, enum llhttp_t_type hp_type)
     : f_(std::move(f)) {
-    llhttp_parser_init(&hp_, hp_type);
+    llhttp_t_init(&hp_, hp_type);
 }
 
 void http_parser::clear() {
-    llhttp_parser_init(&hp_, (enum llhttp_parser_type) hp_.type);
+    llhttp_t_init(&hp_, (enum llhttp_t_type) hp_.type);
 }
 
 inline void http_parser::copy_parser_status(message_data& md) {
@@ -359,29 +351,29 @@ inline void http_parser::copy_parser_status(message_data& md) {
     md.hm.upgrade_ = hp_.upgrade;
 }
 
-inline http_parser* http_parser::get_parser(::llhttp_parser* hp) {
+inline http_parser* http_parser::get_parser(::llhttp_t* hp) {
     return reinterpret_cast<http_parser*>(hp);
 }
 
-inline http_parser::message_data* http_parser::get_message_data(::llhttp_parser* hp) {
+inline http_parser::message_data* http_parser::get_message_data(::llhttp_t* hp) {
     return static_cast<message_data*>(hp->data);
 }
 
-int http_parser::on_message_begin(::llhttp_parser* hp) {
+int http_parser::on_message_begin(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->hm.clear();
     md->state = state_unknown;
     return 0;
 }
 
-int http_parser::on_url(::llhttp_parser* hp, const char* s, size_t len) {
+int http_parser::on_url(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     md->hm.url_.append(s, len);
     md->state = state_unknown;
     return 0;
 }
 
-int http_parser::on_status(::llhttp_parser* hp, const char* s, size_t len) {
+int http_parser::on_status(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     if (md->hm.major_ == 0) {
         get_parser(hp)->copy_parser_status(*md);
@@ -391,7 +383,7 @@ int http_parser::on_status(::llhttp_parser* hp, const char* s, size_t len) {
     return 0;
 }
 
-int http_parser::on_header_field(::llhttp_parser* hp, const char* s, size_t len) {
+int http_parser::on_header_field(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
@@ -401,32 +393,34 @@ int http_parser::on_header_field(::llhttp_parser* hp, const char* s, size_t len)
     return 0;
 }
 
-int http_parser::on_header_field_complete(::llhttp_parser* hp) {
+int http_parser::on_header_field_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
     }
     md->name2 = md->value1 = md->hm.headers_.length();
+    md->hm.headers_.append(": ", 2);
     md->state = state_header_value;
     return 0;
 }
 
-int http_parser::on_header_value(::llhttp_parser* hp, const char* s, size_t len) {
+int http_parser::on_header_value(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     md->hm.headers_.append(s, len);
     return 0;
 }
 
-int http_parser::on_header_value_complete(::llhttp_parser* hp) {
+int http_parser::on_header_value_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     if (md->state == state_header_value) {
         md->hm.hpairs_.emplace_back(md->name1, md->name2, md->value1, md->hm.headers_.length());
     }
+    md->hm.headers_.append("\r\n", 2);
     md->state = state_unknown;
     return 0;
 }
 
-int http_parser::on_headers_complete(::llhttp_parser* hp) {
+int http_parser::on_headers_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     get_parser(hp)->copy_parser_status(*md);
     if (md->hm.body_.capacity() < md->hm.body_.length() + hp->content_length) {
@@ -435,7 +429,7 @@ int http_parser::on_headers_complete(::llhttp_parser* hp) {
     return 0;
 }
 
-int http_parser::on_chunk_header(::llhttp_parser* hp) {
+int http_parser::on_chunk_header(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     if (md->hm.body_.capacity() < md->hm.body_.length() + hp->content_length) {
         md->hm.body_.reserve(md->hm.body_.length() + hp->content_length);
@@ -443,13 +437,13 @@ int http_parser::on_chunk_header(::llhttp_parser* hp) {
     return 0;
 }
 
-int http_parser::on_body(::llhttp_parser* hp, const char* s, size_t len) {
+int http_parser::on_body(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     md->hm.body_.append(s, len);
     return 0;
 }
 
-int http_parser::on_message_complete(::llhttp_parser* hp) {
+int http_parser::on_message_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->state = state_done;
     return 0;
@@ -502,142 +496,90 @@ tamed void http_parser::receive(fd f, event<http_message> done) {
     done(TAMER_MOVE(md.hm));
 }
 
-void http_parser::unparse_request_headers(std::ostringstream& buf,
-                                          const http_message& m) {
-    buf << http_method_str(m.method()) << " " << m.url()
-        << " HTTP/" << m.http_major() << "." << m.http_minor() << "\r\n";
-    bool need_content_length = !m.body_.empty();
-    for (http_message::header_iterator it = m.raw_headers_.begin();
-         it != m.raw_headers_.end(); ++it) {
-        buf << it->name << ": " << it->value << "\r\n";
-        need_content_length = need_content_length && !it->is_content_length();
+task<> http_parser::send_request(http_message m) {
+    std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
+        llhttp_method_str(m.method()), m.url(), m.http_major(), m.http_minor());
+    if (!m.body_.empty()
+        && !m.has_header("content-length")
+        && !m.has_header("transfer-encoding")) {
+        m.add_header("Content-Length", std::to_s(m.body_.length()));
     }
-    if (need_content_length) {
-        buf << "Content-Length: " << m.body_.length() << "\r\n";
+    m.headers_.append("\r\n", 2);
+
+    struct iovec iov[3];
+    iov[0] = struct iovec{ urlline.data(), urlline.length() };
+    iov[1] = struct iovec{ m.headers_.data(), m.headers_.length() };
+    size_t iovcnt = 2;
+    if (m.body_.length()) {
+        iov[2] = struct iovec{ m.body_.data(), m.body_.length() };
+        ++iovcnt;
     }
-    buf << "\r\n";
+    co_await writev(f_, iov, iovcnt);
 }
 
-inline std::string http_parser::prepare_headers(const http_message& m,
-                                                std::string& body,
-                                                bool is_response) {
-    std::ostringstream buf;
-    if (is_response) {
-        unparse_response_headers(buf, m, true);
-    } else {
-        unparse_request_headers(buf, m);
-    }
-    if (buf.tellp() + std::ostringstream::pos_type(body.length()) < 16384) {
-        buf << TAMER_MOVE(body);
-        body.clear();
-    }
-    return buf.str();
-}
-
-tamed static void http_parser::send_two(fd f, std::string a,
-                                        std::string b, event<> done) {
-    twait { f.write(TAMER_MOVE(a), make_event()); }
-    f.write(TAMER_MOVE(b), done);
-}
-
-void http_parser::send_request(fd f, const http_message& m, event<> done) {
-    std::string body = m.body();
-    std::string headers = prepare_headers(m, body, false);
-    send_message(f, headers, body, done);
-}
-
-void http_parser::send_request(fd f, http_message&& m, event<> done) {
-    std::string headers = prepare_headers(m, m.body_, false);
-    send_message(f, headers, TAMER_MOVE(m.body_), done);
-}
-
-void http_parser::unparse_response_headers(std::ostringstream& buf,
-                                           const http_message& m,
-                                           bool include_content_length) {
-    buf << "HTTP/" << m.http_major() << "." << m.http_minor()
-        << " " << m.status_code() << " ";
-    if (m.status_message().empty()) {
-        buf << m.default_status_message(m.status_code());
-    } else {
-        buf << m.status_message();
-    }
-    buf << "\r\n";
-    bool need_content_length = !m.body_.empty() && include_content_length;
-    for (http_message::header_iterator it = m.raw_headers_.begin();
-         it != m.raw_headers_.end(); ++it) {
-        buf << it->name << ": " << it->value << "\r\n";
-        need_content_length = need_content_length && !it->is_content_length();
-    }
-    if (need_content_length) {
-        buf << "Content-Length: " << m.body_.length() << "\r\n";
-    }
-    buf << "\r\n";
-}
-
-void http_parser::send_response(fd f, const http_message& m, event<> done) {
-    std::string body = m.body();
-    std::string headers = prepare_headers(m, body, true);
-    send_message(f, headers, body, done);
-}
-
-void http_parser::send_response(fd f, http_message&& m, event<> done) {
-    std::string headers = prepare_headers(m, m.body_, true);
-    send_message(f, headers, TAMER_MOVE(m.body_), done);
-}
-
-void http_parser::send_response_headers(fd f, const http_message& m,
-                                        event<> done) {
-    std::ostringstream buf;
-    unparse_response_headers(buf, m, false);
-    f.write(buf.str(), done);
-}
-
-tamed static void http_parser::send_response_chunk(fd f, std::string s,
-                                                   event<> done) {
-    tamed { std::ostringstream buf; }
-    buf << s.length() << "\r\n";
-    if (s.length() <= 16384) {
-        buf << s << "\r\n";
-        f.write(buf.str(), done);
-    } else {
-        twait { f.write(buf.str(), make_event()); }
-        twait { f.write(TAMER_MOVE(s), make_event()); }
-        f.write("\r\n", 2, done);
-    }
-}
-
-void http_parser::send_response_end(fd f, event<> done) {
-    f.write("0\r\n\r\n", 5, done);
-}
-
-void http_parser::send(fd f, const http_message& m, event<> done) {
-    if (hp_.type == (int) HTTP_RESPONSE) {
-        send_request(f, m, done);
-    } else if (hp_.type == (int) HTTP_REQUEST) {
-        // If the response is marked `Connection: close`, then ensure
-        // should_keep_alive() returns 0
-        http_message::header_iterator connhdr;
-        const char* data;
-        if (should_keep_alive()
-            && (connhdr = m.find_canonical_header("connection")) != m.header_end()
-            && (connhdr->value.length() == 5
-                && (data = connhdr->value.data())
-                && (data[0] == 'C' || data[0] == 'c')
-                && (data[1] == 'L' || data[1] == 'l')
-                && (data[2] == 'O' || data[2] == 'o')
-                && (data[3] == 'S' || data[3] == 's')
-                && (data[4] == 'E' || data[4] == 'e'))) {
-            if (hp_.http_major > 0 && hp_.http_minor > 0) {
-                hp_.flags |= F_CONNECTION_CLOSE;
-            } else {
-                hp_.flags &= ~F_CONNECTION_KEEP_ALIVE;
-            }
+task<> http_parser::send_response(http_message m) {
+    // If the response is marked `Connection: close`, then ensure
+    // should_keep_alive() returns 0
+    http_message::header_iterator connhdr;
+    const char* data;
+    if (should_keep_alive()
+        && (connhdr = m.find_header("connection", 10)) != m.header_end()
+        && (connhdr.value().length() == 5
+            && (data = connhdr.value().data())
+            && (data[0] == 'C' || data[0] == 'c')
+            && (data[1] == 'L' || data[1] == 'l')
+            && (data[2] == 'O' || data[2] == 'o')
+            && (data[3] == 'S' || data[3] == 's')
+            && (data[4] == 'E' || data[4] == 'e'))) {
+        if (hp_.http_major > 0 && hp_.http_minor > 0) {
+            hp_.flags |= F_CONNECTION_CLOSE;
+        } else {
+            hp_.flags &= ~F_CONNECTION_KEEP_ALIVE;
         }
-
-        send_response(f, m, done);
-    } else {
-        assert(0);
     }
+
+    std::string_view status_message = m.status_message.empty()
+        ? std::string_view(m.default_status_message(m.status_code()))
+        : std::string_view(m.status_message());
+    std::string codeline = std::format("HTTP/{}.{} {} {}\r\n",
+        m.http_major(), m.http_minor(), m.status_code(), status_message);
+    if (!m.body_.empty()
+        && !m.has_header("content-length")
+        && !m.has_header("transfer-encoding")) {
+        m.add_header("Content-Length", std::to_s(m.body_.length()));
+    }
+    m.headers_.appeind("\r\n", 2);
+
+    struct iovec iov[3];
+    iov[0] = struct iovec{ codeline.data(), codeline.length() };
+    iov[1] = struct iovec{ m.headers_.data(), m.headers_.length() };
+    size_t iovcnt = 2;
+    if (m.body_.length()) {
+        iov[2] = struct iovec{ m.body_.data(), m.body_.length() };
+        ++iovcnt;
+    }
+    co_await writev(f_, iov, iovcnt);
+}
+
+task<> http_parser::send(http_message m) {
+    assert(hp_.type == (int) HTTP_RESPONSE || hp_.type == (int) HTTP_REQUEST);
+    if (hp_.type == (int) HTTP_RESPONSE) {
+        return send_request(std::move(m));
+    }
+    return send_response(std::move(m));
+}
+
+task<> http_parser::send_response_chunk(std::string str) {
+    std::string lenline = std::format("{}\r\n", str.length());
+    struct iovec iov[3];
+    iov[0] = struct iovec{ lenline.data(), lenline.length() };
+    iov[1] = struct iovec{ str.data(), str.length() };
+    iov[2] = struct iovec{ "\r\n", 2 };
+    co_await writev(f_, iov, 3);
+}
+
+task<> http_parser::send_response_end_chunk() {
+    co_await write(f_, "0\r\n\r\n", 5);
 }
 
 } // namespace cotamer
