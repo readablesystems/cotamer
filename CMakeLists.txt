@@ -44,6 +44,10 @@ add_library(Cotamer OBJECT
     cotamer/io.cc
 )
 
+add_library(CotamerHttp OBJECT
+    cotamer/http.cc
+)
+
 add_library(CotamerExamples OBJECT
     examples/utils.cc
 )
@@ -103,4 +107,16 @@ target_include_directories(rpcg-client PRIVATE
 )
 target_link_libraries(rpcg-client PRIVATE
     ${XXHASH_LIBRARY}
+)
+
+add_executable(httpd
+    examples/httpd.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerHttp>
+)
+target_include_directories(httpd PRIVATE
+    ${LLHTTP_INCLUDE_DIR}
+)
+target_link_libraries(httpd PRIVATE
+    ${LLHTTP_LIBRARY}
 )

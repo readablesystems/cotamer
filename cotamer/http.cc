@@ -100,15 +100,15 @@ static constexpr uint8_t us_hex = 2;
 static const uint8_t urlsafe[256] = {
     /* 0x00-0x0F */ 0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
     /* 0x10-0x1F */ 0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
-    /* 0x20-0x2F */ 0, 1, 0, 0, 1, 0, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x20-0x2F */ 0, 1, 0, 0, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1,
     /* 0x30-0x3F */ 0x03, 0x13, 0x23, 0x33, 0x43, 0x53, 0x63, 0x73,
                     0x83, 0x93, 1, 1, 0, 1, 0, 0,
     /* 0x40-0x4F */ 1, 0xA3, 0xB3, 0xC3, 0xD3, 0xE3, 0xF3, 1,
                     1, 1, 1, 1, 1, 1, 1, 1,
-    /* 0x50-0x5F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 0, 0, 0, 0, 1,
-    /* 0x60-0x6F */ 0, 0xA3, 0xB3, 0xC3, 0xD3, 0xE3, 0xF3, 1,
+    /* 0x50-0x5F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x60-0x6F */ 1, 0xA3, 0xB3, 0xC3, 0xD3, 0xE3, 0xF3, 1,
                     1, 1, 1, 1, 1, 1, 1, 1,
-    /* 0x70-0x7F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 0, 0, 0, 1, 0,
+    /* 0x70-0x7F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 0,
 };
 
 const llhttp_settings_t http_parser::settings = {
@@ -219,19 +219,13 @@ void http_message::make_info(unsigned fl) const {
                     fpos = 1;
                 }
                 ++s;
-            } else if (*s == '#' && fpos != 2) {
+            } else if (*s == '#') {
                 while (fpos < 2) {
                     inf.f[fpos].first = fpos ? inf.f[fpos - 1].second : 0;
                     inf.f[fpos].second = s - s1;
                     ++fpos;
                 }
-            } else if (*s == '%') {
-                if (s2 - s < 3
-                    || !(urlsafe[s[1]] & us_hex)
-                    || !(urlsafe[s[2]] & us_hex)) {
-                    goto fail;
-                }
-                s += 3;
+                ++s;
             } else {
             fail:
                 fpos = 0;
@@ -264,10 +258,10 @@ void http_message::make_info(unsigned fl) const {
                             nend = vstart = vend;
                         }
                         inf.qpairs.emplace_back(nstart, nend, vstart, vend);
-                        nstart = nend = vend + 1;
                         state = 0;
                     }
                     ++s;
+                    nstart = nend = inf.qurl.length() + s - last;
                     continue;
                 }
                 if (*s == '=' && state <= 1) {
@@ -400,8 +394,9 @@ int http_parser::on_header_field_complete(::llhttp_t* hp) {
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
     }
-    md->name2 = md->value1 = md->hm.headers_.length();
+    md->name2 = md->hm.headers_.length();
     md->hm.headers_.append(": ", 2);
+    md->value1 = md->name2 + 2;
     md->state = state_header_value;
     return 0;
 }
