@@ -93,20 +93,36 @@ struct status_code_map_comparator {
 };
 }
 
-namespace tamer {
+namespace cotamer {
 
-const http_parser_settings http_parser::settings = {
+static constexpr uint8_t us_safe = 1;  // all URL-safe characters except ?
+static constexpr uint8_t us_hex = 2;
+static const uint8_t urlsafe[256] = {
+    /* 0x00-0x0F */ 0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x10-0x1F */ 0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
+    /* 0x20-0x2F */ 0, 1, 0, 0, 1, 0, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x30-0x3F */ 0x03, 0x13, 0x23, 0x33, 0x43, 0x53, 0x63, 0x73,
+                    0x83, 0x93, 1, 1, 0, 1, 0, 0,
+    /* 0x40-0x4F */ 1, 0xA3, 0xB3, 0xC3, 0xD3, 0xE3, 0xF3, 1,
+                    1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x50-0x5F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 0, 0, 0, 0, 1,
+    /* 0x60-0x6F */ 0, 0xA3, 0xB3, 0xC3, 0xD3, 0xE3, 0xF3, 1,
+                    1, 1, 1, 1, 1, 1, 1, 1,
+    /* 0x70-0x7F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 0, 0, 0, 1, 0,
+};
+
+const llhttp_settings_t http_parser::settings = {
     .on_message_begin       = &http_parser::on_message_begin,
     .on_url                 = &http_parser::on_url,
     .on_status              = &http_parser::on_status,
     .on_header_field        = &http_parser::on_header_field,
-    .on_header_field_complete = &http_parser::on_header_field_complete,
     .on_header_value        = &http_parser::on_header_value,
-    .on_header_value_complete = &http_parser::on_header_value_complete,
     .on_headers_complete    = &http_parser::on_headers_complete,
-    .on_chunk_header        = &http_parser::on_chunk_header,
     .on_body                = &http_parser::on_body,
-    .on_message_complete    = &http_parser::on_message_complete
+    .on_message_complete    = &http_parser::on_message_complete,
+    .on_header_field_complete = &http_parser::on_header_field_complete,
+    .on_header_value_complete = &http_parser::on_header_value_complete,
+    .on_chunk_header        = &http_parser::on_chunk_header
 };
 
 const char* http_message::default_status_message(unsigned code) {
@@ -118,12 +134,12 @@ const char* http_message::default_status_message(unsigned code) {
     if (m != default_status_codes + ncodes && m->code == code) {
         return m->message;
     }
-    return llhttp_status_name(code);
+    return llhttp_status_name((llhttp_status_t) code);
 }
 
 http_message::header_iterator http_message::find_header(const char* name, size_t length) const {
     auto it = header_begin(), end = header_end();
-    while (it != end && !it->name_eq_case(name, length)) {
+    while (it != end && !it.name_eq_case(name, length)) {
         ++it;
     }
     return it;
@@ -134,12 +150,12 @@ std::string http_message::header(const char* name, size_t length) const {
     bool any = false;
     auto it = header_begin(), end = header_end();
     while (it != end) {
-        if (it->name_eq_case(name, length)) {
+        if (it.name_eq_case(name, length)) {
             if (any) {
                 result += ", ";
-                result += it->value;
+                result += it.value();
             } else {
-                result = it->value;
+                result = it.value();
                 any = true;
             }
         }
@@ -159,21 +175,15 @@ void http_message::do_clear() {
     body_.clear();
     hpairs_.clear();
     if (info_) {
-        if (info_.unique()) {
-            info_->flags = 0;
-        } else {
-            info_ = nullptr;
-        }
+        info_->flags = 0;
     }
 }
 
 void http_message::add_header(std::string key, std::string value) {
     if (headers_.empty()) {
         headers_.reserve(2048);
-        header_space_ = std::max(256UL, url_.length() + 32UL);
-        headers_.append(0, header_space_);
     }
-    size_t name1 = header_.length(), name2 = name1 + key.length();
+    size_t name1 = headers_.length(), name2 = name1 + key.length();
     headers_ += key;
     headers_.append(": ", 2);
     headers_ += value;
@@ -182,46 +192,78 @@ void http_message::add_header(std::string key, std::string value) {
 }
 
 inline int xvalue(unsigned char ch) {
-    if (ch <= '9') {
-        return ch - '0';
-    } else if (ch <= 'F') {
-        return ch - 'A' + 10;
-    }
-    return ch - 'a' + 10;
+    return urlsafe[ch] >> 4;
 }
 
-void http_message::make_info(unsigned f) const {
-    if (!info_ || !info_.unique()) {
-        info_ = std::make_shared<info_type>();
+void http_message::make_info(unsigned fl) const {
+    if (!info_) {
+        info_ = std::make_unique<info_type>();
     }
-    info_type& i = *info_;
+    info_type& inf = *info_;
 
-    if (!(i.flags & info_url) && (f & (info_url | info_query))) {
-        int r = http_parser_parse_url(url_.data(), url_.length(), method_ == HTTP_CONNECT, &i.urlp);
-        if (r) {
-            i.urlp.field_set = 0;
+    if (!(inf.flags & info_url) && (fl & (info_url | info_params))) {
+        const unsigned char* s1 = reinterpret_cast<const unsigned char*>(url_.data());
+        const unsigned char* s2 = s1 + url_.length();
+        const unsigned char* s = s1;
+        int fpos = 0;
+        if (s == s2 || *s != '/') {
+            goto fail;
         }
-        i.flags |= info_url;
+        while (s != s2) {
+            if (urlsafe[*s] & us_safe) {
+                ++s;
+            } else if (*s == '?') {
+                if (fpos == 0) {
+                    inf.f[fpos].first = 0;
+                    inf.f[fpos].second = s - s1;
+                    fpos = 1;
+                }
+                ++s;
+            } else if (*s == '#' && fpos != 2) {
+                while (fpos < 2) {
+                    inf.f[fpos].first = fpos ? inf.f[fpos - 1].second : 0;
+                    inf.f[fpos].second = s - s1;
+                    ++fpos;
+                }
+            } else if (*s == '%') {
+                if (s2 - s < 3
+                    || !(urlsafe[s[1]] & us_hex)
+                    || !(urlsafe[s[2]] & us_hex)) {
+                    goto fail;
+                }
+                s += 3;
+            } else {
+            fail:
+                fpos = 0;
+                s = s2 = s1;
+            }
+        }
+        while (fpos != 3) {
+            inf.f[fpos].first = fpos ? inf.f[fpos - 1].second : 0;
+            inf.f[fpos].second = s - s1;
+            ++fpos;
+        }
     }
 
-    if (!(i.flags & info_query) && (f & info_query)) {
-        i.qurl.clear();
-        i.qpairs.clear();
-        if (i.urlp.field_set & (1 << UF_QUERY)) {
-            const char* s = url_.data() + i.urlp.field_data[UF_QUERY].off;
-            const char* ends = s + i.urlp.field_data[UF_QUERY].len;
-            i.qurl.reserve(ends - s);
+    if (!(inf.flags & info_params) && (fl & info_params)) {
+        inf.qurl.clear();
+        inf.qpairs.clear();
+        if (inf.f[1].first != inf.f[1].second) {
+            const char* s1 = url_.data() + inf.f[1].first + 1;
+            const char* s2 = url_.data() + inf.f[1].second;
+            inf.qurl.reserve(s2 - s1);
             int state = 0; // 0: beginning, 1: in name, 2: in value
-            const char* last = s;
+            const char* s = s1;
+            const char* last = s1;
             unsigned nstart = 0, nend = 0, vstart = 0, vend = 0;
-            while (s != ends) {
+            while (s != s2) {
                 if (*s == '&') {
                     if (state != 0) {
-                        vend = i.qurl.length() + s - last;
+                        vend = inf.qurl.length() + s - last;
                         if (state == 1) {
                             nend = vstart = vend;
                         }
-                        i.qpairs.emplace_back(nstart, nend, vstart, vend);
+                        inf.qpairs.emplace_back(nstart, nend, vstart, vend);
                         nstart = nend = vend + 1;
                         state = 0;
                     }
@@ -229,7 +271,7 @@ void http_message::make_info(unsigned f) const {
                     continue;
                 }
                 if (*s == '=' && state <= 1) {
-                    nend = i.qurl.length() + s - last;
+                    nend = inf.qurl.length() + s - last;
                     vstart = nend + 1;
                     state = 2;
                     ++s;
@@ -239,80 +281,40 @@ void http_message::make_info(unsigned f) const {
                     state = 1;
                 }
                 if (*s == '%'
-                    && ends - s >= 2
-                    && isxdigit((unsigned char) s[1])
-                    && isxdigit((unsigned char) s[2])) {
-                    i.qurl.append(last, s);
-                    i.qurl.push_back(xvalue(s[1]) * 16 + xvalue(s[2]));
+                    && s2 - s >= 2
+                    && (urlsafe[(unsigned char) s[1]] & us_hex)
+                    && (urlsafe[(unsigned char) s[2]] & us_hex)) {
+                    inf.qurl.append(last, s);
+                    inf.qurl.push_back(xvalue(s[1]) * 16 + xvalue(s[2]));
                     last = s = s + 3;
                 } else if (*s == '+') {
-                    i.qurl.append(last, s);
-                    i.qurl.push_back(' ');
+                    inf.qurl.append(last, s);
+                    inf.qurl.push_back(' ');
                     last = s = s + 1;
                 } else {
                     ++s;
                 }
             }
             if (last != s) {
-                i.qurl.append(last, s);
+                inf.qurl.append(last, s);
             }
             if (state != 0) {
-                vend = i.qurl.length();
+                vend = inf.qurl.length();
                 if (state == 1) {
                     nend = vstart = vend;
                 }
-                i.qpairs.emplace_back(nstart, nend, vstart, vend);
+                inf.qpairs.emplace_back(nstart, nend, vstart, vend);
             }
         }
-        i.flags |= info_query;
+        inf.flags |= info_params;
     }
 }
 
-std::string_view http_message::host() const {
-    info_type& i = info(info_url);
-    if (i.urlp.field_set & (1 << UF_HOST)) {
-        return url_.substr(i.urlp.field_data[UF_HOST].off,
-                           i.urlp.field_data[UF_HOST].len);
-    }
-    auto it = header_begin(), end = header_end();
+bool http_message::has_search_param(std::string_view name) const {
+    const info_type& inf = info(info_params);
+    auto it = inf.qpairs.begin(), end = inf.qpairs.end();
     while (it != end) {
-        if (it->name_eq_case("host", 4)) {
-            return it->value();
-        }
-        ++it;
-    }
-    return std::string_view();
-}
-
-std::string http_message::url_host_port() const {
-    info_type& i = info(info_url);
-    std::string host;
-    host.reserve(url_.length());
-    if (i.urlp.field_set & (1 << UF_HOST)) {
-        host = url_.substr(i.urlp.field_data[UF_HOST].off,
-                           i.urlp.field_data[UF_HOST].len);
-    }
-    if ((i.urlp.field_set & (1 << UF_PORT)) && !host.empty()) {
-        host += ":";
-        host += url_.substr(i.urlp.field_data[UF_PORT].off,
-                            i.urlp.field_data[UF_PORT].len);
-    }
-    return host;
-}
-
-uint16_t http_message::url_port() const {
-    info_type& i = info(info_url);
-    if (i.urlp.field_set & (1 << UF_PORT)) {
-        return i.urlp.port;
-    }
-    return 0;
-}
-
-bool http_message::has_query(std::string_view name) const {
-    const info_type& i = info(info_query);
-    auto it = i.qpairs.begin(), end = i.qpairs.end();
-    while (it != end) {
-        if (it->name_eq(i.qurl.data(), name)) {
+        if (it->name_eq(inf.qurl.data(), name)) {
             return true;
         }
         ++it;
@@ -320,12 +322,12 @@ bool http_message::has_query(std::string_view name) const {
     return false;
 }
 
-std::string_view http_message::query(std::string_view name) const {
-    const info_type& i = info(info_query);
-    auto it = i.qpairs.begin(), end = i.qpairs.end();
+std::string_view http_message::search_param(std::string_view name) const {
+    const info_type& inf = info(info_params);
+    auto it = inf.qpairs.begin(), end = inf.qpairs.end();
     while (it != end) {
-        if (it->name_eq(i.qurl.data(), name)) {
-            return std::string_view{i.qurl.data() + it->value1, it->value2};
+        if (it->name_eq(inf.qurl.data(), name)) {
+            return std::string_view{inf.qurl.data() + it->value1, it->value2};
         }
         ++it;
     }
@@ -333,13 +335,13 @@ std::string_view http_message::query(std::string_view name) const {
 }
 
 
-http_parser::http_parser(fd f, enum llhttp_t_type hp_type)
+http_parser::http_parser(fd f, enum llhttp_type hp_type)
     : f_(std::move(f)) {
-    llhttp_t_init(&hp_, hp_type);
+    llhttp_init(&hp_, hp_type, &settings);
 }
 
 void http_parser::clear() {
-    llhttp_t_init(&hp_, (enum llhttp_t_type) hp_.type);
+    llhttp_reset(&hp_);
 }
 
 inline void http_parser::copy_parser_status(message_data& md) {
@@ -347,7 +349,7 @@ inline void http_parser::copy_parser_status(message_data& md) {
     md.hm.minor_ = hp_.http_minor;
     md.hm.status_code_ = hp_.status_code;
     md.hm.method_ = hp_.method;
-    md.hm.error_ = hp_.http_errno;
+    md.hm.error_ = hp_.error;
     md.hm.upgrade_ = hp_.upgrade;
 }
 
@@ -450,68 +452,45 @@ int http_parser::on_message_complete(::llhttp_t* hp) {
 }
 
 task<http_message> http_parser::receive() {
-
-}
-tamed void http_parser::receive(fd f, event<http_message> done) {
-    tamed {
-        message_data md;
-        fdref fi(std::move(f));
-    }
+    char buf[8192];
+    message_data md;
     md.hm.status_code(0);
-    md.done = false;
 
-    twait { fi.acquire_read(tamer::make_event()); }
-
-    while (fi && done) {
-        {
-            char mbuf[32768];
-            ssize_t nread = fi.read(mbuf, sizeof(mbuf));
-
-            if (nread != 0 && nread != (ssize_t) -1) {
-                hp_.data = &md;
-                size_t nconsumed =
-                    http_parser_execute(&hp_, &settings, mbuf, nread);
-                if (hp_.upgrade || nconsumed != (size_t) nread || md.done) {
-                    copy_parser_status(md);
-                    break;
-                }
-            } else if (nread == 0) {
-                break;
-            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* fall through to blocking */
-            } else if (errno != EINTR) {
-                fi.close(errno);
-                break;
-            } else {
-                continue;
-            }
+    while (true) {
+        size_t nr = co_await read_once(f_, buf, sizeof(buf));
+        if (nr == 0) {
+            break;
         }
-
-        twait { tamer::at_fd_read(fi.fdnum(), make_event()); }
+        hp_.data = &md;
+        size_t nconsumed = llhttp_execute(&hp_, buf, nr);
+        if (hp_.upgrade || nconsumed != nr || md.state == state_done) {
+            copy_parser_status(md);
+            break;
+        }
     }
 
-    if (done && !md.done && !md.hm.error_) {
-        hp_.http_errno = md.hm.error_ = HPE_UNKNOWN;
+    if (md.state != state_done && !md.hm.error_) {
+        hp_.error = md.hm.error_ = HPE_USER;
     }
-    done(TAMER_MOVE(md.hm));
+    co_return std::move(md.hm);
 }
 
 task<> http_parser::send_request(http_message m) {
     std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
-        llhttp_method_str(m.method()), m.url(), m.http_major(), m.http_minor());
+        llhttp_method_name(m.method()), m.url(), m.http_major(), m.http_minor());
     if (!m.body_.empty()
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
-        m.add_header("Content-Length", std::to_s(m.body_.length()));
+        m.add_header("Content-Length", m.body_.length());
     }
     m.headers_.append("\r\n", 2);
 
-    struct iovec iov[3];
-    iov[0] = struct iovec{ urlline.data(), urlline.length() };
-    iov[1] = struct iovec{ m.headers_.data(), m.headers_.length() };
+    iovec iov[3];
+    iov[0] = iovec{ urlline.data(), urlline.length() };
+    iov[1] = iovec{ m.headers_.data(), m.headers_.length() };
     size_t iovcnt = 2;
     if (m.body_.length()) {
-        iov[2] = struct iovec{ m.body_.data(), m.body_.length() };
+        iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
     co_await writev(f_, iov, iovcnt);
@@ -538,7 +517,7 @@ task<> http_parser::send_response(http_message m) {
         }
     }
 
-    std::string_view status_message = m.status_message.empty()
+    std::string_view status_message = m.status_message_.empty()
         ? std::string_view(m.default_status_message(m.status_code()))
         : std::string_view(m.status_message());
     std::string codeline = std::format("HTTP/{}.{} {} {}\r\n",
@@ -546,16 +525,16 @@ task<> http_parser::send_response(http_message m) {
     if (!m.body_.empty()
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
-        m.add_header("Content-Length", std::to_s(m.body_.length()));
+        m.add_header("Content-Length", m.body_.length());
     }
-    m.headers_.appeind("\r\n", 2);
+    m.headers_.append("\r\n", 2);
 
-    struct iovec iov[3];
-    iov[0] = struct iovec{ codeline.data(), codeline.length() };
-    iov[1] = struct iovec{ m.headers_.data(), m.headers_.length() };
+    iovec iov[3];
+    iov[0] = iovec{ codeline.data(), codeline.length() };
+    iov[1] = iovec{ m.headers_.data(), m.headers_.length() };
     size_t iovcnt = 2;
     if (m.body_.length()) {
-        iov[2] = struct iovec{ m.body_.data(), m.body_.length() };
+        iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
     co_await writev(f_, iov, iovcnt);
@@ -571,10 +550,10 @@ task<> http_parser::send(http_message m) {
 
 task<> http_parser::send_response_chunk(std::string str) {
     std::string lenline = std::format("{}\r\n", str.length());
-    struct iovec iov[3];
-    iov[0] = struct iovec{ lenline.data(), lenline.length() };
-    iov[1] = struct iovec{ str.data(), str.length() };
-    iov[2] = struct iovec{ "\r\n", 2 };
+    iovec iov[3];
+    iov[0] = iovec{ lenline.data(), lenline.length() };
+    iov[1] = iovec{ str.data(), str.length() };
+    iov[2] = iovec{ (void*) "\r\n", 2 };
     co_await writev(f_, iov, 3);
 }
 

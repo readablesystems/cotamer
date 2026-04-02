@@ -146,24 +146,24 @@ class http_message {
 
     inline const std::string& body() const;
 
-    std::string_view host() const;
-    inline std::string_view url_schema() const;
-    inline std::string_view url_host() const;
-    std::string_view url_host_port() const;
-    uint16_t url_port() const;
-    inline std::string_view url_path() const;
-    inline bool has_query() const;
-    inline std::string_view query() const;
-    bool has_query(std::string_view name) const;
-    std::string_view query(std::string_view name) const;
+    inline bool has_valid_url() const;
+    inline bool has_path() const;
+    inline std::string_view path() const;
+    inline bool has_search() const;
+    inline std::string_view search() const;
+    inline bool has_hash() const;
+    inline std::string_view hash() const;
+    bool has_search_param(std::string_view name) const;
+    std::string_view search_param(std::string_view name) const;
 
     inline header_iterator header_begin() const;
     inline header_iterator header_end() const;
-    inline header_iterator query_begin() const;
-    inline header_iterator query_end() const;
+    inline header_iterator search_param_begin() const;
+    inline header_iterator search_param_end() const;
 
     inline http_message& clear();
     void add_header(std::string key, std::string value);
+    inline void add_header(std::string key, size_t value);
 
     inline http_message& http_major(unsigned v);
     inline http_message& http_minor(unsigned v);
@@ -180,14 +180,14 @@ class http_message {
 
     static const char* default_status_message(unsigned code);
 
-  private:
+private:
     enum {
-        info_url = 1, info_query = 2
+        info_url = 1, info_params = 2
     };
 
     struct info_type {
-        unsigned flags;
-        struct http_parser_url urlp;
+        unsigned flags = 0;
+        std::pair<unsigned, unsigned> f[3];
         std::string qurl;
         std::vector<http_opair> qpairs;
         inline info_type()
@@ -207,33 +207,32 @@ class http_message {
     std::string headers_;
     std::vector<http_opair> hpairs_;
     std::string body_;
-
-    mutable std::shared_ptr<info_type> info_;
+    mutable std::unique_ptr<info_type> info_;
 
     inline void kill_info(unsigned f) const;
     inline info_type& info(unsigned f) const;
     void make_info(unsigned f) const;
     inline bool has_url_field(int field) const;
-    inline std::string url_field(int field) const;
+    inline std::string_view url_field(int field) const;
     void do_clear();
     friend class http_parser;
 };
 
 class http_parser {
 public:
-    http_parser(fd f, enum llhttp_t_type type);
+    http_parser(fd f, enum llhttp_type type);
 
     void clear();
     inline bool ok() const;
     inline enum llhttp_errno error() const;
     inline bool should_keep_alive() const;
 
-    task<http_message> receive(fd f);
+    task<http_message> receive();
     task<> send(http_message);
     task<> send_request(http_message);
     task<> send_response(http_message);
     task<> send_response_chunk(std::string);
-    task<> send_response_end_chunk(std::string);
+    task<> send_response_end_chunk();
 
     inline void clear_should_keep_alive();
 
@@ -242,8 +241,6 @@ private:
 
     ::llhttp_t hp_;
     fd f_;
-    char buf_[bufsize];
-    size_t pos_ = 0;
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
 
@@ -255,7 +252,7 @@ private:
         unsigned value1;
     };
 
-    static const http_parser_settings settings;
+    static const llhttp_settings_t settings;
     static http_parser* get_parser(::llhttp_t* hp);
     static message_data* get_message_data(::llhttp_t* hp);
     static int on_message_begin(::llhttp_t* hp);
@@ -266,6 +263,7 @@ private:
     static int on_header_value(::llhttp_t* hp, const char* s, size_t len);
     static int on_header_value_complete(::llhttp_t* hp);
     static int on_headers_complete(::llhttp_t* hp);
+    static int on_chunk_header(::llhttp_t* hp);
     static int on_body(::llhttp_t* hp, const char* s, size_t len);
     static int on_message_complete(::llhttp_t* hp);
     inline void copy_parser_status(message_data& md);
@@ -276,9 +274,10 @@ inline http_message::http_message()
       error_(HPE_OK), upgrade_(0) {
 }
 
-inline void http_message::kill_info(unsigned f) const {
-    if (info_)
-        info_->flags &= ~f;
+inline void http_message::kill_info(unsigned fl) const {
+    if (info_) {
+        info_->flags &= ~fl;
+    }
 }
 
 inline unsigned http_message::http_major() const {
@@ -341,11 +340,11 @@ inline http_message::header_iterator http_message::find_header(std::string_view 
     return find_header(name.data(), name.length());
 }
 
-inline std::string_view http_message::header(const char* name) const {
+inline std::string http_message::header(const char* name) const {
     return header(name, strlen(name));
 }
 
-inline std::string_view http_message::header(std::string_view name) const {
+inline std::string http_message::header(std::string_view name) const {
     return header(name.data(), name.length());
 }
 
@@ -354,36 +353,41 @@ inline const std::string& http_message::body() const {
 }
 
 inline bool http_message::has_url_field(int field) const {
-    return info(info_url).urlp.field_set & (1 << field);
+    auto& inf = info(info_url);
+    return inf.f[field].first != inf.f[field].second;
 }
 
 inline std::string_view http_message::url_field(int field) const {
-    const info_type& i = info(info_url);
-    if (i.urlp.field_set & (1 << field)) {
-        return std::string_view(url_.data() + i.urlp.field_data[field].off,
-                                i.urlp.field_data[field].len);
+    auto& inf = info(info_url);
+    if (inf.f[field].first != inf.f[field].second) {
+        return std::string_view(url_.data() + inf.f[field].first,
+                                url_.data() + inf.f[field].second);
     }
     return std::string_view();
 }
 
-inline bool http_message::has_query() const {
-    return has_url_field(UF_QUERY);
+inline bool http_message::has_valid_url() const {
+    return has_url_field(0);
 }
 
-inline std::string_view http_message::query() const {
-    return url_field(UF_QUERY);
+inline std::string_view http_message::path() const {
+    return url_field(0);
 }
 
-inline std::string_view http_message::url_schema() const {
-    return url_field(UF_SCHEMA);
+inline bool http_message::has_search() const {
+    return has_url_field(1);
 }
 
-inline std::string_view http_message::url_host() const {
-    return url_field(UF_HOST);
+inline std::string_view http_message::search() const {
+    return url_field(1);
 }
 
-inline std::string_view http_message::url_path() const {
-    return url_field(UF_PATH);
+inline bool http_message::has_hash() const {
+    return has_url_field(2);
+}
+
+inline std::string_view http_message::hash() const {
+    return url_field(2);
 }
 
 inline http_message& http_message::http_major(unsigned v) {
@@ -425,8 +429,12 @@ inline http_message& http_message::method(llhttp_method method) {
 
 inline http_message& http_message::url(std::string url) {
     url_ = std::move(url);
-    kill_info(info_url | info_query);
+    kill_info(info_url | info_params);
     return *this;
+}
+
+inline void http_message::add_header(std::string key, size_t value) {
+    add_header(std::move(key), std::to_string(value));
 }
 
 inline http_message& http_message::header(std::string key, std::string value) {
@@ -435,7 +443,7 @@ inline http_message& http_message::header(std::string key, std::string value) {
 }
 
 inline http_message& http_message::header(std::string key, size_t value) {
-    add_header(std::move(key), std::to_s(value));
+    add_header(std::move(key), value);
     return *this;
 }
 
@@ -458,36 +466,36 @@ inline http_message& http_message::append_body(const std::string& x) {
 }
 
 inline http_message::info_type& http_message::info(unsigned f) const {
-    if (!info_ || !info_.unique() || (info_->flags & f) != f) {
+    if (!info_ || (info_->flags & f) != f) {
         make_info(f);
     }
     return *info_.get();
 }
 
 inline http_message::header_iterator http_message::header_begin() const {
-    return http_header_iterator{headers_.data(), hpairs_.begin()};
+    return http_header_iterator{headers_.data(), hpairs_.data()};
 }
 
 inline http_message::header_iterator http_message::header_end() const {
-    return http_header_iterator{headers_.data(), hpairs_.end()};
+    return http_header_iterator{headers_.data(), hpairs_.data() + hpairs_.size()};
 }
 
-inline http_message::header_iterator http_message::query_begin() const {
-    auto& i = info(info_query);
-    return http_header_iterator{i.qurl.data(), i.qpairs.begin()};
+inline http_message::header_iterator http_message::search_param_begin() const {
+    auto& inf = info(info_params);
+    return http_header_iterator{inf.qurl.data(), inf.qpairs.data()};
 }
 
-inline http_message::header_iterator http_message::query_end() const {
-    auto& i = info(info_query);
-    return http_header_iterator{i.qurl.data(), i.qpairs.end()};
+inline http_message::header_iterator http_message::search_param_end() const {
+    auto& inf = info(info_params);
+    return http_header_iterator{inf.qurl.data(), inf.qpairs.data() + inf.qpairs.size()};
 }
 
 inline bool http_parser::ok() const {
-    return hp_.http_errno == (unsigned) HPE_OK;
+    return hp_.error == (unsigned) HPE_OK;
 }
 
 inline llhttp_errno http_parser::error() const {
-    return (llhttp_errno) hp_.http_errno;
+    return (llhttp_errno) hp_.error;
 }
 
 inline bool http_parser::should_keep_alive() const {

@@ -355,7 +355,7 @@ inline task<size_t> read_once(const fd& f, void* buf, size_t count);
 inline task<size_t> write_once(const fd& f, const void* buf, size_t count);
 inline task<size_t> read(const fd& f, void* buf, size_t count);
 inline task<size_t> write(const fd& f, const void* buf, size_t count);
-inline task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt);
+task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt);
 
 inline task<> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
 inline task<fd> accept(const fd& listen_fd);

@@ -42,7 +42,6 @@ include_directories(${LLHTTP_INCLUDE_DIR})
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
     cotamer/io.cc
-    cotamer/http.cc
 )
 
 add_library(CotamerExamples OBJECT
