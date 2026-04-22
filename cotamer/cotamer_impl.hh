@@ -176,6 +176,8 @@ struct task_promise_base {
     inline std::coroutine_handle<> base_handle() {
         return std::coroutine_handle<task_promise_base>::from_promise(*this);
     }
+    template <typename T>
+    static inline std::coroutine_handle<task_promise_base> convert_handle(std::coroutine_handle<task_promise<T>>);
     inline constexpr task_promise_base* awaiter() const noexcept {
         return awaiter_ & 1UL ? nullptr : reinterpret_cast<task_promise_base*>(awaiter_);
     }
@@ -204,6 +206,22 @@ struct task_promise_base {
     inline std::coroutine_handle<> prepare_awaiter(task_promise_base&);
     inline void clear_awaiter();
     inline void resolution_point();
+
+    // Coroutine functionality common to any task<T>:
+    // - Behavior when coroutine starts (here, run eagerly):
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    // - Handle `co_await E` for different `E` types:
+    task_event_awaiter await_transform(event ev);
+    template <bool shared>
+    task_mutex_event_awaiter<shared> await_transform(mutex_event<shared> ev);
+    task_mutex_event_awaiter<false> await_transform(mutex&);
+    inline task_event_awaiter await_transform(interest);
+    inline interest_event_awaiter await_transform(interest_event);
+    inline task_resolution_awaiter await_transform(struct resolve);
+    template <typename Aw>
+    Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
+    // - Behavior after coroutine exits:
+    task_final_awaiter final_suspend() noexcept;
 };
 
 
@@ -212,23 +230,9 @@ struct task_promise : public task_promise_base {
     // Functions required by the C++ runtime
     // - Initialize the task<T> return value that manages the coroutine:
     inline task<T> get_return_object() noexcept;
-    // - Behavior when coroutine starts (here, run eagerly):
-    std::suspend_never initial_suspend() noexcept { return {}; }
-    // - Handle `co_await E` for different `E` types:
-    task_event_awaiter<T> await_transform(event ev);
-    template <bool shared>
-    task_mutex_event_awaiter<T, shared> await_transform(mutex_event<shared> ev);
-    task_mutex_event_awaiter<T, false> await_transform(mutex&);
-    inline task_event_awaiter<T> await_transform(interest);
-    inline interest_event_awaiter await_transform(interest_event);
-    inline task_resolution_awaiter await_transform(struct resolve);
-    template <typename Aw>
-    Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
     // - Handle `co_return V` or throwing an exception in the coroutine:
     void return_value(T value) { result_.template emplace<1>(std::move(value)); }
     void unhandled_exception() noexcept { result_.template emplace<2>(std::current_exception()); }
-    // - Behavior after coroutine exits:
-    task_final_awaiter final_suspend() noexcept;
     // - Export coroutine return value to `co_await`er:
     inline T result();
 
@@ -256,16 +260,6 @@ T task_promise<T>::result() {
 template <>
 struct task_promise<void> : public task_promise_base {
     inline task<void> get_return_object() noexcept;
-    std::suspend_never initial_suspend() noexcept { return {}; }
-    task_event_awaiter<void> await_transform(event ev);
-    template <bool shared>
-    task_mutex_event_awaiter<void, shared> await_transform(mutex_event<shared> ev);
-    inline task_mutex_event_awaiter<void, false> await_transform(mutex&);
-    inline task_event_awaiter<void> await_transform(interest);
-    inline interest_event_awaiter await_transform(interest_event);
-    inline task_resolution_awaiter await_transform(struct resolve);
-    template <typename Aw>
-    Aw&& await_transform(Aw&& aw) noexcept { return std::forward<Aw>(aw); }
     void return_void() noexcept { }
     void unhandled_exception() noexcept { exception_ = std::current_exception(); }
     void result() {
@@ -273,7 +267,6 @@ struct task_promise<void> : public task_promise_base {
             std::rethrow_exception(std::move(exception_));
         }
     }
-    inline task_final_awaiter final_suspend() noexcept;
 
     std::exception_ptr exception_;
 };
@@ -281,6 +274,12 @@ struct task_promise<void> : public task_promise_base {
 inline task<void> task_promise<void>::get_return_object() noexcept {
     static_assert(alignof(task_promise<void>) == alignof(task_promise_base));
     return task<void>{std::coroutine_handle<task_promise<void>>::from_promise(*this)};
+}
+
+template <typename T>
+inline std::coroutine_handle<task_promise_base> task_promise_base::convert_handle(std::coroutine_handle<task_promise<T>> handle) {
+    static_assert(alignof(task_promise<T>) == alignof(task_promise_base));
+    return std::coroutine_handle<task_promise_base>::from_promise(handle.promise());
 }
 
 
@@ -292,7 +291,7 @@ inline task<void> task_promise<void>::get_return_object() noexcept {
 //
 //    task_awaiter<T> awaits a task. We also define task_final_awaiter,
 //    which handles the implicit final suspension when a coroutine completes;
-//    task_event_awaiter<T>, which awaits an event; and a few others.
+//    task_event_awaiter, which awaits an event; and a few others.
 
 template <typename T>
 struct task_awaiter {
@@ -327,12 +326,7 @@ struct task_final_awaiter {
     }
 };
 
-template <typename T>
-inline task_final_awaiter task_promise<T>::final_suspend() noexcept {
-    return {};
-}
-
-inline task_final_awaiter task_promise<void>::final_suspend() noexcept {
+inline task_final_awaiter task_promise_base::final_suspend() noexcept {
     return {};
 }
 
@@ -359,12 +353,7 @@ struct task_resolution_awaiter {
     }
 };
 
-template <typename T>
-inline task_resolution_awaiter task_promise<T>::await_transform(struct resolve) {
-    return task_resolution_awaiter{};
-}
-
-inline task_resolution_awaiter task_promise<void>::await_transform(struct resolve) {
+inline task_resolution_awaiter task_promise_base::await_transform(struct resolve) {
     return task_resolution_awaiter{};
 }
 
@@ -862,13 +851,12 @@ inline bool event_handle::idle() const noexcept {
 
 
 
-// task_event_awaiter<T>
+// task_event_awaiter
 //    Awaiter for `co_await event` inside a task.
 
-template <typename T>
 struct task_event_awaiter {
     event_handle eh_;
-    std::coroutine_handle<task_promise<T>> coroutine_;
+    std::coroutine_handle<task_promise_base> coroutine_;
 
     ~task_event_awaiter() {
         if (coroutine_) {
@@ -878,6 +866,7 @@ struct task_event_awaiter {
     bool await_ready() noexcept {
         return eh_.triggered();
     }
+    template <typename T>
     bool await_suspend(std::coroutine_handle<task_promise<T>> awaiting) noexcept {
         event_body* eb = eh_.get();
         // apply interest{} if necessary, which might trigger `eb`
@@ -888,7 +877,7 @@ struct task_event_awaiter {
         if (ef & ef_triggered) {
             return false;
         }
-        coroutine_ = awaiting;
+        coroutine_ = task_promise_base::convert_handle(awaiting);
         eb->add_listener_unlock(coroutine_, ef);
         return true;
     }
@@ -910,13 +899,8 @@ struct task_event_awaiter {
     }
 };
 
-template <typename T>
-inline task_event_awaiter<T> task_promise<T>::await_transform(event ev) {
-    return task_event_awaiter<T>{std::move(ev).handle(), nullptr};
-}
-
-inline task_event_awaiter<void> task_promise<void>::await_transform(event ev) {
-    return task_event_awaiter<void>{std::move(ev).handle(), nullptr};
+inline task_event_awaiter task_promise_base::await_transform(event ev) {
+    return task_event_awaiter{std::move(ev).handle(), nullptr};
 }
 
 
@@ -930,13 +914,8 @@ inline event_handle& task_promise_base::make_interest() {
     return interest_;
 }
 
-template <typename T>
-inline task_event_awaiter<T> task_promise<T>::await_transform(interest) {
-    return task_event_awaiter<T>{make_interest(), nullptr};
-}
-
-inline task_event_awaiter<void> task_promise<void>::await_transform(interest) {
-    return task_event_awaiter<void>{make_interest(), nullptr};
+inline task_event_awaiter task_promise_base::await_transform(interest) {
+    return task_event_awaiter{make_interest(), nullptr};
 }
 
 // make_event(interest)
@@ -957,12 +936,7 @@ struct interest_event_awaiter {
     event await_resume() { return event(std::move(handle_)); }
 };
 
-template <typename T>
-inline interest_event_awaiter task_promise<T>::await_transform(interest_event) {
-    return interest_event_awaiter{make_interest()};
-}
-
-inline interest_event_awaiter task_promise<void>::await_transform(interest_event) {
+inline interest_event_awaiter task_promise_base::await_transform(interest_event) {
     return interest_event_awaiter{make_interest()};
 }
 
@@ -1005,12 +979,12 @@ inline void quorum_event_body::fix_want_interest(event_handle& ievent) {
 }
 
 
-// task_mutex_event_awaiter<T, shared>
+// task_mutex_event_awaiter<shared>
 //    Awaiter for `co_await mutex_event` inside a task.
 
-template <typename T, bool shared>
-struct task_mutex_event_awaiter : public task_event_awaiter<T> {
-    using parent = task_event_awaiter<T>;
+template <bool shared>
+struct task_mutex_event_awaiter : public task_event_awaiter {
+    using parent = task_event_awaiter;
     mutex* m_;
 
     locked_mutex_t<shared> await_resume() {
@@ -1019,15 +993,9 @@ struct task_mutex_event_awaiter : public task_event_awaiter<T> {
     }
 };
 
-template <typename T>
 template <bool shared>
-inline task_mutex_event_awaiter<T, shared> task_promise<T>::await_transform(mutex_event<shared> ev) {
-    return task_mutex_event_awaiter<T, shared>{{std::move(ev).handle(), nullptr}, ev.mutex()};
-}
-
-template <bool shared>
-inline task_mutex_event_awaiter<void, shared> task_promise<void>::await_transform(mutex_event<shared> ev) {
-    return task_mutex_event_awaiter<void, shared>{{std::move(ev).handle(), nullptr}, ev.mutex()};
+inline task_mutex_event_awaiter<shared> task_promise_base::await_transform(mutex_event<shared> ev) {
+    return task_mutex_event_awaiter<shared>{{std::move(ev).handle(), nullptr}, ev.mutex()};
 }
 
 
@@ -2297,12 +2265,7 @@ inline auto shared_lock::release() noexcept -> mutex_type* {
 }
 
 namespace detail {
-template <typename T>
-inline task_mutex_event_awaiter<T, false> task_promise<T>::await_transform(mutex& m) {
-    return await_transform(m.lock());
-}
-
-inline task_mutex_event_awaiter<void, false> task_promise<void>::await_transform(mutex& m) {
+inline task_mutex_event_awaiter<false> task_promise_base::await_transform(mutex& m) {
     return await_transform(m.lock());
 }
 }

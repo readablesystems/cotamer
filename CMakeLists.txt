@@ -34,9 +34,18 @@ if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
     message(FATAL_ERROR "xxhash not found. Install with: brew install xxhash")
 endif()
 
+# Find llhttp
+find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
+find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
+include_directories(${LLHTTP_INCLUDE_DIR})
+
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
     cotamer/io.cc
+)
+
+add_library(CotamerHttp OBJECT
+    cotamer/http.cc
 )
 
 add_library(CotamerExamples OBJECT
@@ -93,4 +102,16 @@ target_include_directories(rpcg-client PRIVATE
 )
 target_link_libraries(rpcg-client PRIVATE
     ${XXHASH_LIBRARY}
+)
+
+add_executable(httpd
+    examples/httpd.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerHttp>
+)
+target_include_directories(httpd PRIVATE
+    ${LLHTTP_INCLUDE_DIR}
+)
+target_link_libraries(httpd PRIVATE
+    ${LLHTTP_LIBRARY}
 )
