@@ -6,6 +6,13 @@ option(ASAN "Enable AddressSanitizer" OFF)
 option(UBSAN "Enable UBSanitizer" OFF)
 option(TSAN "Enable ThreadSanitizer" OFF)
 
+# Optional integrations. AUTO enables if the dependency is found, ON requires
+# it, OFF skips it.
+set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
+set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
+set_property(CACHE COTAMER_MBEDTLS PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -38,6 +45,46 @@ endif()
 find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
 find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
 include_directories(${LLHTTP_INCLUDE_DIR})
+
+# Find libcurl
+set(COTAMER_HAVE_CURL 0)
+if(NOT COTAMER_CURL STREQUAL "OFF")
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        set(COTAMER_HAVE_CURL 1)
+        message(STATUS "libcurl integration: enabled (${CURL_VERSION_STRING})")
+    elseif(COTAMER_CURL STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_CURL=ON but libcurl was not found")
+    else()
+        message(STATUS "libcurl integration: disabled (libcurl not found)")
+    endif()
+endif()
+
+# Find mbedtls (mbedtls, mbedx509, mbedcrypto)
+set(COTAMER_HAVE_MBEDTLS 0)
+if(NOT COTAMER_MBEDTLS STREQUAL "OFF")
+    find_path(MBEDTLS_INCLUDE_DIR mbedtls/ssl.h HINTS /opt/homebrew/include /usr/local/include)
+    find_library(MBEDTLS_LIBRARY mbedtls HINTS /opt/homebrew/lib /usr/local/lib)
+    find_library(MBEDX509_LIBRARY mbedx509 HINTS /opt/homebrew/lib /usr/local/lib)
+    find_library(MBEDCRYPTO_LIBRARY mbedcrypto HINTS /opt/homebrew/lib /usr/local/lib)
+    if(MBEDTLS_INCLUDE_DIR AND MBEDTLS_LIBRARY AND MBEDX509_LIBRARY AND MBEDCRYPTO_LIBRARY)
+        set(COTAMER_HAVE_MBEDTLS 1)
+        set(MBEDTLS_LIBRARIES ${MBEDTLS_LIBRARY} ${MBEDX509_LIBRARY} ${MBEDCRYPTO_LIBRARY})
+        message(STATUS "mbedtls integration: enabled")
+    elseif(COTAMER_MBEDTLS STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_MBEDTLS=ON but mbedtls was not found")
+    else()
+        message(STATUS "mbedtls integration: disabled (mbedtls not found)")
+    endif()
+endif()
+
+# Generate config header
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cotamer/config.hh.in
+    ${CMAKE_CURRENT_BINARY_DIR}/cotamer/config.hh
+    @ONLY
+)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
@@ -120,3 +167,45 @@ target_include_directories(httpd PRIVATE
 target_link_libraries(httpd PRIVATE
     ${LLHTTP_LIBRARY}
 )
+
+# Optional libcurl integration
+if(COTAMER_HAVE_CURL)
+    add_library(CotamerCurl OBJECT
+        cotamer/curl.cc
+    )
+    target_link_libraries(CotamerCurl PUBLIC CURL::libcurl)
+
+    add_executable(cot-test-curl
+        test/cot-test-curl.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerCurl>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_link_libraries(cot-test-curl PRIVATE
+        CURL::libcurl
+        ${LLHTTP_LIBRARY}
+    )
+
+    add_executable(https-fetch
+        examples/https-fetch.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerCurl>
+    )
+    target_link_libraries(https-fetch PRIVATE CURL::libcurl)
+endif()
+
+# Optional mbedtls integration
+if(COTAMER_HAVE_MBEDTLS)
+    add_library(CotamerTls OBJECT
+        cotamer/tls.cc
+    )
+    target_include_directories(CotamerTls PUBLIC ${MBEDTLS_INCLUDE_DIR})
+
+    add_executable(cot-test-tls
+        test/cot-test-tls.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerTls>
+    )
+    target_include_directories(cot-test-tls PRIVATE ${MBEDTLS_INCLUDE_DIR})
+    target_link_libraries(cot-test-tls PRIVATE ${MBEDTLS_LIBRARIES})
+endif()
