@@ -90,7 +90,7 @@ public:
 
     // Pop the event off the head of a list returned by `take_watch_list`.
     // Advances `wix`, recycles the slot, returns the watchrec's event.
-    inline event_handle pop_watch_list_event(unsigned& wix);
+    inline event_handle pop_watch_list_event(unsigned& wix, fdevent mask = fdevent::none);
 
     // Called from `driver::notify_close` once the fd is closed. Triggers
     // and reclaims every watchrec on `fd`, bumps the epoch, clears the

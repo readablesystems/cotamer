@@ -108,7 +108,7 @@ struct fd_body {
         bool deletable = ref_.load(std::memory_order_acquire) == 0;
         // The OS fd should be closed if close was explicitly requested
         // (fd_ < 0) and the fd_body isn't registered on any driver
-        // (!drivers_.empty() -- this branch).
+        // (drivers_.empty() -- this branch).
         int closable = fd_.load(std::memory_order_relaxed) < 0 ? base_fd_ : -1;
         if (closable >= 0) {
             base_fd_ = -1;
@@ -1894,8 +1894,7 @@ inline unsigned fd_event_set::take_watch_list(int fd, fdevent imask, unsigned ep
     while (wix) {
         auto& wr = ws_[wix - 1];
         unsigned next = wr.wlink;
-        if ((imask & wr.mask) != fdevent::none  /* kernel reported event */
-            || wr.ev->empty()                   /* garbage collection */) {
+        if ((imask & wr.mask) != fdevent::none || wr.ev->empty()) {
             *wpprev = wix;
             wpprev = &wr.wlink;
         } else {
@@ -1913,12 +1912,15 @@ inline unsigned fd_event_set::take_watch_list(int fd, fdevent imask, unsigned ep
     return whead;
 }
 
-inline event_handle fd_event_set::pop_watch_list_event(unsigned& wix) {
+inline event_handle fd_event_set::pop_watch_list_event(unsigned& wix, fdevent mask) {
     unsigned in_wix = wix;
     watchrec& wr = ws_[wix - 1];
     wix = wr.wlink;
     wr.wlink = free_wlink_;
     free_wlink_ = in_wix;
+    if (wr.ev && mask != fdevent::none) {
+        wr.ev->set_user_flags(int(mask) << efs_user);
+    }
     return std::exchange(wr.ev, nullptr);
 }
 

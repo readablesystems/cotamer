@@ -112,10 +112,6 @@ void fd_body::close(bool because_deref) {
     }
 }
 
-}
-
-
-namespace detail {
 
 event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
                                  driver* drv) {
@@ -133,8 +129,9 @@ event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
         if (fdi.body) {
             // This should not happen: the user has closed and reopened the
             // file descriptor, or, worse, constructed a new `fd_body` for
-            // the same descriptor.
-            fdi.body->remove_listener(drv);
+            // the same descriptor. Trigger all events.
+            auto fx = fd_close(fd);
+            fx->first->remove_listener(drv);
         }
         fdi.body = body;
         body->add_listener(drv);
@@ -439,7 +436,7 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
 #endif
         auto wix = fds_.take_watch_list(fdu->fd, fdu->mask, fdu->epoch);
         while (wix) {
-            auto eh = fds_.pop_watch_list_event(wix);
+            auto eh = fds_.pop_watch_list_event(wix, fdu->mask);
             while (auto coh = eh->driver_trigger(this)) {
                 coh();
                 step_time();
