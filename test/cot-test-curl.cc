@@ -116,6 +116,57 @@ cot::task<> test_redirect() {
 }
 
 
+// Helper for test_stress; free function so the captured refs (in the
+// caller's coroutine frame) stay valid for the lifetime of the coroutine.
+cot::task<> stress_fetch(int i, uint16_t port,
+                         int& outstanding, int& failures, cot::event done) {
+    try {
+        auto url = std::format("http://127.0.0.1:{}/req{}", port, i);
+        auto resp = co_await cot::curl_fetch(url);
+        if (resp.status != 200
+            || resp.body != std::format("OK /req{}", i)) {
+            ++failures;
+        }
+    } catch (...) {
+        ++failures;
+    }
+    if (--outstanding == 0) {
+        done.trigger();
+    }
+}
+
+// TEST: many concurrent fetches against a single local server.
+cot::task<> test_stress() {
+    uint16_t port = unique_port();
+    cot::event stop;
+    auto handler = [](const cot::http_message& req) {
+        cot::http_message res;
+        res.status_code(200)
+           .header("Content-Type", "text/plain")
+           .body(std::format("OK {}", req.url()));
+        return res;
+    };
+    run_server(port, handler, stop).detach();
+    co_await cot::after(5ms);
+
+    constexpr int N = 50;
+    int outstanding = N;
+    int failures = 0;
+    cot::event all_done;
+
+    for (int i = 0; i < N; ++i) {
+        stress_fetch(i, port, outstanding, failures, all_done).detach();
+    }
+    co_await all_done;
+    assert(failures == 0);
+    std::cerr << "stress: ok (" << N << " concurrent fetches)\n";
+
+    stop.trigger();
+    co_await cot::after(50ms);
+    cot::curl_reset();
+}
+
+
 // TEST: transport error on unreachable port throws.
 cot::task<> test_error_path() {
     // Nothing listening on 1; connect should fail.
@@ -149,6 +200,7 @@ cot::task<> run_all(int argc, char* argv[]) {
 
     co_await run("basic_get",   test_basic_get);
     co_await run("redirect",    test_redirect);
+    co_await run("stress",      test_stress);
     co_await run("error_path",  test_error_path);
 
     if (ran == 0) {
