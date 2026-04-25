@@ -116,7 +116,7 @@ void fd_body::close(bool because_deref) {
 event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
                                  driver* drv) {
     if (fd < 0 || imask == fdevent::none) {
-        return event_handle();
+        return event_handle{new event_body};
     }
     unsigned ufd = fd;
     if (ufd >= fdr_capacity_) {
