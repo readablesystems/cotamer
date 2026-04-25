@@ -33,6 +33,8 @@ enum class fdevent {
 };
 inline fdevent operator&(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) & int(b)); }
 inline fdevent operator|(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) | int(b)); }
+inline fdevent& operator|=(fdevent& a, fdevent b) { a = a | b; return a; }
+inline bool operator!(fdevent e) { return e != fdevent::none; }
 
 }
 #include "cotamer/event_handle.hh"
