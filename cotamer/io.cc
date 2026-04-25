@@ -379,8 +379,14 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     // Ensure pollfd if we are asked to block before any fd registrations
     (void) pollfd();
 
-#if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
+#if COTAMER_USE_KQUEUE
+    // Cross-thread wake injects an EVFILT_USER event onto the kqueue fd
     wakefd_.store(pollfd_, std::memory_order_seq_cst);
+#elif COTAMER_USE_EPOLL
+    // Cross-thread wake writes to an eventfd()
+    wakefd_.store(epoll_wakefd_, std::memory_order_seq_cst);
+#endif
+#if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
     if (lock_.load(std::memory_order_seq_cst)) {
         timeout = duration::zero();
     }
