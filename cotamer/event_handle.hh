@@ -72,9 +72,11 @@ public:
     static constexpr unsigned internal_epoch = 1;
     static constexpr unsigned user_epoch = 2;
 
-    inline event_handle watch(int fd, int mask, fd_body* body, driver*);
-    inline event_handle take(int fd, int& mask, unsigned epoch);
-    inline std::optional<std::pair<fd_body*, unsigned>> check_fd_close(int fd);
+    event_handle watch(int fd, int imask, fd_body* body, driver*);
+    inline unsigned take_watches(int fd, int imask, unsigned epoch);
+    inline int watches_mask(unsigned eix) const;
+    inline event_handle watched_event(unsigned& eix);
+    std::optional<std::pair<fd_body*, unsigned>> check_fd_close(int fd);
 
     inline bool has_update() const noexcept;
     inline std::optional<fd_update> pop_update() noexcept;
@@ -84,30 +86,36 @@ private:
     static constexpr unsigned first_capacity = 128;
     static constexpr unsigned block_capacity = 1024;
 
-    // update_link_ values: singly-linked list of fdrecs with interest
+    // link values: singly-linked list of fdrecs with interest
     // potentially updated relative to the OS kernel event notifier. Link values
-    // are fd+1 (so fd 0 maps to 1); update_clean means not in list,
-    // update_sentinel means end of list or empty list head.
-    static constexpr unsigned update_sentinel = -1;
-    static constexpr unsigned update_clean = 0;
+    // are fd+1 (so fd 0 maps to 1); link_clean means not in list,
+    // link_sentinel means end of list or empty list head.
+    static constexpr unsigned link_sentinel = -1;
+    static constexpr unsigned link_clean = 0;
 
     struct fdrec {
-        event_handle ev[3];         // 0: readable, 1: writable, 2: closed
         fd_body* body = nullptr;    // weak ref to owning fd_body
-        unsigned update_link_ = update_clean;
         unsigned epoch = 0;
+        unsigned erhead_ = link_clean;
+        unsigned ertail_ = link_clean;
+        unsigned update_link_ = link_clean;
 
         inline bool known() const noexcept {
-            return ev[0] || ev[1] || ev[2];
-        }
-        inline int mask() const noexcept {
-            return (ev[0].empty() ? 0 : 1) | (ev[1].empty() ? 0 : 2) | (ev[2].empty() ? 0 : 4);
+            return erhead_ != link_clean;
         }
     };
 
+    struct erec {
+        event_handle ev;
+        int mask;
+        unsigned link;
+    };
+
     fdrec* fdrs_ = nullptr;
-    unsigned capacity_ = 0;
+    unsigned fdr_capacity_ = 0;
     unsigned update_link_ = -1;   // head of update list; see encoding above
+    std::vector<erec> ers_;
+    unsigned free_erlink_ = 0;
 
     void hard_ensure(unsigned fd);
 };

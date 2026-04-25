@@ -204,9 +204,9 @@ inline void fd_batch::clear(int pollfd) {
 }
 
 inline fd_event_set::~fd_event_set() {
-    if (capacity_ != 0) {
-        std::destroy(fdrs_, fdrs_ + capacity_);
-        std::allocator<fdrec>().deallocate(fdrs_, capacity_);
+    if (fdr_capacity_ != 0) {
+        std::destroy(fdrs_, fdrs_ + fdr_capacity_);
+        std::allocator<fdrec>().deallocate(fdrs_, fdr_capacity_);
     }
 }
 

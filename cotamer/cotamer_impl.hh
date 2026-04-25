@@ -1375,7 +1375,7 @@ inline void driver::after(const std::chrono::duration<Rep, Period>& d, event e) 
 }
 
 inline event driver::file_event(const cotamer::fd& f, fdevent type) {
-    return fds_.watch(f.fileno(), 1 << int(type), f.body(), this);
+    return fds_.watch(f.fileno(), int(type), f.body(), this);
 }
 
 inline void driver::loop() {
@@ -1838,98 +1838,74 @@ inline size_t driver::timer_size() const noexcept {
 
 namespace detail {
 
-inline event_handle fd_event_set::watch(int fd, int imask, fd_body* body,
-                                        driver* drv) {
-    if (fd < 0) {
-        return event_handle();
-    }
-    assert(imask == 1 || imask == 2 || imask == 4);
+inline unsigned fd_event_set::take_watches(int fd, int imask, unsigned epoch) {
     unsigned ufd = fd;
-    if (ufd >= capacity_) {
-        hard_ensure(ufd);
+    if (ufd >= fdr_capacity_) {
+        return 0U;
     }
     fdrec& fdi = fdrs_[ufd];
-    if (fdi.body != body) {
-        if (fdi.body) {
-            for (int ix = 0; ix != 3; ++ix) {
-                if (fdi.ev[ix]) {
-                    fdi.ev[ix]->trigger();
-                    fdi.ev[ix] = nullptr;
-                }
-            }
-            fdi.body->remove_listener(drv);
-        }
-        fdi.body = body;
-        body->add_listener(drv);
+    if (!fdi.erhead_ || (epoch && epoch != fdi.epoch)) {
+        return 0U;
     }
-    int interest = imask == 1 ? 0 : 1 + (imask == 4);
-    if (fdi.ev[interest].empty()) {
-        if (fdi.update_link_ == update_clean) {
-            fdi.update_link_ = update_link_;
-            update_link_ = ufd + 1;
+    unsigned erhead = 0U;
+    unsigned* erpprev = &erhead;
+    unsigned eix = fdi.erhead_;
+    unsigned* fdpprev = &fdi.erhead_;
+    fdi.ertail_ = 0U;
+    while (eix) {
+        auto& er = ers_[eix - 1];
+        unsigned next = er.link;
+        if ((imask & er.mask) || er.ev->empty()) {
+            *erpprev = eix;
+            erpprev = &er.link;
+        } else {
+            *fdpprev = fdi.ertail_ = eix;
+            fdpprev = &er.link;
         }
-        if (!fdi.ev[interest] || fdi.ev[interest].triggered()) {
-            fdi.ev[interest] = event_handle{new event_body};
-        }
+        eix = next;
     }
-    return fdi.ev[interest];
+    *erpprev = *fdpprev = 0U;
+    if (erhead && fdi.update_link_ == link_clean) {
+        fdi.update_link_ = update_link_;
+        update_link_ = ufd + 1;
+    }
+    return erhead;
 }
 
-inline event_handle fd_event_set::take(int fd, int& imask, unsigned epoch) {
-    unsigned ufd = fd;
-    if (ufd >= capacity_) {
-        return event_handle{};
-    }
-    fdrec& fdi = fdrs_[ufd];
-    for (int interest = 0; interest != 3; ++interest) {
-        if (!fdi.ev[interest]
-            || (!fdi.ev[interest]->empty()
-                && (!(imask & (1 << interest))
-                    || (epoch && epoch != fdi.epoch)))) {
-            continue;
-        }
-        if (fdi.update_link_ == update_clean) {
-            fdi.update_link_ = update_link_;
-            update_link_ = ufd + 1;
-        }
-        imask &= ~(1 << interest);
-        return std::exchange(fdi.ev[interest], nullptr);
-    }
-    return event_handle{};
-}
-
-inline std::optional<std::pair<fd_body*, unsigned>> fd_event_set::check_fd_close(int fd) {
-    unsigned ufd = fd;
-    if (ufd >= capacity_) {
-        return std::nullopt;
-    }
-    fdrec& fdi = fdrs_[ufd];
-    if (!fdi.body || fdi.body->fileno() >= 0) {
-        return std::nullopt;
-    }
-    for (int ix = 0; ix != 3; ++ix) {
-        if (fdi.ev[ix]) {
-            fdi.ev[ix]->trigger();
-            fdi.ev[ix] = nullptr;
-        }
-    }
-    ++fdi.epoch;
-    return {{std::exchange(fdi.body, nullptr), fdi.epoch - 1}};
+inline event_handle fd_event_set::watched_event(unsigned& eix) {
+    unsigned in_eix = eix;
+    erec& er = ers_[eix - 1];
+    eix = er.link;
+    er.link = free_erlink_;
+    free_erlink_ = in_eix;
+    return std::exchange(er.ev, nullptr);
 }
 
 inline bool fd_event_set::has_update() const noexcept {
-    return update_link_ != update_sentinel;
+    return update_link_ != link_sentinel;
+}
+
+inline int fd_event_set::watches_mask(unsigned eix) const {
+    int imask = 0;
+    while (eix) {
+        auto& er = ers_[eix - 1];
+        if (!er.ev.empty()) {
+            imask |= er.mask;
+        }
+        eix = er.link;
+    }
+    return imask;
 }
 
 inline std::optional<fd_update> fd_event_set::pop_update() noexcept {
-    if (update_link_ == update_sentinel) {
+    if (update_link_ == link_sentinel) {
         return std::nullopt;
     }
     unsigned ufd = update_link_ - 1;
     fdrec& fdi = fdrs_[ufd];
     update_link_ = fdi.update_link_;
-    fdi.update_link_ = update_clean;
-    auto mask = fdi.mask();
+    fdi.update_link_ = link_clean;
+    auto mask = watches_mask(fdi.erhead_);
     unsigned epoch = fdi.epoch;
     if (!mask) {
         ++fdi.epoch;
@@ -1941,15 +1917,15 @@ inline std::optional<fd_update> fd_event_set::pop_update() noexcept {
 
 inline std::optional<fd_update> fd_event_set::next_known(int fd) const noexcept {
     unsigned ufd = fd + 1;
-    if (ufd >= capacity_) {
+    if (ufd >= fdr_capacity_) {
         return std::nullopt;
     }
     const fdrec* fdrp = fdrs_ + ufd;
     while (true) {
         if (fdrp->known()) {
-            return {{int(ufd), fdrp->mask(), fdrp->epoch}};
+            return {{int(ufd), watches_mask(fdrp->erhead_), fdrp->epoch}};
         }
-        if (++ufd == capacity_) {
+        if (++ufd == fdr_capacity_) {
             return std::nullopt;
         }
         ++fdrp;

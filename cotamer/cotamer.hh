@@ -171,7 +171,10 @@ using steady_time_point = std::chrono::steady_clock::time_point;
 using duration = std::chrono::steady_clock::duration;
 
 enum class clock { virtual_time = 0, real_time = 0 };
-enum class fdevent { read = 0, write = 1, close = 2 };
+enum class fdevent {
+    read = 1, write = 2, close = 4,
+    read_write = 3, read_close = 5, write_close = 6, all = 7
+};
 
 class driver {
 public:
