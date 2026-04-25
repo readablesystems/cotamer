@@ -96,14 +96,19 @@ bool driver::loop(looptype lt) {
             }
         }
 
-        // register changes in interested file descriptor set
-        while (auto fdu = fds_.pop_update()) {
-            apply_fd_update(fdb, *fdu);
-        }
-
         // remove dead keepalives
         while (!keepalives_.empty() && keepalives_.back()->triggered()) {
             keepalives_.pop_back();
+        }
+
+        // if clearing, empty fds, keepalives, and timeouts
+        if (clearing_) {
+            process_clearing();
+        }
+
+        // register changes in interested file descriptor set
+        while (auto fdu = fds_.pop_update()) {
+            apply_fd_update(fdb, *fdu);
         }
 
         // exit if nothing to do
@@ -115,11 +120,6 @@ bool driver::loop(looptype lt) {
             && keepalives_.empty()) {
             clearing_ = false;
             return false;
-        }
-
-        // if clearing, empty fds, keepalives, and timeouts
-        if (clearing_) {
-            process_clearing();
         }
 
         // compute timeout

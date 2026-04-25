@@ -281,7 +281,7 @@ void driver::apply_fd_update(detail::fd_batch& batch,
     batch.add(pollfd(), fdu, old_mask);
 
     // record the new notification state in `fdctl_`
-    fdctl_[fdci] ^= (old_mask ^ fdu.mask) << fdcs;
+    fdctl_[fdci] ^= uint64_t(old_mask ^ fdu.mask) << fdcs;
     if (old_mask == 0) {
         ++nfdctl_;
     } else if (fdu.mask == 0) {
