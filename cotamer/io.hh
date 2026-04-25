@@ -183,10 +183,10 @@ struct fd_batch {
     int size = 0;
     int index = 0;
 
-    static inline int mask_out(int mask) noexcept;
-    static inline int mask_in(const system_event_type&) noexcept;
+    static inline int mask_out(fdevent mask) noexcept;
+    static inline fdevent mask_in(const system_event_type&) noexcept;
 
-    inline void add(int pollfd, const fd_update& fdu, int old_mask);
+    inline void add(int pollfd, const fd_update& fdu, fdevent old_mask);
     inline void clear(int pollfd);
     inline std::optional<fd_update> pop() noexcept;
     void print_changes();
@@ -221,9 +221,9 @@ inline int driver::pollfd() {
 }
 
 inline void driver::notify_close(int base_fd) {
-    if (auto pair = fds_.check_fd_close(base_fd)) {
+    if (auto pair = fds_.fd_close(base_fd)) {
         detail::fd_batch batch;
-        apply_fd_update(batch, {base_fd, 0, pair->second});
+        apply_fd_update(batch, {base_fd, fdevent::none, pair->second});
         batch.clear(pollfd());
         pair->first->remove_listener(this);
     }

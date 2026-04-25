@@ -116,9 +116,9 @@ void fd_body::close(bool because_deref) {
 
 namespace detail {
 
-event_handle fd_event_set::watch(int fd, int imask, fd_body* body,
+event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
                                  driver* drv) {
-    if (fd < 0) {
+    if (fd < 0 || imask == fdevent::none) {
         return event_handle();
     }
     unsigned ufd = fd;
@@ -126,45 +126,49 @@ event_handle fd_event_set::watch(int fd, int imask, fd_body* body,
         hard_ensure(ufd);
     }
 
+    // ensure `fdrec`
     fdrec& fdi = fdrs_[ufd];
     if (fdi.body != body) {
         if (fdi.body) {
+            // This should not happen: the user has closed and reopened the
+            // file descriptor, or, worse, constructed a new `fd_body` for
+            // the same descriptor.
             fdi.body->remove_listener(drv);
         }
         fdi.body = body;
         body->add_listener(drv);
-        ++fdi.epoch;
     }
-    if (fdi.update_link_ == link_clean) {
-        fdi.update_link_ = update_link_;
+    if (fdi.update_link == link_clean) {
+        fdi.update_link = update_link_;
         update_link_ = ufd + 1;
     }
 
-    auto eix = free_erlink_;
-    erec* er;
-    if (eix) {
-        er = &ers_[eix - 1];
-        free_erlink_ = er->link;
-        er->mask = imask;
-        er->link = link_clean;
+    // append `watchrec`
+    auto wix = free_wlink_;
+    watchrec* wr;
+    if (wix) {
+        wr = &ws_[wix - 1];
+        free_wlink_ = wr->wlink;
+        wr->mask = imask;
+        wr->wlink = link_clean;
     } else {
-        ers_.push_back({event_handle{}, imask, link_clean});
-        eix = ers_.size();
-        er = &ers_[eix - 1];
+        ws_.push_back({event_handle{}, imask, link_clean});
+        wix = ws_.size();
+        wr = &ws_[wix - 1];
     }
-    er->ev = event_handle{new event_body};
-
-    if (fdi.erhead_) {
-        ers_[fdi.ertail_ - 1].link = eix;
+    if (fdi.whead) {
+        ws_[fdi.wtail - 1].wlink = wix;
     } else {
-        fdi.erhead_ = eix;
+        fdi.whead = wix;
     }
-    fdi.ertail_ = eix;
+    fdi.wtail = wix;
 
-    return er->ev;
+    // construct and return event
+    wr->ev = event_handle{new event_body};
+    return wr->ev;
 }
 
-std::optional<std::pair<fd_body*, unsigned>> fd_event_set::check_fd_close(int fd) {
+std::optional<std::pair<fd_body*, unsigned>> fd_event_set::fd_close(int fd) {
     unsigned ufd = fd;
     if (ufd >= fdr_capacity_) {
         return std::nullopt;
@@ -174,18 +178,18 @@ std::optional<std::pair<fd_body*, unsigned>> fd_event_set::check_fd_close(int fd
         return std::nullopt;
     }
 
-    while (auto eix = fdi.erhead_) {
-        auto& er = ers_[eix - 1];
-        fdi.erhead_ = er.link;
-        std::exchange(er.ev, nullptr)->trigger();
-        er.link = free_erlink_;
-        free_erlink_ = eix;
+    while (auto wix = fdi.whead) {
+        auto& wr = ws_[wix - 1];
+        fdi.whead = wr.wlink;
+        std::exchange(wr.ev, nullptr)->trigger();
+        wr.wlink = free_wlink_;
+        free_wlink_ = wix;
     }
-    fdi.ertail_ = link_clean;
+    fdi.wtail = link_clean;
 
     ++fdi.epoch;
-    if (fdi.update_link_ == link_clean) {
-        fdi.update_link_ = update_link_;
+    if (fdi.update_link == link_clean) {
+        fdi.update_link = update_link_;
         update_link_ = ufd + 1;
     }
     return {{std::exchange(fdi.body, nullptr), fdi.epoch - 1}};
@@ -218,69 +222,64 @@ void fd_batch::print_changes() {
 #endif
 }
 
-inline int fd_batch::mask_out(int mask) noexcept {
+inline int fd_batch::mask_out(fdevent mask) noexcept {
 #if COTAMER_USE_KQUEUE
     // should never be called
     (void) mask;
     return 0;
 #elif COTAMER_USE_EPOLL
-    return (mask & int(fdevent::read) ? int(EPOLLIN | EPOLLRDHUP) : 0)
-        | (mask & int(fdevent::write) ? int(EPOLLOUT) : 0)
-        | (mask & int(fdevent::close) ? int(EPOLLRDHUP) : 0);
+    return (int(mask & fdevent::read) ? int(EPOLLIN | EPOLLRDHUP) : 0)
+        | (int(mask & fdevent::write) ? int(EPOLLOUT) : 0)
+        | (int(mask & fdevent::close) ? int(EPOLLRDHUP) : 0);
 #else
-    return (mask & int(fdevent::read) ? int(POLLIN) : 0)
-        | (mask & int(fdevent::write) ? int(POLLOUT) : 0);
+    return (int(mask & fdevent::read) ? int(POLLIN) : 0)
+        | (int(mask & fdevent::write) ? int(POLLOUT) : 0);
 #endif
 }
 
-inline int fd_batch::mask_in(const system_event_type& se) noexcept {
+inline fdevent fd_batch::mask_in(const system_event_type& se) noexcept {
 #if COTAMER_USE_KQUEUE
-    return (se.filter == EVFILT_READ ? int(fdevent::read) : 0)
-        | (se.filter == EVFILT_WRITE ? int(fdevent::write) : 0)
-        | (se.flags & EV_EOF ? int(fdevent::all) : 0);
+    return (se.filter == EVFILT_READ ? fdevent::read : fdevent::none)
+        | (se.filter == EVFILT_WRITE ? fdevent::write : fdevent::none)
+        | (se.flags & EV_EOF ? fdevent::all : fdevent::none);
 #elif COTAMER_USE_EPOLL
-    return (se.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR) ? int(fdevent::read) : 0)
-        | (se.events & (EPOLLOUT | EPOLLHUP | EPOLLERR) ? int(fdevent::write) : 0)
-        | (se.events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR) ? int(fdevent::close) : 0);
+    return (se.events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR) ? fdevent::read : fdevent::none)
+        | (se.events & (EPOLLOUT | EPOLLHUP | EPOLLERR) ? fdevent::write : fdevent::none)
+        | (se.events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR) ? fdevent::close : fdevent::none);
 #else
-    return (se.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL) ? int(fdevent::read) : 0)
-        | (se.revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL) ? int(fdevent::write) : 0)
-        | (se.revents & (POLLERR | POLLHUP | POLLNVAL) ? int(fdevent::close) : 0);
+    return (se.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL) ? fdevent::read : fdevent::none)
+        | (se.revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL) ? fdevent::write : fdevent::none)
+        | (se.revents & (POLLERR | POLLHUP | POLLNVAL) ? fdevent::close : fdevent::none);
 #endif
 }
 
-inline void fd_batch::add(int pollfd, const fd_update& fdu, int old_mask) {
+inline void fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
 #if COTAMER_USE_KQUEUE
     if (changes == capacity) {
         clear(pollfd);
     }
     void* udata = reinterpret_cast<void*>(uintptr_t(fdu.epoch));
-    int read_close = int(fdevent::read_close), write_close = int(fdevent::write_close);
-    if ((fdu.mask & read_close) && !(old_mask & read_close)) {
-        EV_SET(&ev[changes], fdu.fd, EVFILT_READ, EV_ADD, 0, 0, udata);
-        ++changes;
-    } else if (!(fdu.mask & read_close) && (old_mask & read_close)) {
-        EV_SET(&ev[changes], fdu.fd, EVFILT_READ, EV_DELETE, 0, 0, udata);
+    int oldr = int(old_mask & fdevent::read_close), newr = int(fdu.mask & fdevent::read_close);
+    if (bool(oldr) != bool(newr)) {
+        EV_SET(&ev[changes], fdu.fd, EVFILT_READ, newr ? EV_ADD : EV_DELETE, 0, 0, udata);
         ++changes;
     }
-    if (bool(fdu.mask & write_close) == bool(old_mask & write_close)) {
+    int oldw = int(old_mask & fdevent::write_close), neww = int(fdu.mask & fdevent::write_close);
+    if (bool(oldw) == bool(neww)) {
         return;
     }
     if (changes == capacity) {
         clear(pollfd);
     }
-    if ((fdu.mask & write_close) && !(old_mask & write_close)) {
-        EV_SET(&ev[changes], fdu.fd, EVFILT_WRITE, EV_ADD, 0, 0, udata);
-        ++changes;
-    } else if (!(fdu.mask & write_close) && (old_mask & write_close)) {
-        EV_SET(&ev[changes], fdu.fd, EVFILT_WRITE, EV_DELETE, 0, 0, udata);
-        ++changes;
-    }
+    EV_SET(&ev[changes], fdu.fd, EVFILT_WRITE, neww ? EV_ADD : EV_DELETE, 0, 0, udata);
+    ++changes;
 #elif COTAMER_USE_EPOLL
     epoll_event epev;
     epev.events = mask_out(fdu.mask);
     epev.data.u64 = fdu.fd | (uint64_t(fdu.epoch) << 32);
-    int op = fdu.mask ? (old_mask ? EPOLL_CTL_MOD : EPOLL_CTL_ADD) : EPOLL_CTL_DEL;
+    int op = fdu.mask != fdevent::none
+        ? (old_mask != fdevent::none ? EPOLL_CTL_MOD : EPOLL_CTL_ADD)
+        : EPOLL_CTL_DEL;
     if (epoll_ctl(pollfd, op, fdu.fd, &epev) < 0) {
         throw errno_error();
     }
@@ -295,18 +294,16 @@ inline std::optional<fd_update> fd_batch::pop() noexcept {
         ++index;
 #if COTAMER_USE_KQUEUE
         int fd = e.ident;
-        int mask = mask_in(e);
         unsigned epoch = reinterpret_cast<uintptr_t>(e.udata);
 #elif COTAMER_USE_EPOLL
         int fd = e.data.u64 & 0xFFFF'FFFF;
-        int mask = mask_in(e);
         unsigned epoch = e.data.u64 >> 32;
 #else
         int fd = e.fd;
-        int mask = mask_in(e);
         unsigned epoch = fd_event_set::empty_epoch;
 #endif
-        if (mask) {
+        auto mask = mask_in(e);
+        if (mask != fdevent::none) {
             return {{fd, mask, epoch}};
         }
     }
@@ -358,7 +355,7 @@ void driver::apply_fd_update(detail::fd_batch& batch,
 
     // return if no change (e.g., firing a read event removed the readable
     // watch, but application code re-installed that watch)
-    int old_mask = (fdctl_[fdci] >> fdcs) & 15;
+    fdevent old_mask = fdevent((fdctl_[fdci] >> fdcs) & 15);
     if (old_mask == fdu.mask) {
         return;
     }
@@ -367,10 +364,10 @@ void driver::apply_fd_update(detail::fd_batch& batch,
     batch.add(pollfd(), fdu, old_mask);
 
     // record the new notification state in `fdctl_`
-    fdctl_[fdci] ^= uint64_t(old_mask ^ fdu.mask) << fdcs;
-    if (old_mask == 0) {
+    fdctl_[fdci] ^= uint64_t(int(old_mask) ^ int(fdu.mask)) << fdcs;
+    if (old_mask == fdevent::none) {
         ++nfdctl_;
-    } else if (fdu.mask == 0) {
+    } else if (fdu.mask == fdevent::none) {
         --nfdctl_;
     }
 }
@@ -439,9 +436,9 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
             continue;
         }
 #endif
-        auto eix = fds_.take_watches(fdu->fd, fdu->mask, fdu->epoch);
-        while (eix) {
-            auto eh = fds_.watched_event(eix);
+        auto wix = fds_.take_watch_list(fdu->fd, fdu->mask, fdu->epoch);
+        while (wix) {
+            auto eh = fds_.pop_watch_list_event(wix);
             while (auto coh = eh->driver_trigger(this)) {
                 coh();
                 step_time();

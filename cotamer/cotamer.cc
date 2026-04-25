@@ -200,9 +200,9 @@ void driver::process_clearing() {
     int fd = -1;
     while (auto fdu = fds_.next_known(fd)) {
         fd = fdu->fd;
-        auto eix = fds_.take_watches(fd, ~0, 0);
-        while (eix) {
-            auto eh = fds_.watched_event(eix);
+        auto wix = fds_.take_watch_list(fd, fdevent::all, 0);
+        while (wix) {
+            auto eh = fds_.pop_watch_list_event(wix);
             while (auto coh = eh->driver_trigger(this)) {
                 coh();
             }

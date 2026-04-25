@@ -1388,8 +1388,8 @@ inline void driver::after(const std::chrono::duration<Rep, Period>& d, event e) 
     at(steady_now() + std::chrono::duration_cast<duration>(d), std::move(e));
 }
 
-inline event driver::file_event(const cotamer::fd& f, fdevent type) {
-    return fds_.watch(f.fileno(), int(type), f.body(), this);
+inline event driver::file_event(const cotamer::fd& f, fdevent mask) {
+    return fds_.watch(f.fileno(), mask, f.body(), this);
 }
 
 inline void driver::loop() {
@@ -1847,68 +1847,81 @@ inline size_t driver::timer_size() const noexcept {
     return timed_.size();
 }
 
+inline unsigned driver::nfdctl() const noexcept {
+    return nfdctl_;
+}
+
+inline const detail::fd_event_set& driver::fds() const noexcept {
+    return fds_;
+}
+
 
 // file descriptor functions
 
 namespace detail {
 
-inline unsigned fd_event_set::take_watches(int fd, int imask, unsigned epoch) {
+inline unsigned fd_event_set::take_watch_list(int fd, fdevent imask, unsigned epoch) {
     unsigned ufd = fd;
     if (ufd >= fdr_capacity_) {
         return 0U;
     }
     fdrec& fdi = fdrs_[ufd];
-    if (!fdi.erhead_ || (epoch && epoch != fdi.epoch)) {
+    if (!fdi.whead || (epoch && epoch != fdi.epoch)) {
         return 0U;
     }
-    unsigned erhead = 0U;
-    unsigned* erpprev = &erhead;
-    unsigned eix = fdi.erhead_;
-    unsigned* fdpprev = &fdi.erhead_;
-    fdi.ertail_ = 0U;
-    while (eix) {
-        auto& er = ers_[eix - 1];
-        unsigned next = er.link;
-        if ((imask & er.mask) || er.ev->empty()) {
-            *erpprev = eix;
-            erpprev = &er.link;
+    // Walk `watchrec` chain in order. Watches intersecting with `imask` are
+    // detached, appended to `whead`, and eventually returned; others are
+    // preserved.
+    unsigned whead = 0U;
+    unsigned* wpprev = &whead;
+    unsigned wix = fdi.whead;
+    unsigned* fdpprev = &fdi.whead;
+    fdi.wtail = 0U;
+    while (wix) {
+        auto& wr = ws_[wix - 1];
+        unsigned next = wr.wlink;
+        if ((imask & wr.mask) != fdevent::none  /* kernel reported event */
+            || wr.ev->empty()                   /* garbage collection */) {
+            *wpprev = wix;
+            wpprev = &wr.wlink;
         } else {
-            *fdpprev = fdi.ertail_ = eix;
-            fdpprev = &er.link;
+            *fdpprev = fdi.wtail = wix;
+            fdpprev = &wr.wlink;
         }
-        eix = next;
+        wix = next;
     }
-    *erpprev = *fdpprev = 0U;
-    if (erhead && fdi.update_link_ == link_clean) {
-        fdi.update_link_ = update_link_;
+    *wpprev = *fdpprev = 0U;   // null-terminate both chains
+    // If we changed the watchrec chain, queue to update kernel notifier
+    if (whead && fdi.update_link == link_clean) {
+        fdi.update_link = update_link_;
         update_link_ = ufd + 1;
     }
-    return erhead;
+    return whead;
 }
 
-inline event_handle fd_event_set::watched_event(unsigned& eix) {
-    unsigned in_eix = eix;
-    erec& er = ers_[eix - 1];
-    eix = er.link;
-    er.link = free_erlink_;
-    free_erlink_ = in_eix;
-    return std::exchange(er.ev, nullptr);
+inline event_handle fd_event_set::pop_watch_list_event(unsigned& wix) {
+    unsigned in_wix = wix;
+    watchrec& wr = ws_[wix - 1];
+    wix = wr.wlink;
+    wr.wlink = free_wlink_;
+    free_wlink_ = in_wix;
+    return std::exchange(wr.ev, nullptr);
 }
 
 inline bool fd_event_set::has_update() const noexcept {
     return update_link_ != link_sentinel;
 }
 
-inline int fd_event_set::watches_mask(unsigned eix) const {
-    int imask = 0;
-    while (eix) {
-        auto& er = ers_[eix - 1];
-        if (!er.ev.empty()) {
-            imask |= er.mask;
+inline fdevent fd_event_set::watch_list_mask(unsigned wix) const {
+    fdevent mask = fdevent::none;
+    while (wix) {
+        auto& wr = ws_[wix - 1];
+        if (!wr.ev.empty()) {
+            mask = mask | wr.mask;
         }
-        eix = er.link;
+        wix = wr.wlink;
     }
-    return imask;
+    return mask;
 }
 
 inline std::optional<fd_update> fd_event_set::pop_update() noexcept {
@@ -1917,11 +1930,11 @@ inline std::optional<fd_update> fd_event_set::pop_update() noexcept {
     }
     unsigned ufd = update_link_ - 1;
     fdrec& fdi = fdrs_[ufd];
-    update_link_ = fdi.update_link_;
-    fdi.update_link_ = link_clean;
-    auto mask = watches_mask(fdi.erhead_);
+    update_link_ = fdi.update_link;
+    fdi.update_link = link_clean;
+    auto mask = watch_list_mask(fdi.whead);
     unsigned epoch = fdi.epoch;
-    if (!mask) {
+    if (mask == fdevent::none) {
         ++fdi.epoch;
     } else if (epoch < user_epoch) { // epoch 1 is reserved for internal FDs
         fdi.epoch = epoch = user_epoch;
@@ -1937,13 +1950,29 @@ inline std::optional<fd_update> fd_event_set::next_known(int fd) const noexcept 
     const fdrec* fdrp = fdrs_ + ufd;
     while (true) {
         if (fdrp->known()) {
-            return {{int(ufd), watches_mask(fdrp->erhead_), fdrp->epoch}};
+            return {{int(ufd), watch_list_mask(fdrp->whead), fdrp->epoch}};
         }
         if (++ufd == fdr_capacity_) {
             return std::nullopt;
         }
         ++fdrp;
     }
+}
+
+inline size_t fd_event_set::active_watch_count() const noexcept {
+    size_t n = ws_.size();
+    for (unsigned wix = free_wlink_; wix; wix = ws_[wix - 1].wlink) {
+        --n;
+    }
+    return n;
+}
+
+inline fdevent fd_event_set::fd_mask(int fd) const noexcept {
+    unsigned ufd = fd;
+    if (ufd >= fdr_capacity_) {
+        return fdevent::none;
+    }
+    return watch_list_mask(fdrs_[ufd].whead);
 }
 
 }

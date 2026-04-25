@@ -9,8 +9,10 @@ option(TSAN "Enable ThreadSanitizer" OFF)
 # Optional integrations. AUTO enables if the dependency is found, ON requires
 # it, OFF skips it.
 set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
+set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
 set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
+set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
 set_property(CACHE COTAMER_MBEDTLS PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -42,9 +44,21 @@ if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
 endif()
 
 # Find llhttp
-find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
-find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
-include_directories(${LLHTTP_INCLUDE_DIR})
+set(COTAMER_HAVE_LLHTTP 0)
+if(NOT COTAMER_LLHTTP STREQUAL "OFF")
+    find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
+    find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
+    if(LLHTTP_INCLUDE_DIR AND LLHTTP_LIBRARY)
+        set(COTAMER_HAVE_LLHTTP 1)
+        message(STATUS "llhttp integration: enabled")
+    elseif(COTAMER_LLHTTP STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_LLHTTP=ON but llhttp was not found")
+    else()
+        message(STATUS "llhttp integration: disabled (llhttp not found)")
+    endif()
+else()
+    message(STATUS "llhttp integration: disabled (COTAMER_LLHTTP=OFF)")
+endif()
 
 # Find libcurl
 set(COTAMER_HAVE_CURL 0)
@@ -91,9 +105,12 @@ add_library(Cotamer OBJECT
     cotamer/io.cc
 )
 
-add_library(CotamerHttp OBJECT
-    cotamer/http.cc
-)
+if(COTAMER_HAVE_LLHTTP)
+    add_library(CotamerHttp OBJECT
+        cotamer/http.cc
+    )
+    target_include_directories(CotamerHttp PUBLIC ${LLHTTP_INCLUDE_DIR})
+endif()
 
 add_library(CotamerExamples OBJECT
     examples/utils.cc
@@ -156,17 +173,19 @@ target_link_libraries(rpcg-client PRIVATE
     ${XXHASH_LIBRARY}
 )
 
-add_executable(httpd
-    examples/httpd.cc
-    $<TARGET_OBJECTS:Cotamer>
-    $<TARGET_OBJECTS:CotamerHttp>
-)
-target_include_directories(httpd PRIVATE
-    ${LLHTTP_INCLUDE_DIR}
-)
-target_link_libraries(httpd PRIVATE
-    ${LLHTTP_LIBRARY}
-)
+if(COTAMER_HAVE_LLHTTP)
+    add_executable(httpd
+        examples/httpd.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(httpd PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(httpd PRIVATE
+        ${LLHTTP_LIBRARY}
+    )
+endif()
 
 # Optional libcurl integration
 if(COTAMER_HAVE_CURL)
@@ -175,23 +194,29 @@ if(COTAMER_HAVE_CURL)
     )
     target_link_libraries(CotamerCurl PUBLIC CURL::libcurl)
 
-    add_executable(cot-test-curl
-        test/cot-test-curl.cc
-        $<TARGET_OBJECTS:Cotamer>
-        $<TARGET_OBJECTS:CotamerCurl>
-        $<TARGET_OBJECTS:CotamerHttp>
-    )
-    target_link_libraries(cot-test-curl PRIVATE
-        CURL::libcurl
-        ${LLHTTP_LIBRARY}
-    )
-
     add_executable(https-fetch
         examples/https-fetch.cc
         $<TARGET_OBJECTS:Cotamer>
         $<TARGET_OBJECTS:CotamerCurl>
     )
     target_link_libraries(https-fetch PRIVATE CURL::libcurl)
+
+    # cot-test-curl uses cot::http_parser for its in-process test server.
+    if(COTAMER_HAVE_LLHTTP)
+        add_executable(cot-test-curl
+            test/cot-test-curl.cc
+            $<TARGET_OBJECTS:Cotamer>
+            $<TARGET_OBJECTS:CotamerCurl>
+            $<TARGET_OBJECTS:CotamerHttp>
+        )
+        target_include_directories(cot-test-curl PRIVATE
+            ${LLHTTP_INCLUDE_DIR}
+        )
+        target_link_libraries(cot-test-curl PRIVATE
+            CURL::libcurl
+            ${LLHTTP_LIBRARY}
+        )
+    endif()
 endif()
 
 # Optional mbedtls integration
