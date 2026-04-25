@@ -33,7 +33,6 @@ enum class fdevent {
 };
 inline fdevent operator&(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) & int(b)); }
 inline fdevent operator|(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) | int(b)); }
-inline bool operator!(fdevent a) { return a == fdevent::none; }
 
 }
 #include "cotamer/event_handle.hh"
@@ -59,6 +58,9 @@ public:
     inline bool triggered() const noexcept;    // has triggered
     inline bool idle() const noexcept;         // has no listeners
     inline bool empty() const noexcept;        // can be garbage collected
+
+    inline int user_flags() const noexcept;
+    inline void set_user_flags(int fl);
 
     inline bool trigger();
     inline event& arm();
@@ -356,6 +358,7 @@ private:
     detail::fd_body* body_ = nullptr;
 };
 
+inline event file_event(const fd&, fdevent mask);
 inline event readable(const fd&);      // triggers when `read(fd)` won't block
 inline event writable(const fd&);      // triggers when `write(fd)` won't block
 inline event closed(const fd&);        // triggers when `fd` errors or closes

@@ -83,6 +83,7 @@ void fd_body::close(bool because_deref) {
         }
         base_fd = base_fd_;
         if (base_fd >= 0 && drivers.empty()) {
+            // will ::close now
             base_fd_ = -1;
         }
     }

@@ -33,8 +33,9 @@ constexpr uint32_t ef_want_interest = 32; // transitive quorum member has intere
 constexpr uint32_t ef_user = 64;          // first user flag
 constexpr uint32_t ef_nuser = 4;          // number of user flags
 constexpr uint32_t efm_user = 0x3C0;      // mask of user flags
+constexpr uint32_t efs_user = 6;          // shift to first user flag
 constexpr uint32_t ef_interest = 1024;    // this quorum has 1 interest{}
-                                          // (added once per interest{})
+                                          // (added once per interest{}; must be largest flag)
 
 // exception thrown during driver::clearing()
 struct clearing_exception {};
@@ -1129,6 +1130,15 @@ inline bool event::idle() const noexcept {
     return ep_.idle();
 }
 
+inline int event::user_flags() const noexcept {
+    return ep_ ? (ep_->relaxed_flags() & detail::efm_user) >> detail::efs_user : 0;
+}
+
+inline void event::set_user_flags(int flags) {
+    assert(ep_);
+    ep_->set_user_flags(flags << detail::efs_user);
+}
+
 inline bool event::trigger() {
     return ep_ && ep_->trigger();
 }
@@ -1475,6 +1485,10 @@ inline event after(duration d) {
 template <typename Rep, typename Period>
 inline event after(const std::chrono::duration<Rep, Period>& d) {
     return driver::current->after(d);
+}
+
+inline event file_event(const fd& f, fdevent mask) {
+    return driver::current->file_event(f, mask);
 }
 
 inline event readable(const fd& f) {
