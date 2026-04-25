@@ -66,38 +66,48 @@ void fd_event_set::hard_ensure(unsigned ufd) {
     fdr_capacity_ = ncapacity;
 }
 
-void fd_body::deref_close(bool deref) {
+void fd_body::close(bool because_deref) {
     lock();
-    // obtain local copies of `drivers_` and `base_fd_` (cannot refer to `this`
-    // after unlock, because another thread might delete this)
-    small_vector<driver*, 4> local_drivers;
-    for (auto dx : drivers_) {
-        local_drivers.push_back(dx);
-    }
-    int local_base_fd = base_fd_;
-    // mark as closed, but only once
-    bool need_close = fd_.load(std::memory_order_relaxed) >= 0;
-    if (need_close) {
+    // If this is the first close() call (fd_>=0), mark closed (fd_=-1) and
+    // notify drivers. (The OS fd must remain open until no driver has it
+    // registered on a kernel notifier -- otherwise epoll's EPOLL_CTL_DEL will
+    // fail. If there are no drivers, close base_fd now; otherwise, the last
+    // remove_listener will close it. We need local copies of base_fd and
+    // drivers in case of concurrent `delete this`.)
+    int base_fd = -1;
+    small_vector<driver*, 4> drivers;
+    if (fd_.load(std::memory_order_relaxed) >= 0) {
         fd_.store(-1, std::memory_order_relaxed);
+        for (auto dx : drivers_) {
+            drivers.push_back(dx);
+        }
+        base_fd = base_fd_;
+        if (base_fd >= 0 && drivers.empty()) {
+            base_fd_ = -1;
+        }
     }
-    // actually dereference
-    if (deref) {
+    bool deletable = because_deref && drivers_.empty();
+    if (because_deref) {
         ref_.fetch_sub(1, std::memory_order_release);
     }
     unlock();
 
-    // notify drivers
-    if (local_drivers.empty() && deref) {
-        delete this;
-    } else if (need_close) {
+    if (base_fd < 0) {
+        // do nothing
+    } else if (drivers.empty()) {
+        ::close(base_fd);
+    } else {
         driver* my_driver = driver::current.get();
-        for (auto dx : local_drivers) {
+        for (auto dx : drivers) {
             if (dx == my_driver) {
-                dx->notify_close(local_base_fd);
+                dx->notify_close(base_fd);
             } else {
-                dx->migrate_fd_close(local_base_fd);
+                dx->migrate_fd_close(base_fd);
             }
         }
+    }
+    if (deletable) {
+        delete this;
     }
 }
 

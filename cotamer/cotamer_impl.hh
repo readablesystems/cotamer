@@ -99,23 +99,35 @@ struct fd_body {
                 break;
             }
         }
-        bool del = drivers_.empty()
-            && ref_.load(std::memory_order_acquire) == 0;
+        if (!drivers_.empty()) {
+            unlock();
+            return;
+        }
+        // The fd_body should be deleted when unreferenced.
+        bool deletable = ref_.load(std::memory_order_acquire) == 0;
+        // The OS fd should be closed if close was explicitly requested
+        // (fd_ < 0) and the fd_body isn't registered on any driver
+        // (!drivers_.empty() -- this branch).
+        int closable = fd_.load(std::memory_order_relaxed) < 0 ? base_fd_ : -1;
+        if (closable >= 0) {
+            base_fd_ = -1;
+        }
         unlock();
-        if (del) {
+        if (closable >= 0) {
+            ::close(closable);
+        }
+        if (deletable) {
             delete this;
         }
     }
 
     inline void deref() noexcept {
         if (ref_.load(std::memory_order_acquire) == 1) {
-            deref_close(true);
+            close(true);
         } else {
             ref_.fetch_sub(1, std::memory_order_release);
         }
     }
-
-    void deref_close(bool deref);         // non-inline, in cotamer.cc
 
     inline void lock() {
         while (lock_.test_and_set(std::memory_order_acquire)) {
@@ -126,6 +138,8 @@ struct fd_body {
     inline void unlock() {
         lock_.clear(std::memory_order_release);
     }
+
+    void close(bool because_deref);         // non-inline, in io.cc
 };
 
 
@@ -1995,7 +2009,7 @@ inline fd::operator bool() const noexcept {
 
 inline void fd::close() {
     if (body_) {
-        body_->deref_close(false);
+        body_->close(false);
     }
 }
 
