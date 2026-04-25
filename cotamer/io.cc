@@ -317,8 +317,10 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     // kqueue/epoll maintain kernel-side state and avoid this cost.
     batch.ev.clear();
     int fd = -1;
-    while (auto fdu = fds_.next_nonempty(fd)) {
-        batch.ev.emplace_back(fdu->fd, batch.mask_out(fdu->mask), 0);
+    while (auto fdu = fds_.next_known(fd)) {
+        if (fdu->mask) {
+            batch.ev.emplace_back(fdu->fd, batch.mask_out(fdu->mask), 0);
+        }
         fd = fdu->fd;
     }
     poll(batch.ev.begin(), batch.ev.size(), duration_milliseconds(timeout));
@@ -337,35 +339,18 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
 
     // process returned events
     while (auto fdu = batch.pop()) {
-        if (fdu->mask & 1) {
-            if (auto eh = fds_.take(fdu->fd, 0, fdu->epoch)) {
-                while (auto coh = eh->driver_trigger(this)) {
-                    coh();
-                    step_time();
-                }
-            }
 #if COTAMER_USE_EPOLL
-            else if (fdu->fd == epoll_wakefd_) {
-                uint64_t v;
-                ssize_t nr = ::read(epoll_wakefd_, &v, sizeof(v));
-                (void) nr;
-            }
+        if (fdu->fd == epoll_wakefd_) {
+            uint64_t v;
+            ssize_t nr = ::read(epoll_wakefd_, &v, sizeof(v));
+            (void) nr;
+            continue;
+        }
 #endif
-        }
-        if (fdu->mask & 2) {
-            if (auto eh = fds_.take(fdu->fd, 1, fdu->epoch)) {
-                while (auto coh = eh->driver_trigger(this)) {
-                    coh();
-                    step_time();
-                }
-            }
-        }
-        if (fdu->mask & 4) {
-            if (auto eh = fds_.take(fdu->fd, 2, fdu->epoch)) {
-                while (auto coh = eh->driver_trigger(this)) {
-                    coh();
-                    step_time();
-                }
+        while (auto eh = fds_.take(fdu->fd, fdu->mask, fdu->epoch)) {
+            while (auto coh = eh->driver_trigger(this)) {
+                coh();
+                step_time();
             }
         }
     }

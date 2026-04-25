@@ -198,13 +198,12 @@ void driver::process_clearing() {
 
     // trigger all fd events (but coroutines throw rather than running)
     int fd = -1;
-    while (auto fdu = fds_.next_nonempty(fd)) {
+    while (auto fdu = fds_.next_known(fd)) {
         fd = fdu->fd;
-        for (int interest = 0; interest < 3; ++interest) {
-            if (auto eh = fds_.take(fd, interest, 0)) {
-                while (auto coh = eh->driver_trigger(this)) {
-                    coh();
-                }
+        int imask = ~0;
+        while (auto eh = fds_.take(fd, imask, 0)) {
+            while (auto coh = eh->driver_trigger(this)) {
+                coh();
             }
         }
     }

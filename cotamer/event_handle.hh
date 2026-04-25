@@ -39,8 +39,8 @@ public:
 
     explicit operator bool() const noexcept { return eb_ != nullptr; }
     inline bool triggered() const noexcept;
-    inline bool empty() const noexcept;
     inline bool idle() const noexcept;
+    inline bool empty() const noexcept;
     event_body* get() const noexcept { return eb_; }
     event_body& operator*() const { return *eb_; }
     event_body* operator->() const noexcept { return eb_; }
@@ -72,13 +72,13 @@ public:
     static constexpr unsigned internal_epoch = 1;
     static constexpr unsigned user_epoch = 2;
 
-    inline event_handle watch(int fd, int type, fd_body* body, driver*);
-    inline event_handle take(int fd, int type, unsigned epoch);
+    inline event_handle watch(int fd, int mask, fd_body* body, driver*);
+    inline event_handle take(int fd, int& mask, unsigned epoch);
     inline std::optional<std::pair<fd_body*, unsigned>> check_fd_close(int fd);
 
     inline bool has_update() const noexcept;
     inline std::optional<fd_update> pop_update() noexcept;
-    inline std::optional<fd_update> next_nonempty(int fd) const noexcept;
+    inline std::optional<fd_update> next_known(int fd) const noexcept;
 
 private:
     static constexpr unsigned first_capacity = 128;
@@ -97,8 +97,11 @@ private:
         unsigned update_link_ = update_clean;
         unsigned epoch = 0;
 
+        inline bool known() const noexcept {
+            return ev[0] || ev[1] || ev[2];
+        }
         inline int mask() const noexcept {
-            return (ev[0] ? 1 : 0) | (ev[1] ? 2 : 0) | (ev[2] ? 4 : 0);
+            return (ev[0].empty() ? 0 : 1) | (ev[1].empty() ? 0 : 2) | (ev[2].empty() ? 0 : 4);
         }
     };
 

@@ -27,25 +27,27 @@ cot::task<> run_server(uint16_t port,
                        cot::event stop) {
     auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
     while (!stop.triggered()) {
-        auto ac = cot::tcp_accept(lfd);
-        co_await cot::any(ac.resolution(), stop);
-        if (stop.triggered()) {
-            co_return;
+        auto cfd = co_await cot::attempt(cot::tcp_accept(lfd), stop);
+        if (!cfd) {
+            break;
         }
-        auto cfd = co_await ac;
         auto conn = [](cot::fd c,
                        std::function<cot::http_message(const cot::http_message&)> h)
                        -> cot::task<> {
             cot::http_parser hp(std::move(c), HTTP_REQUEST);
             while (true) {
                 auto req = co_await hp.receive();
-                if (!hp.ok()) break;
+                if (!hp.ok()) {
+                    break;
+                }
                 auto resp = h(req);
                 co_await hp.send(std::move(resp));
-                if (!hp.should_keep_alive()) break;
+                if (!hp.should_keep_alive()) {
+                    break;
+                }
             }
         };
-        conn(std::move(cfd), handler).detach();
+        conn(std::move(*cfd), handler).detach();
     }
 }
 
