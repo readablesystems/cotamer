@@ -2,6 +2,7 @@
 #include "cotamer/cotamer.hh"
 #include <functional>
 #include <map>
+#include <stdexcept>
 #include <string>
 
 // cotamer/curl.hh
@@ -27,7 +28,18 @@ struct curl_response {
     std::multimap<std::string, std::string, std::less<>> headers;
 };
 
-// Fetch `url` with defaults. Throws `std::system_error` on transport failure;
+// Thrown by curl_fetch on transport failure. `code()` is the CURLcode,
+// `what()` a detailed error message.
+class curl_error : public std::runtime_error {
+public:
+    curl_error(int code, const char* msg)
+        : std::runtime_error(msg), code_(code) { }
+    int code() const noexcept { return code_; }
+private:
+    int code_;
+};
+
+// Fetch `url` with defaults. Throws `curl_error` on transport failure;
 // non-2xx responses do NOT throw — inspect `status`.
 task<curl_response> curl_fetch(std::string url);
 

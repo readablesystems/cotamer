@@ -122,9 +122,10 @@ cot::task<> test_error_path() {
     bool threw = false;
     try {
         co_await cot::curl_fetch("http://127.0.0.1:1/");
-    } catch (const std::system_error& e) {
+    } catch (const cot::curl_error& e) {
         threw = true;
-        std::cerr << "error_path: caught (" << e.what() << ")\n";
+        std::cerr << "error_path: caught code=" << e.code()
+                  << " (" << e.what() << ")\n";
     }
     assert(threw);
 }
