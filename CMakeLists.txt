@@ -194,13 +194,6 @@ if(COTAMER_HAVE_CURL)
     )
     target_link_libraries(CotamerCurl PUBLIC CURL::libcurl)
 
-    add_executable(https-fetch
-        examples/https-fetch.cc
-        $<TARGET_OBJECTS:Cotamer>
-        $<TARGET_OBJECTS:CotamerCurl>
-    )
-    target_link_libraries(https-fetch PRIVATE CURL::libcurl)
-
     # cot-test-curl uses cot::http_parser for its in-process test server.
     if(COTAMER_HAVE_LLHTTP)
         add_executable(cot-test-curl

@@ -4,21 +4,16 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <curl/curl.h>
 
 // cotamer/curl.hh
-//    Coroutine-driven libcurl transfers.
+//    Cotamer integration of libcurl.
 //
-//    libcurl's multi interface is plumbed into the cotamer event loop. Each
-//    thread has its own `curl_driver::current()` holding a CURLM* and the
-//    set of cotamer fds that curl has handed us via its open-socket callback.
-//
-//    Transfers are issued via `curl_fetch(url)` which returns a coroutine
-//    producing a `curl_response`. Defaults: follow redirects, reasonable
-//    user-agent, body streamed into a `std::string`. The configure overload
-//    takes a lambda that receives the raw `CURL*` handle for any other
-//    libcurl option.
-
-typedef void CURL;
+//    `curl_fetch(url)` returns a `cot::task<curl_response>`; it fetches
+//    the given URL and co_returns the response. By default, `curl_fetch`
+//    follows redirects. Use `curl_fetch(url, func)` to override the
+//    default configuration; `func` is a function object that takes a
+//    `CURL*` easy handle pointer.
 
 namespace cotamer {
 
@@ -27,6 +22,18 @@ struct curl_response {
     std::string body;
     std::multimap<std::string, std::string, std::less<>> headers;
 };
+
+// Fetch `url`. Throws `curl_error` on transport failure.
+task<curl_response> curl_fetch(std::string url);
+
+// Same, but call `configure` with the CURL* easy handle after default options
+// are installed.
+task<curl_response> curl_fetch(std::string url,
+                               std::function<void(CURL*)> configure);
+
+// Drop this thread's curl_driver and any connections in its pool.
+void curl_reset();
+
 
 // Thrown by curl_fetch on transport failure. `code()` is the CURLcode,
 // `what()` a detailed error message.
@@ -38,19 +45,5 @@ public:
 private:
     int code_;
 };
-
-// Fetch `url` with defaults. Throws `curl_error` on transport failure;
-// non-2xx responses do NOT throw — inspect `status`.
-task<curl_response> curl_fetch(std::string url);
-
-// Fetch with caller access to the raw CURL easy handle. `configure` runs
-// after defaults are installed, so it can override any option.
-task<curl_response> curl_fetch(std::string url,
-                               std::function<void(CURL*)> configure);
-
-// Drop this thread's curl_driver (and any connections in its pool). Primarily
-// for tests that reset the cotamer driver and need the curl_driver to be
-// rebuilt against the fresh driver.
-void curl_reset();
 
 } // namespace cotamer
