@@ -1,0 +1,4 @@
+#pragma once
+// Generated from cotamer/config.hh.in by CMake. Do not edit.
+
+#define COTAMER_HAVE_LLHTTP @COTAMER_HAVE_LLHTTP@

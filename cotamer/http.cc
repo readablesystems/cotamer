@@ -169,7 +169,7 @@ void http_message::do_clear() {
     status_code_ = 200;
     method_ = HTTP_GET;
     error_ = HPE_OK;
-    upgrade_ = 0;
+    upgrade_ = has_body_ = 0;
     url_.clear();
     status_message_.clear();
     body_.clear();
@@ -473,7 +473,7 @@ task<http_message> http_parser::receive() {
 task<> http_parser::send_request(http_message m) {
     std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
         llhttp_method_name(m.method()), m.url(), m.http_major(), m.http_minor());
-    if (!m.body_.empty()
+    if (m.has_body_
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
         m.add_header("Content-Length", m.body_.length());
@@ -517,7 +517,7 @@ task<> http_parser::send_response(http_message m) {
         : std::string_view(m.status_message());
     std::string codeline = std::format("HTTP/{}.{} {} {}\r\n",
         m.http_major(), m.http_minor(), m.status_code(), status_message);
-    if (!m.body_.empty()
+    if (m.has_body_
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
         m.add_header("Content-Length", m.body_.length());

@@ -6,6 +6,11 @@ option(ASAN "Enable AddressSanitizer" OFF)
 option(UBSAN "Enable UBSanitizer" OFF)
 option(TSAN "Enable ThreadSanitizer" OFF)
 
+# Optional integrations. AUTO enables if the dependency is found, ON requires
+# it, OFF skips it.
+set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -35,18 +40,41 @@ if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
 endif()
 
 # Find llhttp
-find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
-find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
-include_directories(${LLHTTP_INCLUDE_DIR})
+set(COTAMER_HAVE_LLHTTP 0)
+if(NOT COTAMER_LLHTTP STREQUAL "OFF")
+    find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
+    find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
+    if(LLHTTP_INCLUDE_DIR AND LLHTTP_LIBRARY)
+        set(COTAMER_HAVE_LLHTTP 1)
+        message(STATUS "llhttp integration: enabled")
+    elseif(COTAMER_LLHTTP STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_LLHTTP=ON but llhttp was not found")
+    else()
+        message(STATUS "llhttp integration: disabled (llhttp not found)")
+    endif()
+else()
+    message(STATUS "llhttp integration: disabled (COTAMER_LLHTTP=OFF)")
+endif()
+
+# Generate config header
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cotamer/config.hh.in
+    ${CMAKE_CURRENT_BINARY_DIR}/cotamer/config.hh
+    @ONLY
+)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
     cotamer/io.cc
 )
 
-add_library(CotamerHttp OBJECT
-    cotamer/http.cc
-)
+if(COTAMER_HAVE_LLHTTP)
+    add_library(CotamerHttp OBJECT
+        cotamer/http.cc
+    )
+    target_include_directories(CotamerHttp PUBLIC ${LLHTTP_INCLUDE_DIR})
+endif()
 
 add_library(CotamerExamples OBJECT
     examples/utils.cc
@@ -104,14 +132,16 @@ target_link_libraries(rpcg-client PRIVATE
     ${XXHASH_LIBRARY}
 )
 
-add_executable(httpd
-    examples/httpd.cc
-    $<TARGET_OBJECTS:Cotamer>
-    $<TARGET_OBJECTS:CotamerHttp>
-)
-target_include_directories(httpd PRIVATE
-    ${LLHTTP_INCLUDE_DIR}
-)
-target_link_libraries(httpd PRIVATE
-    ${LLHTTP_LIBRARY}
-)
+if(COTAMER_HAVE_LLHTTP)
+    add_executable(httpd
+        examples/httpd.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(httpd PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(httpd PRIVATE
+        ${LLHTTP_LIBRARY}
+    )
+endif()

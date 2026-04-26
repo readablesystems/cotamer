@@ -15,7 +15,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include "cotamer/timer_heap.hh"
-#include "cotamer/event_handle.hh"
 
 // cotamer/cotamer.hh
 //    Public interface to the Cotamer coroutine library.
@@ -23,6 +22,22 @@
 // Define COTAMER_STATS to 1 to collect statistics.
 // #define COTAMER_STATS 1
 
+namespace cotamer {
+
+// fdevent - file descriptor event types
+
+enum class fdevent {
+    read = 1, write = 2, close = 4,
+    read_write = 3, read_close = 5, write_close = 6,
+    none = 0, all = 7
+};
+inline fdevent operator&(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) & int(b)); }
+inline fdevent operator|(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) | int(b)); }
+inline fdevent& operator|=(fdevent& a, fdevent b) { a = a | b; return a; }
+inline bool operator!(fdevent e) { return e != fdevent::none; }
+
+}
+#include "cotamer/event_handle.hh"
 namespace cotamer {
 
 // event
@@ -45,6 +60,9 @@ public:
     inline bool triggered() const noexcept;    // has triggered
     inline bool idle() const noexcept;         // has no listeners
     inline bool empty() const noexcept;        // can be garbage collected
+
+    inline int user_flags() const noexcept;
+    inline void set_user_flags(int fl);
 
     inline bool trigger();
     inline event& arm();
@@ -171,7 +189,6 @@ using steady_time_point = std::chrono::steady_clock::time_point;
 using duration = std::chrono::steady_clock::duration;
 
 enum class clock { virtual_time = 0, real_time = 0 };
-enum class fdevent { read = 0, write = 1, close = 2 };
 
 class driver {
 public:
@@ -206,7 +223,7 @@ public:
     template <typename Rep, typename Period>
     inline event after(const std::chrono::duration<Rep, Period>&);
 
-    inline event file_event(const cotamer::fd& f, fdevent type);
+    inline event file_event(const cotamer::fd& f, fdevent mask);
     inline void notify_close(int base_fileno);
 
     inline void loop();
@@ -217,6 +234,8 @@ public:
 
     // introspection
     inline size_t timer_size() const noexcept;
+    inline unsigned nfdctl() const noexcept;
+    inline const detail::fd_event_set& fds() const noexcept;
 
     static thread_local std::unique_ptr<driver> current;
 
@@ -341,6 +360,7 @@ private:
     detail::fd_body* body_ = nullptr;
 };
 
+inline event file_event(const fd&, fdevent mask);
 inline event readable(const fd&);      // triggers when `read(fd)` won't block
 inline event writable(const fd&);      // triggers when `write(fd)` won't block
 inline event closed(const fd&);        // triggers when `fd` errors or closes

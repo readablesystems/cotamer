@@ -121,18 +121,18 @@ class http_message {
 
     inline http_message();
 
-    inline bool ok() const;
-    explicit inline operator bool() const;
-    inline bool operator!() const;
-    inline llhttp_errno error() const;
+    inline constexpr bool ok() const;
+    explicit inline constexpr operator bool() const;
+    inline constexpr bool operator!() const;
+    inline constexpr llhttp_errno error() const;
 
-    inline unsigned http_major() const;
-    inline unsigned http_minor() const;
+    inline constexpr unsigned http_major() const;
+    inline constexpr unsigned http_minor() const;
 
-    inline unsigned status_code() const;
+    inline constexpr unsigned status_code() const;
     inline const std::string& status_message() const;
-    inline llhttp_method method() const;
-    inline const std::string& url() const;
+    inline constexpr llhttp_method method() const;
+    inline constexpr const std::string& url() const;
 
     inline bool has_header(const char* name) const;
     inline bool has_header(const char* name, size_t length) const;
@@ -195,12 +195,13 @@ private:
         }
     };
 
-    unsigned short major_;
-    unsigned short minor_;
-    unsigned status_code_ : 16;
-    unsigned method_ : 8;
-    unsigned error_ : 7;
+    unsigned char major_;
+    unsigned char minor_;
+    unsigned char method_;
+    unsigned char error_;
+    unsigned short status_code_;
     unsigned upgrade_ : 1;
+    unsigned has_body_ : 1;
 
     std::string url_;
     std::string status_message_;
@@ -270,8 +271,8 @@ private:
 };
 
 inline http_message::http_message()
-    : major_(1), minor_(1), status_code_(200), method_(HTTP_GET),
-      error_(HPE_OK), upgrade_(0) {
+    : major_(1), minor_(1), method_(HTTP_GET), error_(HPE_OK),
+      status_code_(200), upgrade_(0), has_body_(0) {
 }
 
 inline void http_message::kill_info(unsigned fl) const {
@@ -280,31 +281,31 @@ inline void http_message::kill_info(unsigned fl) const {
     }
 }
 
-inline unsigned http_message::http_major() const {
+inline constexpr unsigned http_message::http_major() const {
     return major_;
 }
 
-inline unsigned http_message::http_minor() const {
+inline constexpr unsigned http_message::http_minor() const {
     return minor_;
 }
 
-inline bool http_message::ok() const {
+inline constexpr bool http_message::ok() const {
     return error_ == HPE_OK;
 }
 
-inline http_message::operator bool() const {
+inline constexpr http_message::operator bool() const {
     return ok();
 }
 
-inline bool http_message::operator!() const {
+inline constexpr bool http_message::operator!() const {
     return !ok();
 }
 
-inline llhttp_errno http_message::error() const {
+inline constexpr llhttp_errno http_message::error() const {
     return (llhttp_errno) error_;
 }
 
-inline unsigned http_message::status_code() const {
+inline constexpr unsigned http_message::status_code() const {
     return status_code_;
 }
 
@@ -312,11 +313,11 @@ inline const std::string& http_message::status_message() const {
     return status_message_;
 }
 
-inline llhttp_method http_message::method() const {
+inline constexpr llhttp_method http_message::method() const {
     return (llhttp_method) method_;
 }
 
-inline const std::string& http_message::url() const {
+inline constexpr const std::string& http_message::url() const {
     return url_;
 }
 
@@ -457,11 +458,13 @@ inline http_message& http_message::date_header(std::string key, time_t value) {
 
 inline http_message& http_message::body(std::string body) {
     body_ = std::move(body);
+    has_body_ = 1;
     return *this;
 }
 
 inline http_message& http_message::append_body(const std::string& x) {
     body_ += x;
+    has_body_ = 1;
     return *this;
 }
 
