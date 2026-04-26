@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstring>
 #include <ctime>
 namespace cotamer {
 class http_parser;
