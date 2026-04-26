@@ -8,11 +8,11 @@ option(TSAN "Enable ThreadSanitizer" OFF)
 
 # Optional integrations. AUTO enables if the dependency is found, ON requires
 # it, OFF skips it.
-set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
 set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
-set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
-set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
 set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_MBEDTLS PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)

@@ -12,7 +12,6 @@ template <typename T> class task;
 class driver;
 class fd;
 template <typename T> task<T> forward(task<T>);
-
 namespace detail {
 struct event_body;
 struct fd_body;
@@ -152,7 +151,6 @@ private:
     std::vector<watchrec> ws_;
     unsigned free_wlink_ = 0;
 
-    // OR `mask` over the list at `wix`, skipping empty watchrecs.
     inline fdevent watch_list_mask(unsigned wix) const;
     void hard_ensure(unsigned fd);
 };

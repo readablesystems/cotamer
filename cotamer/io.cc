@@ -405,7 +405,7 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     batch.ev.clear();
     int fd = -1;
     while (auto fdu = fds_.next_known(fd)) {
-        if (fdu->mask) {
+        if (fdu->mask != fdevent::none) {
             batch.ev.emplace_back(fdu->fd, batch.mask_out(fdu->mask), 0);
         }
         fd = fdu->fd;
