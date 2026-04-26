@@ -10,6 +10,8 @@ option(TSAN "Enable ThreadSanitizer" OFF)
 # it, OFF skips it.
 set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -56,6 +58,20 @@ else()
     message(STATUS "llhttp integration: disabled (COTAMER_LLHTTP=OFF)")
 endif()
 
+# Find libcurl
+set(COTAMER_HAVE_CURL 0)
+if(NOT COTAMER_CURL STREQUAL "OFF")
+    find_package(CURL QUIET)
+    if(CURL_FOUND)
+        set(COTAMER_HAVE_CURL 1)
+        message(STATUS "libcurl integration: enabled (${CURL_VERSION_STRING})")
+    elseif(COTAMER_CURL STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_CURL=ON but libcurl was not found")
+    else()
+        message(STATUS "libcurl integration: disabled (libcurl not found)")
+    endif()
+endif()
+
 # Generate config header
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cotamer/config.hh.in
@@ -97,6 +113,11 @@ add_executable(cot-test-io
 
 add_executable(cot-manual
     test/cot-manual.cc
+    $<TARGET_OBJECTS:Cotamer>
+)
+
+add_executable(cot-benchmark
+    test/cot-benchmark.cc
     $<TARGET_OBJECTS:Cotamer>
 )
 
@@ -144,4 +165,29 @@ if(COTAMER_HAVE_LLHTTP)
     target_link_libraries(httpd PRIVATE
         ${LLHTTP_LIBRARY}
     )
+endif()
+
+# Optional libcurl integration
+if(COTAMER_HAVE_CURL)
+    add_library(CotamerCurl OBJECT
+        cotamer/curl.cc
+    )
+    target_link_libraries(CotamerCurl PUBLIC CURL::libcurl)
+
+    # cot-test-curl uses cot::http_parser for its in-process test server.
+    if(COTAMER_HAVE_LLHTTP)
+        add_executable(cot-test-curl
+            test/cot-test-curl.cc
+            $<TARGET_OBJECTS:Cotamer>
+            $<TARGET_OBJECTS:CotamerCurl>
+            $<TARGET_OBJECTS:CotamerHttp>
+        )
+        target_include_directories(cot-test-curl PRIVATE
+            ${LLHTTP_INCLUDE_DIR}
+        )
+        target_link_libraries(cot-test-curl PRIVATE
+            CURL::libcurl
+            ${LLHTTP_LIBRARY}
+        )
+    endif()
 endif()
