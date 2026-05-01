@@ -16,6 +16,8 @@ set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_MBETDTLS PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_WSLAY "AUTO" CACHE STRING "wslay (WebSocket) integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_WSLAY PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_ZLIB "AUTO" CACHE STRING "zlib (permessage-deflate) integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_ZLIB PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -106,6 +108,20 @@ if(NOT COTAMER_WSLAY STREQUAL "OFF")
         message(FATAL_ERROR "COTAMER_WSLAY=ON but wslay was not found")
     else()
         message(STATUS "wslay integration: disabled (wslay not found)")
+    endif()
+endif()
+
+# Find zlib (RFC 7692 permessage-deflate)
+set(COTAMER_HAVE_ZLIB 0)
+if(NOT COTAMER_ZLIB STREQUAL "OFF")
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        set(COTAMER_HAVE_ZLIB 1)
+        message(STATUS "zlib integration: enabled (${ZLIB_VERSION_STRING})")
+    elseif(COTAMER_ZLIB STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_ZLIB=ON but zlib was not found")
+    else()
+        message(STATUS "zlib integration: disabled (zlib not found)")
     endif()
 endif()
 
@@ -220,6 +236,9 @@ if(COTAMER_HAVE_WSLAY)
     target_include_directories(httpd PRIVATE ${WSLAY_INCLUDE_DIR})
     target_link_libraries(httpd PRIVATE ${WSLAY_LIBRARY})
     target_compile_definitions(httpd PRIVATE COTAMER_HTTPD_HAS_WSLAY=1)
+    if(COTAMER_HAVE_ZLIB)
+        target_link_libraries(httpd PRIVATE ZLIB::ZLIB)
+    endif()
 endif()
 
 # Optional libcurl integration
@@ -273,6 +292,9 @@ if(COTAMER_HAVE_WSLAY)
     if(COTAMER_HAVE_MBEDTLS)
         target_include_directories(CotamerWebSocket PRIVATE ${MBEDTLS_INCLUDE_DIR})
     endif()
+    if(COTAMER_HAVE_ZLIB)
+        target_link_libraries(CotamerWebSocket PUBLIC ZLIB::ZLIB)
+    endif()
 
     add_executable(cot-test-ws
         test/cot-test-ws.cc
@@ -288,6 +310,9 @@ if(COTAMER_HAVE_WSLAY)
         ${WSLAY_LIBRARY}
         ${LLHTTP_LIBRARY}
     )
+    if(COTAMER_HAVE_ZLIB)
+        target_link_libraries(cot-test-ws PRIVATE ZLIB::ZLIB)
+    endif()
 
     add_executable(ws-echo
         examples/ws-echo.cc
@@ -303,4 +328,7 @@ if(COTAMER_HAVE_WSLAY)
         ${WSLAY_LIBRARY}
         ${LLHTTP_LIBRARY}
     )
+    if(COTAMER_HAVE_ZLIB)
+        target_link_libraries(ws-echo PRIVATE ZLIB::ZLIB)
+    endif()
 endif()

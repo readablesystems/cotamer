@@ -85,10 +85,16 @@ public:
 
     // Wrap an already-connected transport in a client-side ws_stream.
     // The handshake is NOT performed; call `handshake()`.
+    //
+    // `offer_permessage_deflate` (default true) controls whether the client
+    // advertises the permessage-deflate extension (RFC 7692) in the upgrade
+    // request. When the server accepts, both sides transparently compress
+    // data frames; otherwise the connection runs uncompressed.
     static basic_ws_stream wrap_client(Transport t,
                                        std::string host,
                                        std::string path,
-                                       std::vector<std::string> subprotocols = {});
+                                       std::vector<std::string> subprotocols = {},
+                                       bool offer_permessage_deflate = true);
 
     // Wrap a transport that is already past the HTTP/101 handshake (caller
     // performed/validated the handshake) in a server-side ws_stream.
@@ -96,7 +102,16 @@ public:
     // upgrade request (e.g. WebSocket frames piggybacked on the same TCP
     // segment); they are pushed into the receive pipeline before any further
     // transport reads.
-    static basic_ws_stream wrap_server(Transport t, std::string residual = {});
+    //
+    // `permessage_deflate` indicates whether the upgrade negotiation enabled
+    // permessage-deflate. The optional `*_no_context_takeover` flags indicate
+    // whether each side resets its compression context after every message
+    // (per the parameters echoed in the 101 response).
+    static basic_ws_stream wrap_server(Transport t,
+                                       std::string residual = {},
+                                       bool permessage_deflate = false,
+                                       bool inbound_no_context_takeover = false,
+                                       bool outbound_no_context_takeover = false);
 
     // Client-side handshake: sends the upgrade request, parses the 101
     // response, validates Sec-WebSocket-Accept. Throws on failure.
@@ -125,6 +140,10 @@ public:
 
     bool is_open() const noexcept;
 
+    // True iff the permessage-deflate extension was negotiated for this
+    // connection.
+    bool permessage_deflate_negotiated() const noexcept;
+
     Transport& transport() noexcept { return t_; }
     const Transport& transport() const noexcept { return t_; }
 
@@ -136,6 +155,7 @@ private:
     std::string client_host_;
     std::string client_path_;
     std::vector<std::string> client_subprotocols_;
+    bool client_offer_deflate_ = false;
 
     task<> pump_writes();
     task<bool> pump_reads();   // returns false on EOF
@@ -162,9 +182,13 @@ bool is_ws_upgrade_request(const http_message& req);
 // entry from `Sec-WebSocket-Protocol` that appears in this list is selected
 // (or none, in which case no subprotocol header is sent).
 //
+// `accept_permessage_deflate` (default true) controls whether the server
+// negotiates the permessage-deflate extension when offered by the client.
+//
 // On a malformed upgrade request, a 400 response is written and a ws_error
 // is thrown.
 task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
-                           std::vector<std::string> subprotocols = {});
+                           std::vector<std::string> subprotocols = {},
+                           bool accept_permessage_deflate = true);
 
 } // namespace cotamer

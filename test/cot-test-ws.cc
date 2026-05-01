@@ -66,6 +66,34 @@ cot::task<> run_server(std::string addr, cot::event done) {
     done.trigger();
 }
 
+// Echo server with a configurable accept_permessage_deflate.
+cot::task<> server_one_deflate(cot::fd cfd, bool accept_deflate) {
+    try {
+        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        auto req = co_await hp.receive();
+        if (!hp.ok() || !req.has_header("upgrade")) {
+            co_return;
+        }
+        try {
+            auto ws = co_await cot::ws_upgrade(std::move(hp), req, {},
+                                               accept_deflate);
+            while (true) {
+                auto m = co_await ws.receive();
+                if (std::holds_alternative<cot::ws_close>(m)) {
+                    break;
+                }
+                auto& msg = std::get<cot::ws_message>(m);
+                if (msg.opcode == cot::ws_opcode::text) {
+                    co_await ws.send_text(msg.payload);
+                } else {
+                    co_await ws.send_binary(msg.payload);
+                }
+            }
+            co_await ws.close();
+        } catch (const cot::ws_error&) {}
+    } catch (...) {}
+}
+
 } // namespace
 
 
@@ -212,6 +240,154 @@ cot::task<> test_bad_handshake() {
 }
 
 
+// TEST: permessage-deflate negotiates, and a highly compressible round-trip
+// payload comes back intact.
+cot::task<> test_deflate_round_trip() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    cot::event server_done;
+    auto server = [&]() -> cot::task<> {
+        auto lfd = co_await cot::tcp_listen(addr);
+        auto cfd = co_await cot::accept(lfd);
+        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        server_done.trigger();
+    };
+    server().detach();
+
+    co_await cot::after(5ms);
+
+    auto cfd = co_await cot::tcp_connect(addr);
+    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, /*offer_deflate=*/true);
+    co_await ws.handshake();
+    assert(ws.permessage_deflate_negotiated());
+
+    // Round-trip a moderate, very-compressible message.
+    std::string payload(8192, 'A');
+    co_await ws.send_text(payload);
+
+    auto m = co_await ws.receive();
+    auto& msg = std::get<cot::ws_message>(m);
+    assert(msg.opcode == cot::ws_opcode::text);
+    assert(msg.payload == payload);
+
+    co_await ws.close();
+    co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
+    std::cerr << "deflate_round_trip: ok\n";
+}
+
+
+// TEST: client doesn't offer permessage-deflate; connection still works,
+// negotiation flag is false on both sides.
+cot::task<> test_deflate_client_off() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    cot::event server_done;
+    auto server = [&]() -> cot::task<> {
+        auto lfd = co_await cot::tcp_listen(addr);
+        auto cfd = co_await cot::accept(lfd);
+        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        server_done.trigger();
+    };
+    server().detach();
+
+    co_await cot::after(5ms);
+
+    auto cfd = co_await cot::tcp_connect(addr);
+    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, /*offer_deflate=*/false);
+    co_await ws.handshake();
+    assert(!ws.permessage_deflate_negotiated());
+
+    co_await ws.send_text("hello uncompressed");
+    auto m = co_await ws.receive();
+    assert(std::get<cot::ws_message>(m).payload == "hello uncompressed");
+
+    co_await ws.close();
+    co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
+    std::cerr << "deflate_client_off: ok\n";
+}
+
+
+// TEST: client offers but server refuses; connection still works, no deflate.
+cot::task<> test_deflate_server_off() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    cot::event server_done;
+    auto server = [&]() -> cot::task<> {
+        auto lfd = co_await cot::tcp_listen(addr);
+        auto cfd = co_await cot::accept(lfd);
+        co_await server_one_deflate(std::move(cfd), /*accept=*/false);
+        server_done.trigger();
+    };
+    server().detach();
+
+    co_await cot::after(5ms);
+
+    auto cfd = co_await cot::tcp_connect(addr);
+    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, /*offer_deflate=*/true);
+    co_await ws.handshake();
+    assert(!ws.permessage_deflate_negotiated());
+
+    co_await ws.send_text("uncompressed despite client offer");
+    auto m = co_await ws.receive();
+    assert(std::get<cot::ws_message>(m).payload
+           == "uncompressed despite client offer");
+
+    co_await ws.close();
+    co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
+    std::cerr << "deflate_server_off: ok\n";
+}
+
+
+// TEST: large compressible payload through several round-trips, exercising
+// context-takeover state across messages.
+cot::task<> test_deflate_multi_message() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    cot::event server_done;
+    auto server = [&]() -> cot::task<> {
+        auto lfd = co_await cot::tcp_listen(addr);
+        auto cfd = co_await cot::accept(lfd);
+        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        server_done.trigger();
+    };
+    server().detach();
+
+    co_await cot::after(5ms);
+
+    auto cfd = co_await cot::tcp_connect(addr);
+    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, true);
+    co_await ws.handshake();
+    assert(ws.permessage_deflate_negotiated());
+
+    // Build a 200 KB highly-compressible binary payload (repeating pattern).
+    std::string payload;
+    payload.resize(200 * 1024);
+    for (size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = char((i / 7) & 0xff);
+    }
+
+    for (int round = 0; round < 3; ++round) {
+        co_await ws.send_binary(payload);
+        auto m = co_await ws.receive();
+        auto& msg = std::get<cot::ws_message>(m);
+        assert(msg.opcode == cot::ws_opcode::binary);
+        assert(msg.payload == payload);
+    }
+
+    co_await ws.close();
+    co_await cot::attempt(cot::task<>{server_done}, cot::after(2000ms));
+    std::cerr << "deflate_multi_message: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
 
@@ -233,6 +409,10 @@ int main(int argc, char* argv[]) {
     run("binary_large", test_binary_large);
     run("server_close", test_server_close);
     run("bad_handshake", test_bad_handshake);
+    run("deflate_round_trip", test_deflate_round_trip);
+    run("deflate_client_off", test_deflate_client_off);
+    run("deflate_server_off", test_deflate_server_off);
+    run("deflate_multi_message", test_deflate_multi_message);
 
     if (ran == 0) {
         std::cerr << "No matching tests\n";
