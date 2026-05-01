@@ -237,11 +237,24 @@ public:
 
     inline void clear_should_keep_alive();
 
+    // Release ownership of the underlying fd. Intended for protocol upgrades
+    // (e.g. HTTP/1.1 → WebSocket) where the caller takes over the connection.
+    // The parser is left in an unusable state; do not call any other method
+    // afterwards (other than take_receive_buffer()).
+    inline fd release_fd() &&;
+
+    // Drain any bytes the parser has buffered beyond the most recently
+    // returned message. Use after a successful upgrade to recover frames
+    // that arrived in the same read as the upgrade request, or to take
+    // the next pipelined request's bytes when repurposing the connection.
+    inline std::string take_receive_buffer() &&;
+
 private:
     static constexpr size_t bufsize = 8192;
 
     ::llhttp_t hp_;
     fd f_;
+    std::string receive_buffer_;
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
 
@@ -507,6 +520,14 @@ inline bool http_parser::should_keep_alive() const {
 
 inline void http_parser::clear_should_keep_alive() {
     hp_.flags = (hp_.flags & ~F_CONNECTION_KEEP_ALIVE) | F_CONNECTION_CLOSE;
+}
+
+inline fd http_parser::release_fd() && {
+    return std::move(f_);
+}
+
+inline std::string http_parser::take_receive_buffer() && {
+    return std::move(receive_buffer_);
 }
 
 } // namespace cotamer

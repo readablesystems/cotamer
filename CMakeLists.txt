@@ -13,7 +13,9 @@ set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
-set_property(CACHE COTAMER_MBEDTLS PROPERTY STRINGS AUTO ON OFF)
+set_property(CACHE COTAMER_MBETDTLS PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_WSLAY "AUTO" CACHE STRING "wslay (WebSocket) integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_WSLAY PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -89,6 +91,21 @@ if(NOT COTAMER_MBEDTLS STREQUAL "OFF")
         message(FATAL_ERROR "COTAMER_MBEDTLS=ON but mbedtls was not found")
     else()
         message(STATUS "mbedtls integration: disabled (mbedtls not found)")
+    endif()
+endif()
+
+# Find wslay (RFC 6455 WebSocket framing)
+set(COTAMER_HAVE_WSLAY 0)
+if(NOT COTAMER_WSLAY STREQUAL "OFF")
+    find_path(WSLAY_INCLUDE_DIR wslay/wslay.h HINTS /opt/homebrew/include /usr/local/include)
+    find_library(WSLAY_LIBRARY wslay HINTS /opt/homebrew/lib /usr/local/lib)
+    if(WSLAY_INCLUDE_DIR AND WSLAY_LIBRARY)
+        set(COTAMER_HAVE_WSLAY 1)
+        message(STATUS "wslay integration: enabled")
+    elseif(COTAMER_WSLAY STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_WSLAY=ON but wslay was not found")
+    else()
+        message(STATUS "wslay integration: disabled (wslay not found)")
     endif()
 endif()
 
@@ -187,6 +204,24 @@ if(COTAMER_HAVE_LLHTTP)
     )
 endif()
 
+add_executable(cot-test-http
+    test/cot-test-http.cc
+    $<TARGET_OBJECTS:Cotamer>
+    $<TARGET_OBJECTS:CotamerHttp>
+)
+target_include_directories(cot-test-http PRIVATE
+    ${LLHTTP_INCLUDE_DIR}
+)
+target_link_libraries(cot-test-http PRIVATE
+    ${LLHTTP_LIBRARY}
+)
+if(COTAMER_HAVE_WSLAY)
+    target_sources(httpd PRIVATE $<TARGET_OBJECTS:CotamerWebSocket>)
+    target_include_directories(httpd PRIVATE ${WSLAY_INCLUDE_DIR})
+    target_link_libraries(httpd PRIVATE ${WSLAY_LIBRARY})
+    target_compile_definitions(httpd PRIVATE COTAMER_HTTPD_HAS_WSLAY=1)
+endif()
+
 # Optional libcurl integration
 if(COTAMER_HAVE_CURL)
     add_library(CotamerCurl OBJECT
@@ -226,4 +261,46 @@ if(COTAMER_HAVE_MBEDTLS)
     )
     target_include_directories(cot-test-tls PRIVATE ${MBEDTLS_INCLUDE_DIR})
     target_link_libraries(cot-test-tls PRIVATE ${MBEDTLS_LIBRARIES})
+endif()
+
+# Optional wslay (WebSocket) integration
+if(COTAMER_HAVE_WSLAY)
+    add_library(CotamerWebSocket OBJECT
+        cotamer/websocket.cc
+    )
+    target_include_directories(CotamerWebSocket PUBLIC ${WSLAY_INCLUDE_DIR})
+    target_include_directories(CotamerWebSocket PRIVATE ${LLHTTP_INCLUDE_DIR})
+    if(COTAMER_HAVE_MBEDTLS)
+        target_include_directories(CotamerWebSocket PRIVATE ${MBEDTLS_INCLUDE_DIR})
+    endif()
+
+    add_executable(cot-test-ws
+        test/cot-test-ws.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+        $<TARGET_OBJECTS:CotamerWebSocket>
+    )
+    target_include_directories(cot-test-ws PRIVATE
+        ${WSLAY_INCLUDE_DIR}
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(cot-test-ws PRIVATE
+        ${WSLAY_LIBRARY}
+        ${LLHTTP_LIBRARY}
+    )
+
+    add_executable(ws-echo
+        examples/ws-echo.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+        $<TARGET_OBJECTS:CotamerWebSocket>
+    )
+    target_include_directories(ws-echo PRIVATE
+        ${WSLAY_INCLUDE_DIR}
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(ws-echo PRIVATE
+        ${WSLAY_LIBRARY}
+        ${LLHTTP_LIBRARY}
+    )
 endif()

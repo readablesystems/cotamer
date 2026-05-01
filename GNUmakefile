@@ -14,8 +14,8 @@ cmake_verbose := --verbose
 endif
 
 targets = cot-test cot-test-threads cot-test-io cot-manual cot-benchmark \
-	ctconsensus rpcg-server rpcg-client httpd \
-	cot-test-curl
+	ctconsensus rpcg-server rpcg-client httpd ws-echo \
+	cot-test-curl cot-test-http cot-test-ws
 
 all:
 	cmake -B $(BUILD) $(cmake_build)

@@ -1,7 +1,28 @@
 #include "cotamer/cotamer.hh"
 #include "cotamer/http.hh"
+#if COTAMER_HTTPD_HAS_WSLAY
+# include "cotamer/websocket.hh"
+#endif
 
 namespace cot = cotamer;
+
+#if COTAMER_HTTPD_HAS_WSLAY
+cot::task<> run_ws_echo(cot::ws_stream ws) {
+    while (true) {
+        auto m = co_await ws.receive();
+        if (std::holds_alternative<cot::ws_close>(m)) {
+            break;
+        }
+        auto& msg = std::get<cot::ws_message>(m);
+        if (msg.opcode == cot::ws_opcode::text) {
+            co_await ws.send_text(msg.payload);
+        } else {
+            co_await ws.send_binary(msg.payload);
+        }
+    }
+    co_await ws.close();
+}
+#endif
 
 cot::task<> run_one(cot::fd cfd, double delay) {
     cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
@@ -12,6 +33,18 @@ cot::task<> run_one(cot::fd cfd, double delay) {
         if (!hp.ok()) {
             break;
         }
+#if COTAMER_HTTPD_HAS_WSLAY
+        if (cot::is_ws_upgrade_request(req)) {
+            std::cerr << req.url() << " [ws upgrade]\n";
+            try {
+                auto ws = co_await cot::ws_upgrade(std::move(hp), req);
+                co_await run_ws_echo(std::move(ws));
+            } catch (const cot::ws_error& e) {
+                std::cerr << "ws_upgrade error: " << e.what() << '\n';
+            }
+            co_return;
+        }
+#endif
         std::cerr << req.url() << '\n';
         co_await cot::after(std::chrono::duration<double>(delay));
         res.clear();
