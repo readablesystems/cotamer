@@ -458,9 +458,7 @@ int http_parser::on_body(::llhttp_t* hp, const char* s, size_t len) {
 int http_parser::on_message_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->state = state_done;
-    // Pause llhttp at every message boundary so pipelined bytes after this
-    // message remain in the caller's buffer (instead of being fed into the
-    // next on_message_begin, which would clobber what we just completed).
+    // Pause llhttp so receive() task can yield
     return HPE_PAUSED;
 }
 
@@ -488,52 +486,30 @@ task<http_message> http_parser::receive() {
 
         llhttp_errno_t err = llhttp_execute(&hp_, buf, nr);
 
-        // Determine how many bytes llhttp actually consumed. On HPE_OK it
-        // consumed all of them; otherwise llhttp_get_error_pos points at
-        // the first byte it did not process.
-        size_t consumed;
-        if (err == HPE_OK) {
-            consumed = nr;
+        // save unconsumed bytes in `receive_buffer_`
+        size_t consumed = nr;
+        if (err != HPE_OK) {
+            consumed = llhttp_get_error_pos(&hp_) - buf;
+        }
+        if (consumed == nr) {
+            receive_buffer_.clear();
         } else {
-            const char* tail = llhttp_get_error_pos(&hp_);
-            consumed = tail ? size_t(tail - buf) : nr;
+            receive_buffer_ = std::string(buf + consumed, buf + nr);
         }
-
-        // Save unconsumed bytes for the next call. Build into a local
-        // first because `buf` may alias receive_buffer_.
-        std::string tail_buf;
-        if (consumed < nr) {
-            tail_buf.assign(buf + consumed, nr - consumed);
-        }
-        receive_buffer_ = std::move(tail_buf);
 
         if (err == HPE_PAUSED_UPGRADE) {
-            // Successful HTTP upgrade. Headers parsed in full; the residual
-            // (now in receive_buffer_) belongs to the upgraded protocol.
-            // Clear the parser error so hp.ok() stays true.
-            hp_.error = HPE_OK;
+            llhttp_resume_after_upgrade(&hp_);
             md.state = state_done;
-            copy_parser_status(md);
-            break;
-        }
-        if (err == HPE_PAUSED) {
-            // on_message_complete paused us at a message boundary. The
-            // message is fully parsed; pipelined bytes are in receive_buffer_
-            // for the next receive() call. Resume the parser and clear the
-            // pause-error so hp.ok() reads true: the pause is internal, not
-            // a user-visible failure.
-            md.state = state_done;
-            copy_parser_status(md);
-            md.hm.error_ = HPE_OK;
+        } else if (err == HPE_PAUSED) {
+            // we only pause at a message boundary
             llhttp_resume(&hp_);
-            hp_.error = HPE_OK;
-            break;
+            md.state = state_done;
         }
         if (err != HPE_OK || md.state == state_done) {
             copy_parser_status(md);
             break;
         }
-        // err == HPE_OK, message incomplete: loop to read more.
+        // otherwise, message incomplete: loop to read more.
     }
 
     if (md.state != state_done && !md.hm.error_) {
