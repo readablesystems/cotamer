@@ -14,6 +14,8 @@ set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_MBEDTLS "AUTO" CACHE STRING "mbedtls integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_MBEDTLS PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_NLOHMANN_JSON "AUTO" CACHE STRING "nlohmann::json integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_NLOHMANN_JSON PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_WSLAY "AUTO" CACHE STRING "wslay integration (WebSockets) (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_WSLAY PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_ZLIB "AUTO" CACHE STRING "zlib integration (AUTO/ON/OFF)")
@@ -125,6 +127,27 @@ if(NOT COTAMER_ZLIB STREQUAL "OFF")
     endif()
 endif()
 
+# Find nlohmann::json (header-only)
+set(COTAMER_HAVE_NLOHMANN_JSON 0)
+if(NOT COTAMER_NLOHMANN_JSON STREQUAL "OFF")
+    find_package(nlohmann_json QUIET)
+    if(nlohmann_json_FOUND)
+        set(COTAMER_HAVE_NLOHMANN_JSON 1)
+        message(STATUS "nlohmann::json integration: enabled (${nlohmann_json_VERSION})")
+        # Propagate the include path globally so cotamer/http.hh's forward-
+        # declaration of nlohmann::json compiles for every consumer.
+        get_target_property(_njson_inc nlohmann_json::nlohmann_json
+                            INTERFACE_INCLUDE_DIRECTORIES)
+        if(_njson_inc)
+            include_directories(${_njson_inc})
+        endif()
+    elseif(COTAMER_NLOHMANN_JSON STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_NLOHMANN_JSON=ON but nlohmann_json was not found")
+    else()
+        message(STATUS "nlohmann::json integration: disabled (nlohmann_json not found)")
+    endif()
+endif()
+
 # Generate config header
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cotamer/config.hh.in
@@ -205,6 +228,46 @@ target_include_directories(rpcg-client PRIVATE
 target_link_libraries(rpcg-client PRIVATE
     ${XXHASH_LIBRARY}
 )
+
+if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
+    add_executable(jsond
+        examples/jsond.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(jsond PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(jsond PRIVATE
+        ${LLHTTP_LIBRARY}
+        nlohmann_json::nlohmann_json
+    )
+
+    add_executable(jsond-tester
+        examples/jsond-tester.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(jsond-tester PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(jsond-tester PRIVATE
+        ${LLHTTP_LIBRARY}
+        nlohmann_json::nlohmann_json
+    )
+
+    if(COTAMER_HAVE_CURL)
+        add_executable(jsond-tester-curl
+            examples/jsond-tester-curl.cc
+            $<TARGET_OBJECTS:Cotamer>
+            $<TARGET_OBJECTS:CotamerCurl>
+        )
+        target_link_libraries(jsond-tester-curl PRIVATE
+            CURL::libcurl
+            nlohmann_json::nlohmann_json
+        )
+    endif()
+endif()
 
 if(COTAMER_HAVE_LLHTTP)
     add_executable(httpd

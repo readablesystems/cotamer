@@ -1,10 +1,14 @@
 #pragma once
+#include "cotamer/config.hh"
 #include "cotamer/io.hh"
 #include "llhttp.h"
 #include <vector>
 #include <string>
 #include <memory>
 #include <ctime>
+#if COTAMER_HAVE_NLOHMANN_JSON
+# include <nlohmann/json_fwd.hpp>
+#endif
 namespace cotamer {
 class http_parser;
 
@@ -128,38 +132,40 @@ class http_message {
 
     inline constexpr unsigned http_major() const;
     inline constexpr unsigned http_minor() const;
-
     inline constexpr unsigned status_code() const;
     inline const std::string& status_message() const;
     inline constexpr llhttp_method method() const;
-    inline constexpr const std::string& url() const;
+    inline const char* method_name() const;
 
+    // Examine headers
     inline bool has_header(const char* name) const;
-    inline bool has_header(const char* name, size_t length) const;
+    inline bool has_header(const char* name, size_t name_length) const;
     inline bool has_header(std::string_view name) const;
     inline header_iterator find_header(const char* name) const;
-    header_iterator find_header(const char* name, size_t length) const;
+    header_iterator find_header(const char* name, size_t name_length) const;
     inline header_iterator find_header(std::string_view name) const;
     inline std::string header(const char* name) const;
-    std::string header(const char* name, size_t length) const;
+    std::string header(const char* name, size_t name_length) const;
     inline std::string header(std::string_view name) const;
-
-    inline const std::string& body() const;
-
-    inline bool has_valid_url() const;
-    inline bool has_path() const;
-    inline std::string_view path() const;
-    inline bool has_search() const;
-    inline std::string_view search() const;
-    inline bool has_hash() const;
-    inline std::string_view hash() const;
-    bool has_search_param(std::string_view name) const;
-    std::string_view search_param(std::string_view name) const;
-
     inline header_iterator header_begin() const;
     inline header_iterator header_end() const;
+
+    // Examine URL and URL parts
+    inline constexpr const std::string& url() const;   // `/path?a=b&c=d#hash`
+    inline bool has_valid_url() const;
+    inline bool has_path() const;
+    inline bool has_search() const;
+    inline bool has_hash() const;
+    inline std::string_view path() const;      // → `/path`
+    inline std::string_view search() const;    // → `?a=b&c=d`
+    inline std::string_view hash() const;      // → `#hash`
+    bool has_search_param(std::string_view name) const;
+    std::string_view search_param(std::string_view name) const;
     inline header_iterator search_param_begin() const;
     inline header_iterator search_param_end() const;
+
+    // Examine body
+    inline const std::string& body() const;
 
     inline http_message& clear();
     void add_header(std::string key, std::string value);
@@ -175,8 +181,12 @@ class http_message {
     inline http_message& header(std::string key, std::string value);
     inline http_message& header(std::string key, size_t value);
     inline http_message& date_header(std::string key, time_t value);
+
     inline http_message& body(std::string body);
     inline http_message& append_body(const std::string& x);
+#if COTAMER_HAVE_NLOHMANN_JSON
+    http_message& body(const nlohmann::json& j);
+#endif
 
     static const char* default_status_message(unsigned code);
 
@@ -324,6 +334,10 @@ inline const std::string& http_message::status_message() const {
 
 inline constexpr llhttp_method http_message::method() const {
     return (llhttp_method) method_;
+}
+
+inline const char* http_message::method_name() const {
+    return llhttp_method_name((llhttp_method) method_);
 }
 
 inline constexpr const std::string& http_message::url() const {

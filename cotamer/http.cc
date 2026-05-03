@@ -12,6 +12,9 @@
  * legally binding.
  */
 #include "cotamer/http.hh"
+#if COTAMER_HAVE_NLOHMANN_JSON
+# include <nlohmann/json.hpp>
+#endif
 
 namespace {
 struct status_code_map {
@@ -520,7 +523,7 @@ task<http_message> http_parser::receive() {
 
 task<> http_parser::send_request(http_message m) {
     std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
-        llhttp_method_name(m.method()), m.url(), m.http_major(), m.http_minor());
+        m.method_name(), m.url(), m.http_major(), m.http_minor());
     if (m.has_body_
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
@@ -603,5 +606,16 @@ task<> http_parser::send_response_chunk(std::string str) {
 task<> http_parser::send_response_end_chunk() {
     co_await write(f_, "0\r\n\r\n", 5);
 }
+
+#if COTAMER_HAVE_NLOHMANN_JSON
+http_message& http_message::body(const nlohmann::json& j) {
+    if (!has_header("Content-Type")) {
+        add_header("Content-Type", "application/json");
+    }
+    body_ = j.dump();
+    has_body_ = 1;
+    return *this;
+}
+#endif
 
 } // namespace cotamer
