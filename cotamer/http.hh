@@ -4,7 +4,6 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <cstring>
 #include <ctime>
 namespace cotamer {
 class http_parser;
@@ -224,10 +223,10 @@ class http_parser {
 public:
     http_parser(fd f, enum llhttp_type type);
 
-    void clear();
     inline bool ok() const;
     inline enum llhttp_errno error() const;
-    inline bool should_keep_alive() const;
+
+    void clear();
 
     task<http_message> receive();
     task<> send(http_message);
@@ -236,13 +235,22 @@ public:
     task<> send_response_chunk(std::string);
     task<> send_response_end_chunk();
 
+    inline bool should_keep_alive() const;
     inline void clear_should_keep_alive();
+
+    // Data buffered after parsing the HTTP message
+    inline const std::string& receive_buffer() const;
+    inline std::string& receive_buffer();
+
+    // Release ownership of the underlying fd (e.g., for protocol upgrades)
+    inline fd take_file();
 
 private:
     static constexpr size_t bufsize = 8192;
 
     ::llhttp_t hp_;
     fd f_;
+    std::string receive_buffer_;
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
 
@@ -508,6 +516,18 @@ inline bool http_parser::should_keep_alive() const {
 
 inline void http_parser::clear_should_keep_alive() {
     hp_.flags = (hp_.flags & ~F_CONNECTION_KEEP_ALIVE) | F_CONNECTION_CLOSE;
+}
+
+inline fd http_parser::take_file() {
+    return std::move(f_);
+}
+
+inline const std::string& http_parser::receive_buffer() const {
+    return receive_buffer_;
+}
+
+inline std::string& http_parser::receive_buffer() {
+    return receive_buffer_;
 }
 
 } // namespace cotamer

@@ -350,6 +350,7 @@ http_parser::http_parser(fd f, enum llhttp_type hp_type)
 
 void http_parser::clear() {
     llhttp_reset(&hp_);
+    receive_buffer_.clear();
 }
 
 inline void http_parser::copy_parser_status(message_data& md) {
@@ -457,25 +458,58 @@ int http_parser::on_body(::llhttp_t* hp, const char* s, size_t len) {
 int http_parser::on_message_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->state = state_done;
-    return 0;
+    // Pause llhttp so receive() task can yield
+    return HPE_PAUSED;
 }
 
 task<http_message> http_parser::receive() {
-    char buf[8192];
+    char stackbuf[bufsize];
     message_data md;
     md.hm.status_code(0);
+    hp_.data = &md;
 
     while (true) {
-        size_t nr = co_await read_once(f_, buf, sizeof(buf));
-        if (nr == 0) {
-            break;
+        const char* buf;
+        size_t nr;
+        if (receive_buffer_.empty()) {
+            buf = stackbuf;
+            nr = co_await read_once(f_, stackbuf, sizeof(stackbuf));
+            if (nr == 0) {
+                break;
+            }
+        } else {
+            // Drain bytes left from the previous call (pipelined data, or a
+            // partial frame we couldn't process in one llhttp_execute).
+            buf = receive_buffer_.data();
+            nr = receive_buffer_.size();
         }
-        hp_.data = &md;
-        size_t nconsumed = llhttp_execute(&hp_, buf, nr);
-        if (hp_.upgrade || nconsumed != nr || md.state == state_done) {
+
+        llhttp_errno_t err = llhttp_execute(&hp_, buf, nr);
+
+        // save unconsumed bytes in `receive_buffer_`
+        size_t consumed = nr;
+        if (err != HPE_OK) {
+            consumed = llhttp_get_error_pos(&hp_) - buf;
+        }
+        if (consumed == nr) {
+            receive_buffer_.clear();
+        } else {
+            receive_buffer_ = std::string(buf + consumed, buf + nr);
+        }
+
+        if (err == HPE_PAUSED_UPGRADE) {
+            llhttp_resume_after_upgrade(&hp_);
+            md.state = state_done;
+        } else if (err == HPE_PAUSED) {
+            // we only pause at a message boundary
+            llhttp_resume(&hp_);
+            md.state = state_done;
+        }
+        if (err != HPE_OK || md.state == state_done) {
             copy_parser_status(md);
             break;
         }
+        // otherwise, message incomplete: loop to read more.
     }
 
     if (md.state != state_done && !md.hm.error_) {
