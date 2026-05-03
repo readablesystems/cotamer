@@ -152,7 +152,7 @@ cot::task<> test_pipelining_with_bodies() {
 
 // An upgrade request: the parser should hand back the message with hp.ok()
 // true, and any bytes after the headers should be available via
-// take_receive_buffer().
+// receive_buffer().
 cot::task<> test_upgrade_residual() {
     uint16_t port = unique_port();
     auto addr = "127.0.0.1:" + std::to_string(port);
@@ -169,7 +169,7 @@ cot::task<> test_upgrade_residual() {
         auto req = co_await hp.receive();
         assert(hp.ok());
         assert(req.has_header("upgrade"));
-        std::string residual = std::move(hp).take_receive_buffer();
+        std::string residual = hp.receive_buffer();
         assert(residual == "FRAME_BYTES");
         server_done.trigger();
     };

@@ -113,16 +113,30 @@ static const uint8_t urlsafe[256] = {
 
 const llhttp_settings_t http_parser::settings = {
     .on_message_begin       = &http_parser::on_message_begin,
+    .on_protocol            = nullptr,
     .on_url                 = &http_parser::on_url,
     .on_status              = &http_parser::on_status,
+    .on_method              = nullptr,
+    .on_version             = nullptr,
     .on_header_field        = &http_parser::on_header_field,
     .on_header_value        = &http_parser::on_header_value,
+    .on_chunk_extension_name = nullptr,
+    .on_chunk_extension_value = nullptr,
     .on_headers_complete    = &http_parser::on_headers_complete,
     .on_body                = &http_parser::on_body,
     .on_message_complete    = &http_parser::on_message_complete,
+    .on_protocol_complete   = nullptr,
+    .on_url_complete        = nullptr,
+    .on_status_complete     = nullptr,
+    .on_method_complete     = nullptr,
+    .on_version_complete    = nullptr,
     .on_header_field_complete = &http_parser::on_header_field_complete,
     .on_header_value_complete = &http_parser::on_header_value_complete,
-    .on_chunk_header        = &http_parser::on_chunk_header
+    .on_chunk_extension_name_complete = nullptr,
+    .on_chunk_extension_value_complete = nullptr,
+    .on_chunk_header        = &http_parser::on_chunk_header,
+    .on_chunk_complete      = nullptr,
+    .on_reset               = nullptr
 };
 
 const char* http_message::default_status_message(unsigned code) {

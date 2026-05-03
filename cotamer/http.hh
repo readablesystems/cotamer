@@ -223,10 +223,10 @@ class http_parser {
 public:
     http_parser(fd f, enum llhttp_type type);
 
-    void clear();
     inline bool ok() const;
     inline enum llhttp_errno error() const;
-    inline bool should_keep_alive() const;
+
+    void clear();
 
     task<http_message> receive();
     task<> send(http_message);
@@ -235,19 +235,15 @@ public:
     task<> send_response_chunk(std::string);
     task<> send_response_end_chunk();
 
+    inline bool should_keep_alive() const;
     inline void clear_should_keep_alive();
 
-    // Release ownership of the underlying fd. Intended for protocol upgrades
-    // (e.g. HTTP/1.1 → WebSocket) where the caller takes over the connection.
-    // The parser is left in an unusable state; do not call any other method
-    // afterwards (other than take_receive_buffer()).
-    inline fd release_fd() &&;
+    // Data buffered after parsing the HTTP message
+    inline const std::string& receive_buffer() const;
+    inline std::string& receive_buffer();
 
-    // Drain any bytes the parser has buffered beyond the most recently
-    // returned message. Use after a successful upgrade to recover frames
-    // that arrived in the same read as the upgrade request, or to take
-    // the next pipelined request's bytes when repurposing the connection.
-    inline std::string take_receive_buffer() &&;
+    // Release ownership of the underlying fd (e.g., for protocol upgrades)
+    inline fd take_file();
 
 private:
     static constexpr size_t bufsize = 8192;
@@ -522,12 +518,16 @@ inline void http_parser::clear_should_keep_alive() {
     hp_.flags = (hp_.flags & ~F_CONNECTION_KEEP_ALIVE) | F_CONNECTION_CLOSE;
 }
 
-inline fd http_parser::release_fd() && {
+inline fd http_parser::take_file() {
     return std::move(f_);
 }
 
-inline std::string http_parser::take_receive_buffer() && {
-    return std::move(receive_buffer_);
+inline const std::string& http_parser::receive_buffer() const {
+    return receive_buffer_;
+}
+
+inline std::string& http_parser::receive_buffer() {
+    return receive_buffer_;
 }
 
 } // namespace cotamer

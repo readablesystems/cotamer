@@ -987,7 +987,7 @@ task<> basic_ws_stream<Transport>::handshake() {
     // Stash any bytes that arrived alongside the 101 (a server might have
     // piggybacked a frame on the same TCP segment) into wslay's recv buffer
     // before we let it pull more from the transport.
-    std::string residual = std::move(hp).take_receive_buffer();
+    std::string residual = std::move(hp.receive_buffer());
     if (!residual.empty()) {
         const auto* p = reinterpret_cast<const uint8_t*>(residual.data());
         state_->recv_buf.insert(state_->recv_buf.end(),
@@ -1120,11 +1120,10 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
     // Recover any bytes that arrived past the end of the upgrade headers
     // (e.g. a frame piggybacked on the same TCP segment). They belong to
     // the WebSocket protocol now.
-    std::string residual = std::move(hp).take_receive_buffer();
-    fd cfd = std::move(hp).release_fd();
+    fd cfd = hp.take_file();
     co_await write(cfd, res.data(), res.size());
 
-    co_return ws_stream::wrap_server(std::move(cfd), std::move(residual),
+    co_return ws_stream::wrap_server(std::move(cfd), std::move(hp.receive_buffer()),
                                      deflate_negotiated,
                                      deflate_inbound_no_ctx,
                                      deflate_outbound_no_ctx);
