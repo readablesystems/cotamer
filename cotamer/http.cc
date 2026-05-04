@@ -458,11 +458,12 @@ int http_parser::on_message_complete(::llhttp_t* hp) {
     return HPE_PAUSED;
 }
 
-task<http_message> http_parser::receive(ticket_type queue_order) {
+task<http_message> http_parser::receive(ticket_type ticket) {
+    assert(ticket.mutex() == &m_[0]);
     char stackbuf[bufsize];
     message_data md;
     md.hm.status_code(0);
-    unique_lock guard(co_await queue_order);
+    unique_lock guard(co_await ticket);
     hp_.data = &md;
 
     while (true) {
@@ -535,10 +536,12 @@ task<http_parser::ticket_type> http_parser::send_request(http_message m) {
         ++iovcnt;
     }
 
-    unique_lock guard(co_await f_.lock(fdevent::write));
-    auto qpos = f_.lock(fdevent::read);
+    // lock for writing, then obtain read ticket
+    unique_lock guard(co_await m_[1].lock());
+    auto ticket = m_[0].lock();
+
     co_await sendv(f_, iov, iovcnt);
-    co_return std::move(qpos);
+    co_return std::move(ticket);
 }
 
 task<> http_parser::send_response(http_message m) {
@@ -583,7 +586,7 @@ task<> http_parser::send_response(http_message m) {
         ++iovcnt;
     }
 
-    unique_lock guard(co_await f_.lock(fdevent::write));
+    unique_lock guard(co_await m_[1].lock());
     co_await sendv(f_, iov, iovcnt);
 }
 
@@ -602,12 +605,12 @@ task<> http_parser::send_response_chunk(std::string str) {
     iov[0] = iovec{ lenline.data(), lenline.length() };
     iov[1] = iovec{ str.data(), str.length() };
     iov[2] = iovec{ (void*) "\r\n", 2 };
-    unique_lock guard(co_await f_.lock(fdevent::write));
+    unique_lock guard(co_await m_[1].lock());
     co_await sendv(f_, iov, 3);
 }
 
 task<> http_parser::send_response_end_chunk() {
-    unique_lock guard(co_await f_.lock(fdevent::write));
+    unique_lock guard(co_await m_[1].lock());
     co_await cotamer::send(f_, "0\r\n\r\n", 5);
 }
 

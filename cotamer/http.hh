@@ -121,7 +121,7 @@ private:
 };
 
 class http_message {
-  public:
+public:
     typedef http_header_iterator header_iterator;
 
     inline http_message(llhttp_method method = HTTP_GET, std::string url = std::string());
@@ -275,6 +275,7 @@ private:
 
     ::llhttp_t hp_;
     fd f_;
+    mutex m_[2];
     std::string receive_buffer_;
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
@@ -580,7 +581,7 @@ inline bool http_parser::should_keep_alive() const {
 }
 
 inline task<http_message> http_parser::receive() {
-    return receive(f_.lock(fdevent::read));
+    return receive(m_[0].lock());
 }
 
 inline void http_parser::clear_should_keep_alive() {

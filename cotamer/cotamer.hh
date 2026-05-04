@@ -350,14 +350,10 @@ public:
     inline fd& operator=(fd&&) noexcept;
     inline ~fd();
 
-    int fileno() const noexcept;
-    bool valid() const noexcept;
+    int fileno() const noexcept;               // underlying file descriptor
+    bool valid() const noexcept;               // is `fd` open?
     explicit operator bool() const noexcept;
-    void close();
-
-    inline mutex* mutex(fdevent) const;
-    inline mutex_event<false> lock(fdevent) const;
-    inline void unlock(fdevent) const;
+    void close();                              // close `fd`
 
     detail::fd_body* body() const noexcept { return body_; }
 
