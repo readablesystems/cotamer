@@ -507,6 +507,9 @@ task<cotamer::fd> tcp_listen(std::string address, int backlog) {
         }
 
         set_nonblocking(fileno);
+#ifdef SO_NOSIGPIPE
+        set_no_sigpipe(fileno);
+#endif
         int flag = 1;
         setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
         if (ai->ai_family == AF_INET6) {
@@ -550,6 +553,9 @@ task<cotamer::fd> tcp_connect(std::string address) {
         }
 
         set_nonblocking(fileno);
+#ifdef SO_NOSIGPIPE
+        set_no_sigpipe(fileno);
+#endif
         int flag = 1;
         setsockopt(fileno, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
@@ -565,9 +571,9 @@ task<cotamer::fd> tcp_connect(std::string address) {
 }
 
 
-// Writes all bytes in the `iovec`s, suspending as needed. Returns bytes
+// Write all bytes in the `iovec`s, suspending as needed. Returns bytes
 // written.
-task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt) {
+task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt) {
     std::vector<struct iovec> iovcopy;
     size_t nw = 0;
     size_t nwa = 0;
@@ -611,9 +617,64 @@ task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt) {
         } else if (nw > 0) {
             break;
         } else {
-            throw errno_error();
+            co_return std::unexpected(errno_code());
         }
     } while (iovcnt != 0);
+    co_return nw;
+}
+
+
+// Write all bytes in the `iovec`s, suspending as needed. Returns bytes
+// written.
+task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt) {
+    std::vector<struct iovec> iovcopy;
+    size_t nw = 0;
+    size_t nwa = 0;
+    size_t rd = 0;
+    for (size_t i =0; i != iovcnt; ++i) {
+        nwa += iov[i].iov_len;
+    }
+    std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
+    unique_lock guard(co_await f.lock(fdevent::write));
+    struct msghdr mh{};
+    mh.msg_iov = const_cast<struct iovec*>(iov);
+    mh.msg_iovlen = iovcnt;
+    do {
+        if (rd > 0) {
+            std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
+        }
+        ssize_t r = ::sendmsg(f.fileno(), &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
+        ++rd;
+        if (r > 0) {
+            nw += r;
+            while (r > 0) {
+                if (size_t(r) >= mh.msg_iov->iov_len) {
+                    r -= mh.msg_iov->iov_len;
+                    ++mh.msg_iov;
+                    --mh.msg_iovlen;
+                    continue;
+                }
+                if (iovcopy.empty()) {
+                    iovcopy.append_range(std::span(mh.msg_iov, mh.msg_iovlen));
+                    mh.msg_iov = iovcopy.data();
+                }
+                mh.msg_iov->iov_base = reinterpret_cast<char*>(mh.msg_iov->iov_base) + r;
+                mh.msg_iov->iov_len -= r;
+                r = 0;
+            }
+        } else if (r == 0) {
+            // This result is only expected if the original `count` was 0.
+            // At other times, treat it like EOF on read.
+            break;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            std::cerr<< "block on " << nw << "\n";
+            co_await writable(f);
+        } else if (nw > 0) {
+            break;
+        } else {
+            co_return std::unexpected(errno_code());
+        }
+    } while (mh.msg_iovlen != 0);
     co_return nw;
 }
 

@@ -200,7 +200,7 @@ cot::task<> normal_examples() {
 
 
     for (int i = 0; i != 100; ++i) {
-        //rpcx().detach();
+        rpcx().detach();
     }
 }
 

@@ -476,10 +476,11 @@ task<http_message> http_parser::receive() {
         size_t nr;
         if (receive_buffer_.empty()) {
             buf = stackbuf;
-            nr = co_await read_once(f_, stackbuf, sizeof(stackbuf));
-            if (nr == 0) {
+            auto nx = co_await read_once(f_, stackbuf, sizeof(stackbuf));
+            if (!nx || *nx == 0) {
                 break;
             }
+            nr = *nx;
         } else {
             // Drain bytes left from the previous call (pipelined data, or a
             // partial frame we couldn't process in one llhttp_execute).
@@ -516,7 +517,7 @@ task<http_message> http_parser::receive() {
     }
 
     if (md.state != state_done && !md.hm.error_) {
-        hp_.error = md.hm.error_ = HPE_USER;
+        hp_.error = md.hm.error_ = HPE_CLOSED_CONNECTION;
     }
     co_return std::move(md.hm);
 }
@@ -539,7 +540,7 @@ task<> http_parser::send_request(http_message m) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
-    co_await writev(f_, iov, iovcnt);
+    co_await sendv(f_, iov, iovcnt);
 }
 
 task<> http_parser::send_response(http_message m) {
@@ -583,7 +584,7 @@ task<> http_parser::send_response(http_message m) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
-    co_await writev(f_, iov, iovcnt);
+    co_await sendv(f_, iov, iovcnt);
 }
 
 task<> http_parser::send(http_message m) {
@@ -600,11 +601,11 @@ task<> http_parser::send_response_chunk(std::string str) {
     iov[0] = iovec{ lenline.data(), lenline.length() };
     iov[1] = iovec{ str.data(), str.length() };
     iov[2] = iovec{ (void*) "\r\n", 2 };
-    co_await writev(f_, iov, 3);
+    co_await sendv(f_, iov, 3);
 }
 
 task<> http_parser::send_response_end_chunk() {
-    co_await write(f_, "0\r\n\r\n", 5);
+    co_await cotamer::send(f_, "0\r\n\r\n", 5);
 }
 
 #if COTAMER_HAVE_NLOHMANN_JSON

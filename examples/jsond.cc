@@ -279,16 +279,15 @@ cot::task<> handle_connection(cot::fd cfd, notes_db& db) {
     }
     std::print(std::cerr, "triggered? {}\n", sends.triggered());
     co_await sends;
+    std::print(std::cerr, "done\n");
 }
 
-// Listen on `address`; for each accepted connection, spawn a per-
-// connection coroutine via `run_one(...).detach()`. `detach` lets
-// the coroutine outlive this loop iteration; it cleans itself up
-// when the connection ends.
+// Listen on `address`; for each accepted connection, spawn a per-connection
+// coroutine via `run_one(...).detach()`.
 cot::task<> start(std::string address, notes_db& db) {
     auto lfd = co_await cot::tcp_listen(address);
     while (true) {
-        handle_connection(co_await cot::accept(lfd), db).detach();
+        handle_connection(co_await cot::tcp_accept(lfd), db).detach();
     }
 }
 

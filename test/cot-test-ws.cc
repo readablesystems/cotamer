@@ -226,11 +226,15 @@ cot::task<> test_bad_handshake() {
     char buf[1024];
     size_t total = 0;
     while (total < sizeof(buf)) {
-        size_t n = co_await cot::read_once(cfd, buf + total, sizeof(buf) - total);
-        if (n == 0) break;
-        total += n;
+        auto n = co_await cot::read_once(cfd, buf + total, sizeof(buf) - total);
+        if (!n || n == 0) {
+            break;
+        }
+        total += *n;
         std::string_view sv(buf, total);
-        if (sv.find("\r\n\r\n") != std::string_view::npos) break;
+        if (sv.find("\r\n\r\n") != std::string_view::npos) {
+            break;
+        }
     }
     std::string_view sv(buf, total);
     assert(sv.starts_with("HTTP/1.1 400"));

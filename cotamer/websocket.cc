@@ -480,10 +480,10 @@ const wslay_event_callbacks ws_event_callbacks = {
 namespace detail {
 
 // Read up to n bytes from a transport. Returns 0 at EOF.
-inline task<size_t> ws_xport_read(fd& f, void* buf, size_t n) {
+inline task<ioresult> ws_xport_read(fd& f, void* buf, size_t n) {
     co_return co_await read_once(f, buf, n);
 }
-inline task<size_t> ws_xport_write(fd& f, const void* buf, size_t n) {
+inline task<ioresult> ws_xport_write(fd& f, const void* buf, size_t n) {
     co_return co_await write(f, buf, n);
 }
 
@@ -609,13 +609,13 @@ task<bool> basic_ws_stream<Transport>::pump_reads() {
     }
     constexpr size_t bufsz = 8192;
     uint8_t buf[bufsz];
-    size_t n = co_await detail::ws_xport_read(t_, buf, bufsz);
-    if (n == 0) {
+    auto n = co_await detail::ws_xport_read(t_, buf, bufsz);
+    if (!n || *n == 0) {
         state_->recv_eof = true;
         wslay_event_shutdown_read(state_->ctx);
         co_return false;
     }
-    state_->recv_buf.insert(state_->recv_buf.end(), buf, buf + n);
+    state_->recv_buf.insert(state_->recv_buf.end(), buf, buf + *n);
     int rv = wslay_event_recv(state_->ctx);
     if (rv != 0) {
         throw ws_error(rv);

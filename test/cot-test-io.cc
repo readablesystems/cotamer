@@ -28,16 +28,16 @@ cot::task<> test_pipe_readwrite() {
     auto writer = [&]() -> cot::task<> {
         const char* msg = "hello from pipe";
         auto r = co_await cot::write(wfd, msg, strlen(msg));
-        assert(r == strlen(msg));
+        assert(*r == strlen(msg));
     };
 
     // Reader: read from the pipe
     auto reader = [&]() -> cot::task<> {
         char buf[64] = {};
         auto r = co_await cot::read_once(rfd, buf, sizeof(buf));
-        assert(r > 0);
-        assert(std::string(buf, r) == "hello from pipe");
-        std::cerr << "pipe_readwrite: read \"" << std::string(buf, r) << "\"\n";
+        assert(*r > 0);
+        assert(std::string(buf, *r) == "hello from pipe");
+        std::cerr << "pipe_readwrite: read \"" << std::string(buf, *r) << "\"\n";
     };
 
     writer().detach();
@@ -284,7 +284,7 @@ void test_close_wakes_reader() {
             ssize_t result = -99;
             auto fn = [&]() -> cot::task<> {
                 char buf[64];
-                result = co_await cot::read_once(sfd, buf, sizeof(buf));
+                result = *(co_await cot::read_once(sfd, buf, sizeof(buf)));
             };
             auto t = fn();
 
@@ -342,7 +342,7 @@ void test_shutdown_wakes_reader() {
             ssize_t result = -99;
             auto fn = [&]() -> cot::task<> {
                 char buf[64];
-                result = co_await cot::read_once(sfd, buf, sizeof(buf));
+                result = *(co_await cot::read_once(sfd, buf, sizeof(buf)));
             };
             auto t = fn();
 
@@ -792,7 +792,7 @@ cot::task<> test_abandoned_event_cleanup() {
     size_t live_nr = 0;
     auto reader = [&]() -> cot::task<> {
         char buf[16];
-        live_nr = co_await cot::read_once(rfd, buf, sizeof(buf));
+        live_nr = *(co_await cot::read_once(rfd, buf, sizeof(buf)));
         assert(live_nr == 1 && buf[0] == 'x');
     };
     auto rt = reader();
@@ -862,7 +862,7 @@ cot::task<> wait_either_helper(cot::fd rfd, int& woken) {
 
 cot::task<> read_until_eof(cot::fd rfd, int& result) {
     char buf[16];
-    result = co_await cot::read_once(rfd, buf, sizeof(buf));
+    result = *(co_await cot::read_once(rfd, buf, sizeof(buf)));
 }
 
 cot::task<> write_then_close_helper(int raw_wfd, std::string data) {
@@ -1072,7 +1072,7 @@ cot::task<> test_fd_churn() {
 
         char buf[1];
         auto nr = co_await cot::read_once(rfd, buf, 1);
-        assert(nr == 1);
+        assert(*nr == 1);
         // rfd/wfd close at scope end; watchrecs return to freelist.
     }
 
@@ -1120,7 +1120,7 @@ cot::task<> test_fd_reuse_race() {
         churn_writer(wfd).detach();
         char buf[1];
         auto nr = co_await cot::read_once(rfd, buf, 1);
-        assert(nr == 1 && buf[0] == 'x');
+        assert(*nr == 1 && buf[0] == 'x');
     }
 
     co_await cot::after(20ms);
@@ -1154,11 +1154,11 @@ cot::task<> test_write_close_read() {
 
         char buf[16];
         auto nr = co_await cot::read_once(rfd, buf, sizeof(buf));
-        assert(nr == 5 && std::string(buf, 5) == "hello");
+        assert(*nr == 5 && std::string(buf, 5) == "hello");
 
         // Second read: pipe is closed, EOF.
         auto nr2 = co_await cot::read_once(rfd, buf, sizeof(buf));
-        assert(nr2 == 0 && "expected EOF after writer close");
+        assert(*nr2 == 0 && "expected EOF after writer close");
     }
 
     co_await cot::after(20ms);
