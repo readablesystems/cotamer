@@ -36,7 +36,12 @@ struct jsond_response {
 
 
 // rpc(http_parser, method, url, body)
-//    Task to make an RPC to a running `jsond` and return the result.
+//    Send a JSON client request to the `http_parser` connection and
+//    return the response. All RPCs share one parser and TCP
+//    connection: HTTP keepalive carries it across sequential
+//    requests, and the ticket returned by `send_request` keeps each
+//    response paired with its caller, so concurrent coroutines can
+//    have requests in flight at once.
 
 cot::task<jsond_response> rpc(cot::http_parser& hp, llhttp_method method,
                               std::string url, std::string body = "") {
@@ -59,8 +64,8 @@ cot::task<jsond_response> rpc(cot::http_parser& hp, llhttp_method method,
     std::print("\n");
 
     // send request, receive response
-    auto qpos = co_await hp.send_request(std::move(m));
-    auto resp = co_await hp.receive(std::move(qpos));
+    auto ticket = co_await hp.send_request(std::move(m));
+    auto resp = co_await hp.receive(std::move(ticket));
 
     // print response
     std::string b = resp.body();
