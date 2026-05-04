@@ -69,7 +69,7 @@ cot::task<> run_one(cot::fd cfd, double delay) {
 cot::task<> start(std::string address, double delay) {
     auto lfd = co_await cot::tcp_listen(address);
     while (true) {
-        run_one(co_await cot::accept(lfd), delay).detach();
+        run_one(co_await cot::tcp_accept(lfd), delay).detach();
     }
 }
 

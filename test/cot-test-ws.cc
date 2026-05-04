@@ -61,7 +61,7 @@ cot::task<> server_one(cot::fd cfd) {
 
 cot::task<> run_server(std::string addr, cot::event done) {
     auto lfd = co_await cot::tcp_listen(addr);
-    auto cfd = co_await cot::accept(lfd);
+    auto cfd = co_await cot::tcp_accept(lfd);
     co_await server_one(std::move(cfd));
     done.trigger();
 }
@@ -167,7 +167,7 @@ cot::task<> test_server_close() {
     cot::event server_done;
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         cot::http_parser hp(std::move(cfd), cot::http_parser::server);
         auto req = co_await hp.receive();
         auto ws = co_await cot::ws_upgrade(std::move(hp), req);
@@ -204,7 +204,7 @@ cot::task<> test_bad_handshake() {
     cot::event server_done;
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         co_await server_one(std::move(cfd));
         server_done.trigger();
     };
@@ -253,7 +253,7 @@ cot::task<> test_deflate_round_trip() {
     cot::event server_done;
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         co_await server_one_deflate(std::move(cfd), /*accept=*/true);
         server_done.trigger();
     };
@@ -291,7 +291,7 @@ cot::task<> test_deflate_client_off() {
     cot::event server_done;
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         co_await server_one_deflate(std::move(cfd), /*accept=*/true);
         server_done.trigger();
     };
@@ -323,7 +323,7 @@ cot::task<> test_deflate_server_off() {
     cot::event server_done;
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         co_await server_one_deflate(std::move(cfd), /*accept=*/false);
         server_done.trigger();
     };
@@ -357,7 +357,7 @@ cot::task<> test_deflate_multi_message() {
     cot::event server_done;
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         co_await server_one_deflate(std::move(cfd), /*accept=*/true);
         server_done.trigger();
     };

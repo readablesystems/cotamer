@@ -46,7 +46,7 @@ public:
 static cot::task<> server_listen_coroutine(std::string address) {
     auto lfd = co_await cot::tcp_listen(address);
     while (true) {
-        auto cfd = co_await cot::accept(lfd);
+        auto cfd = co_await cot::tcp_accept(lfd);
         RPCGameServer::loop(std::move(cfd)).detach();
     }
 }
