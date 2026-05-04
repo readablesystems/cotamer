@@ -238,7 +238,9 @@ private:
 
 class http_parser {
 public:
-    http_parser(fd f, enum llhttp_type type);
+    enum parser_type { client, server };
+    http_parser(fd f, parser_type direction = server);
+    http_parser(fd f, enum llhttp_type receive_type);
 
     inline bool ok() const;
     inline constexpr llhttp_errno error() const;
@@ -246,9 +248,12 @@ public:
 
     void clear();
 
-    task<http_message> receive();
+    inline task<http_message> receive();
+    using ticket_type = mutex_event<false>;
+    task<http_message> receive(ticket_type);
+
     task<> send(http_message);
-    task<> send_request(http_message);
+    task<ticket_type> send_request(http_message);
     task<> send_response(http_message);
     task<> send_response_chunk(std::string);
     task<> send_response_end_chunk();
@@ -572,6 +577,10 @@ inline const char* http_parser::error_name() const {
 
 inline bool http_parser::should_keep_alive() const {
     return llhttp_should_keep_alive(&hp_);
+}
+
+inline task<http_message> http_parser::receive() {
+    return receive(f_.lock(fdevent::read));
 }
 
 inline void http_parser::clear_should_keep_alive() {

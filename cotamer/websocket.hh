@@ -18,7 +18,7 @@
 //    and provides coroutine-based send/receive on top of wslay's framing.
 //
 //    Server-side use:
-//        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+//        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
 //        auto req = co_await hp.receive();
 //        if (cot::is_ws_upgrade_request(req)) {
 //            auto ws = co_await cot::ws_upgrade(std::move(hp), req);

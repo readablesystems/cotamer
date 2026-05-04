@@ -355,6 +355,7 @@ public:
     explicit operator bool() const noexcept;
     void close();
 
+    inline mutex* mutex(fdevent) const;
     inline mutex_event<false> lock(fdevent) const;
     inline void unlock(fdevent) const;
 
@@ -382,6 +383,8 @@ inline task<ioresult> write_once(fd f, const void* buf, size_t count);
 inline task<ioresult> read(fd f, void* buf, size_t count);
 inline task<ioresult> write(fd f, const void* buf, size_t count);
 task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt);
+inline task<ioresult> recv_once(fd f, void* buf, size_t count);
+inline task<ioresult> send_once(fd f, const void* buf, size_t count);
 inline task<ioresult> recv(fd f, void* buf, size_t count);
 inline task<ioresult> send(fd f, const void* buf, size_t count);
 task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt);

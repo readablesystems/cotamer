@@ -100,8 +100,8 @@ static cot::http_message make_response(unsigned status, const json& body) {
     s.push_back('\n');
     s.append(std::string(1000000, ' ')); // fill buffer
     res.status_code(status)
-       .header("Content-Type", "application/json")
-       .body(std::move(s));
+        .header("Content-Type", "application/json")
+        .body(std::move(s));
     return res;
 }
 
@@ -252,17 +252,16 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
 // This task holds the only reference to `cfd`, so when it returns, the file
 // descriptor will be closed.
 cot::task<> handle_connection(cot::fd cfd, notes_db& db) {
-    cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+    cot::http_parser hp(std::move(cfd), cot::http_parser::server);
     cot::event sends{nullptr};
     while (true) {
         // receive request
-        std::print(std::cerr, "fd {}: read\n", hp.file().fileno());
         auto req = co_await hp.receive();
         if (!hp.ok()) {
             break;
         }
         if (verbose) {
-            std::cerr << req.method_name() << " " << req.url() << '\n';
+            std::print(std::cerr, "{} {}\n", req.method_name(), req.url());
         }
 
         // process request
@@ -277,9 +276,7 @@ cot::task<> handle_connection(cot::fd cfd, notes_db& db) {
             break;
         }
     }
-    std::print(std::cerr, "triggered? {}\n", sends.triggered());
     co_await sends;
-    std::print(std::cerr, "done\n");
 }
 
 // Listen on `address`; for each accepted connection, spawn a per-connection

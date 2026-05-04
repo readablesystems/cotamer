@@ -576,19 +576,8 @@ task<cotamer::fd> tcp_connect(std::string address) {
 task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt) {
     std::vector<struct iovec> iovcopy;
     size_t nw = 0;
-    size_t nwa = 0;
-    size_t rd = 0;
-    for (size_t i =0; i != iovcnt; ++i) {
-        nwa += iov[i].iov_len;
-    }
-    std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
-    unique_lock guard(co_await f.lock(fdevent::write));
     do {
-        if (rd > 0) {
-            std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
-        }
         ssize_t r = ::writev(f.fileno(), iov, iovcnt);
-        ++rd;
         if (r > 0) {
             nw += r;
             while (r > 0) {
@@ -612,7 +601,6 @@ task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt) {
             // At other times, treat it like EOF on read.
             break;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            std::cerr<< "block on " << nw << "\n";
             co_await writable(f);
         } else if (nw > 0) {
             break;
@@ -629,22 +617,11 @@ task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt) {
 task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt) {
     std::vector<struct iovec> iovcopy;
     size_t nw = 0;
-    size_t nwa = 0;
-    size_t rd = 0;
-    for (size_t i =0; i != iovcnt; ++i) {
-        nwa += iov[i].iov_len;
-    }
-    std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
-    unique_lock guard(co_await f.lock(fdevent::write));
     struct msghdr mh{};
     mh.msg_iov = const_cast<struct iovec*>(iov);
     mh.msg_iovlen = iovcnt;
     do {
-        if (rd > 0) {
-            std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
-        }
         ssize_t r = ::sendmsg(f.fileno(), &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
-        ++rd;
         if (r > 0) {
             nw += r;
             while (r > 0) {
@@ -667,7 +644,6 @@ task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt) {
             // At other times, treat it like EOF on read.
             break;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            std::cerr<< "block on " << nw << "\n";
             co_await writable(f);
         } else if (nw > 0) {
             break;

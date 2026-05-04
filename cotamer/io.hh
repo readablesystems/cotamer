@@ -120,7 +120,6 @@ inline task<ioresult> write_once(fd f, const void* buf, size_t count) {
 inline task<ioresult> read(fd f, void* buf, size_t count) {
     char* p = static_cast<char*>(buf);
     size_t nr = 0;
-    unique_lock guard(co_await f.lock(fdevent::read));
     do {
         ssize_t r = ::read(f.fileno(), p + nr, count - nr);
         if (r > 0) {
@@ -144,7 +143,6 @@ inline task<ioresult> read(fd f, void* buf, size_t count) {
 inline task<ioresult> write(fd f, const void* buf, size_t count) {
     const char* p = static_cast<const char*>(buf);
     size_t nw = 0;
-    unique_lock guard(co_await f.lock(fdevent::write));
     do {
         ssize_t r = ::write(f.fileno(), p + nw, count - nw);
         if (r > 0) {
@@ -165,14 +163,59 @@ inline task<ioresult> write(fd f, const void* buf, size_t count) {
 }
 
 
+// Receive a message of up to count bytes. Suspends on EAGAIN. Returns bytes
+// read or error code.
+
+inline task<ioresult> recv_once(fd f, void* buf, size_t count) {
+    struct msghdr mh{};
+    struct iovec iov[1];
+    mh.msg_iov = iov;
+    mh.msg_iovlen = 1;
+    iov[0].iov_base = buf;
+    iov[0].iov_len = count;
+    while (true) {
+        ssize_t r = ::recvmsg(f.fileno(), &mh, MSG_DONTWAIT);
+        if (r >= 0) {
+            co_return r;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await readable(f);
+        } else {
+            co_return std::unexpected(errno_code());
+        }
+    }
+}
+
+
+// Send a message with up to count bytes. Suspends on EAGAIN. Returns bytes
+// written or error code.
+
+inline task<ioresult> send_once(fd f, const void* buf, size_t count) {
+    struct msghdr mh{};
+    struct iovec iov[1];
+    mh.msg_iov = iov;
+    mh.msg_iovlen = 1;
+    iov[0].iov_base = const_cast<void*>(buf);
+    iov[0].iov_len = count;
+    while (true) {
+        ssize_t r = ::sendmsg(f.fileno(), &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (r >= 0) {
+            co_return r;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await writable(f);
+        } else {
+            co_return std::unexpected(errno_code());
+        }
+    }
+}
+
+
 // Receive a message with up to n bytes, suspending as needed. Returns bytes
 // read or error code.
 
 inline task<ioresult> recv(fd f, void* buf, size_t count) {
     char* p = static_cast<char*>(buf);
     size_t nr = 0;
-    unique_lock guard(co_await f.lock(fdevent::read));
-    struct msghdr mh = {};
+    struct msghdr mh{};
     struct iovec iov[1];
     mh.msg_iov = iov;
     mh.msg_iovlen = 1;
@@ -202,8 +245,7 @@ inline task<ioresult> recv(fd f, void* buf, size_t count) {
 inline task<ioresult> send(fd f, const void* buf, size_t count) {
     char* p = const_cast<char*>(static_cast<const char*>(buf));
     size_t nw = 0;
-    unique_lock guard(co_await f.lock(fdevent::write));
-    struct msghdr mh = {};
+    struct msghdr mh{};
     struct iovec iov[1];
     mh.msg_iov = iov;
     mh.msg_iovlen = 1;

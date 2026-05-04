@@ -37,7 +37,7 @@ cot::task<> test_pipelining_one_segment() {
         auto lfd = co_await cot::tcp_listen(addr);
         listener_ready.trigger();
         auto cfd = co_await cot::accept(lfd);
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
 
         auto req1 = co_await hp.receive();
         assert(hp.ok());
@@ -76,7 +76,7 @@ cot::task<> test_pipelining_byte_by_byte() {
         auto lfd = co_await cot::tcp_listen(addr);
         listener_ready.trigger();
         auto cfd = co_await cot::accept(lfd);
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
 
         auto req1 = co_await hp.receive();
         assert(hp.ok());
@@ -115,7 +115,7 @@ cot::task<> test_pipelining_with_bodies() {
         auto lfd = co_await cot::tcp_listen(addr);
         listener_ready.trigger();
         auto cfd = co_await cot::accept(lfd);
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
 
         auto req1 = co_await hp.receive();
         assert(hp.ok());
@@ -164,7 +164,7 @@ cot::task<> test_upgrade_residual() {
         auto lfd = co_await cot::tcp_listen(addr);
         listener_ready.trigger();
         auto cfd = co_await cot::accept(lfd);
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
 
         auto req = co_await hp.receive();
         assert(hp.ok());

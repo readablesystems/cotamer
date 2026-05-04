@@ -29,24 +29,17 @@ namespace {
 // Address of server; assigned by `main` from -h/-p flags.
 std::string server_address;
 
-// Connection to server; set on first connection
-cot::fd cfd;
-
 struct jsond_response {
     unsigned status = 0;
     json body;
 };
 
 
-// rpc(method, url, body)
+// rpc(http_parser, method, url, body)
 //    Task to make an RPC to a running `jsond` and return the result.
 
-cot::task<jsond_response> rpc(llhttp_method method, std::string url,
-                              std::string body = "") {
-    if (!cfd) {
-        cfd = co_await cot::tcp_connect(server_address);
-    }
-
+cot::task<jsond_response> rpc(cot::http_parser& hp, llhttp_method method,
+                              std::string url, std::string body = "") {
     // construct request
     cot::http_message m(method, url);
     m.header("Host", "localhost");
@@ -66,12 +59,15 @@ cot::task<jsond_response> rpc(llhttp_method method, std::string url,
     std::print("\n");
 
     // send request, receive response
-    cot::http_parser hp(cfd, HTTP_RESPONSE);
-    co_await hp.send(std::move(m));
-    auto resp = co_await hp.receive();
+    auto qpos = co_await hp.send_request(std::move(m));
+    auto resp = co_await hp.receive(std::move(qpos));
 
     // print response
-    std::print("→ {} {}\n", resp.status_code(), resp.body());
+    std::string b = resp.body();
+    while (!b.empty() && isspace((unsigned char) b.back())) {
+        b.pop_back();
+    }
+    std::print("→ {} {}\n", resp.status_code(), b);
 
     // check response and return result
     if (!hp.ok()) {
@@ -82,17 +78,18 @@ cot::task<jsond_response> rpc(llhttp_method method, std::string url,
 }
 
 
-cot::task<> rpcx() {
-    auto r1 = co_await rpc(HTTP_POST, "/notes",
-                           R"({"title":"hello","body":"world"})");
+cot::task<> rpcx(cot::http_parser& hp, int n) {
+    std::string body = std::format("world #{}", n);
+    auto r1 = co_await rpc(hp, HTTP_POST, "/notes",
+                           json{{"title", "hello"}, {"body", body}}.dump());
     assert(r1.status == 201); // `201 Created`
     // Check components of response
     assert(r1.body["title"] == "hello");   // json compares directly against strings, ints, bool, etc.
-    assert(r1.body["body"] == "world");
+    assert(r1.body["body"] == body);
     assert(r1.body["id"].is_number_unsigned());
 }
 
-cot::task<> normal_examples() {
+cot::task<> normal_examples(cot::http_parser& hp) {
     // Example 1: Create a new note, and check that the response matches.
     //
     // Notes:
@@ -102,7 +99,7 @@ cot::task<> normal_examples() {
     //   https://www.studyplan.dev/pro-cpp/json - tutorial
     //   https://json.nlohmann.me/api/basic_json/ - API documentation
 
-    auto r1 = co_await rpc(HTTP_POST, "/notes",
+    auto r1 = co_await rpc(hp, HTTP_POST, "/notes",
                            R"({"title":"hello","body":"world"})");
     assert(r1.status == 201); // `201 Created`
     // Check components of response
@@ -120,7 +117,7 @@ cot::task<> normal_examples() {
 
 
     // Example 2: Create another new note.
-    auto r2 = co_await rpc(HTTP_POST, "/notes",
+    auto r2 = co_await rpc(hp, HTTP_POST, "/notes",
                            R"({"title":"second","body":"note"})");
     assert(r2.status == 201);
     uint64_t id2 = r2.body["id"];
@@ -128,20 +125,20 @@ cot::task<> normal_examples() {
 
 
     // Example 3: List all notes.
-    auto r3 = co_await rpc(HTTP_GET, "/notes");
+    auto r3 = co_await rpc(hp, HTTP_GET, "/notes");
     assert(r3.status == 200);
     assert(r3.body["notes"].is_array());
     assert(r3.body["notes"].size() >= 2);
 
 
     // Example 4: Fetch a specific note.
-    auto r4 = co_await rpc(HTTP_GET, std::format("/notes/{}", id1));
+    auto r4 = co_await rpc(hp, HTTP_GET, std::format("/notes/{}", id1));
     assert(r4.status == 200);
     assert(r4.body["title"] == "hello");
 
 
     // Example 5: Change that note.
-    auto r5 = co_await rpc(HTTP_PUT, std::format("/notes/{}", id1),
+    auto r5 = co_await rpc(hp, HTTP_PUT, std::format("/notes/{}", id1),
                            R"({"title":"renamed"})");
     assert(r5.status == 200);
     assert(r5.body["title"] == "renamed");
@@ -149,7 +146,7 @@ cot::task<> normal_examples() {
 
 
     // Example 6: Server statistics.
-    auto r6 = co_await rpc(HTTP_GET, "/stats");
+    auto r6 = co_await rpc(hp, HTTP_GET, "/stats");
     assert(r6.status == 200);
     assert(r6.body["count"] >= 2);
     assert(r6.body["recent_ids"].is_array());
@@ -158,13 +155,13 @@ cot::task<> normal_examples() {
 
 
     // Example 7: Delete a note we added.
-    auto r7 = co_await rpc(HTTP_DELETE, std::format("/notes/{}", id2));
+    auto r7 = co_await rpc(hp, HTTP_DELETE, std::format("/notes/{}", id2));
     assert(r7.status == 200);
     assert(r7.body["deleted"] == id2);
 
 
     // Example 8: That decrements the `count` statistic.
-    auto r8 = co_await rpc(HTTP_GET, "/stats");
+    auto r8 = co_await rpc(hp, HTTP_GET, "/stats");
     assert(r8.status == 200);
     assert(r8.body["count"] == count6 - 1);
 
@@ -175,7 +172,7 @@ cot::task<> normal_examples() {
     json note9;
     note9["title"] = "constructed";
     note9["body"] = "built field by field";
-    auto r9 = co_await rpc(HTTP_POST, "/notes", note9.dump());
+    auto r9 = co_await rpc(hp, HTTP_POST, "/notes", note9.dump());
     assert(r9.status == 201);
     assert(r9.body["title"] == "constructed");
     assert(r9.body["body"] == "built field by field");
@@ -193,49 +190,56 @@ cot::task<> normal_examples() {
             {"priority", 2}
         }}
     };
-    auto r10 = co_await rpc(HTTP_POST, "/notes", note10.dump());
+    auto r10 = co_await rpc(hp, HTTP_POST, "/notes", note10.dump());
     assert(r10.status == 201);
     assert(r10.body["title"] == "tagged");
     assert(!r10.body.contains("metadata"));   // server dropped our extra field
 
 
     for (int i = 0; i != 100; ++i) {
-        rpcx().detach();
+        rpcx(hp, i).detach();
     }
+    co_await rpcx(hp, 1199813);
 }
 
 
 // Error-path tests: bad routes, wrong methods, malformed bodies, missing
 // ids. We only check the status code; rpc() prints the response body.
-cot::task<> error_examples() {
-    auto r1 = co_await rpc(HTTP_GET, "/notes/9999");
+cot::task<> error_examples(cot::http_parser& hp) {
+    auto r1 = co_await rpc(hp, HTTP_GET, "/notes/9999");
     assert(r1.status == 404);
 
-    auto r2 = co_await rpc(HTTP_GET, "/unknown");
+    auto r2 = co_await rpc(hp, HTTP_GET, "/unknown");
     assert(r2.status == 404);
 
-    auto r3 = co_await rpc(HTTP_PATCH, "/notes");
+    auto r3 = co_await rpc(hp, HTTP_PATCH, "/notes");
     assert(r3.status == 405);
 
-    auto r4 = co_await rpc(HTTP_POST, "/notes", "{not-json");
+    auto r4 = co_await rpc(hp, HTTP_POST, "/notes", "{not-json");
     assert(r4.status == 400);
 
-    auto r5 = co_await rpc(HTTP_POST, "/notes", R"({"title":"x"})");
+    auto r5 = co_await rpc(hp, HTTP_POST, "/notes", R"({"title":"x"})");
     assert(r5.status == 400);
 
-    auto r6 = co_await rpc(HTTP_DELETE, "/notes/9999");
+    auto r6 = co_await rpc(hp, HTTP_DELETE, "/notes/9999");
     assert(r6.status == 404);
 }
 
 
-cot::task<> main_task() {
+cot::task<> main_task(std::string server_address) {
+    // connect to server, construct parser
+    auto cfd = co_await cot::tcp_connect(server_address);
+    cot::http_parser hp(std::move(cfd), cot::http_parser::client);
+
+    // pass parser through normal and error examples
     try {
-        co_await normal_examples();
-        co_await error_examples();
+        co_await normal_examples(hp);
+        co_await error_examples(hp);
     } catch (const std::exception& e) {
         std::cerr << "EXCEPTION: " << e.what() << "\n";
         std::exit(1);
     }
+
     std::cerr << "PASS\n";
     std::exit(0);
 }
@@ -273,9 +277,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    server_address = std::format("{}:{}", host, port);
     cot::set_clock(cot::clock::real_time);
-    main_task().detach();
+    main_task(std::format("{}:{}", host, port)).detach();
     cot::loop();
     return 0;
 }

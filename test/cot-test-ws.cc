@@ -21,7 +21,7 @@ uint16_t unique_port() {
 
 cot::task<> server_one(cot::fd cfd) {
     try {
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
         auto req = co_await hp.receive();
         if (!hp.ok()) {
             co_return;
@@ -69,7 +69,7 @@ cot::task<> run_server(std::string addr, cot::event done) {
 // Echo server with a configurable accept_permessage_deflate.
 cot::task<> server_one_deflate(cot::fd cfd, bool accept_deflate) {
     try {
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
         auto req = co_await hp.receive();
         if (!hp.ok() || !req.has_header("upgrade")) {
             co_return;
@@ -168,7 +168,7 @@ cot::task<> test_server_close() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::accept(lfd);
-        cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
         auto req = co_await hp.receive();
         auto ws = co_await cot::ws_upgrade(std::move(hp), req);
         co_await ws.send_close(4321, "bye");

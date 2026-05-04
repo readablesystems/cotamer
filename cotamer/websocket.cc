@@ -920,7 +920,7 @@ task<> basic_ws_stream<Transport>::handshake() {
     // wss:// (basic_ws_stream<tls_stream>) is a Phase 4 task and will
     // require either specializing this method for fd or making http_parser
     // transport-agnostic.
-    http_parser hp(t_, HTTP_RESPONSE);
+    http_parser hp(t_, http_parser::client);
     auto resp = co_await hp.receive();
     if (!hp.ok()) {
         throw ws_error(WSLAY_ERR_PROTO,

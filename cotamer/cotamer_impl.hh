@@ -2059,6 +2059,10 @@ inline void fd::close() {
     }
 }
 
+inline mutex* fd::mutex(fdevent fde) const {
+    return body_ ? &body_->mutex_[fde == fdevent::read ? 0 : 1] : nullptr;
+}
+
 inline mutex_event<false> fd::lock(fdevent fde) const {
     return body_->mutex_[fde == fdevent::read ? 0 : 1].lock();
 }
