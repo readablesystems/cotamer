@@ -14,7 +14,8 @@ cmake_verbose := --verbose
 endif
 
 targets = cot-test cot-test-threads cot-test-io cot-manual \
-	ctconsensus rpcg-server rpcg-client httpd \
+	ctconsensus rpcg-server rpcg-client \
+	httpd jsond jsond-client jsond-curl-client \
 	cot-test-curl
 
 all:

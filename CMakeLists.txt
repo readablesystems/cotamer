@@ -12,6 +12,10 @@ set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_NLOHMANN_JSON "AUTO" CACHE STRING "nlohmann::json integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_NLOHMANN_JSON PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_ZLIB "AUTO" CACHE STRING "zlib integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_ZLIB PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,6 +73,41 @@ if(NOT COTAMER_CURL STREQUAL "OFF")
         message(FATAL_ERROR "COTAMER_CURL=ON but libcurl was not found")
     else()
         message(STATUS "libcurl integration: disabled (libcurl not found)")
+    endif()
+endif()
+
+# Find nlohmann::json (header-only)
+set(COTAMER_HAVE_NLOHMANN_JSON 0)
+if(NOT COTAMER_NLOHMANN_JSON STREQUAL "OFF")
+    find_package(nlohmann_json QUIET)
+    if(nlohmann_json_FOUND)
+        set(COTAMER_HAVE_NLOHMANN_JSON 1)
+        message(STATUS "nlohmann::json integration: enabled (${nlohmann_json_VERSION})")
+        # Propagate the include path globally so cotamer/http.hh's forward-
+        # declaration of nlohmann::json compiles for every consumer.
+        get_target_property(_njson_inc nlohmann_json::nlohmann_json
+                            INTERFACE_INCLUDE_DIRECTORIES)
+        if(_njson_inc)
+            include_directories(${_njson_inc})
+        endif()
+    elseif(COTAMER_NLOHMANN_JSON STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_NLOHMANN_JSON=ON but nlohmann_json was not found")
+    else()
+        message(STATUS "nlohmann::json integration: disabled (nlohmann_json not found)")
+    endif()
+endif()
+
+# Find zlib
+set(COTAMER_HAVE_ZLIB 0)
+if(NOT COTAMER_ZLIB STREQUAL "OFF")
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        set(COTAMER_HAVE_ZLIB 1)
+        message(STATUS "zlib integration: enabled (${ZLIB_VERSION_STRING})")
+    elseif(COTAMER_ZLIB STREQUAL "ON")
+        message(FATAL_ERROR "COTAMER_ZLIB=ON but zlib was not found")
+    else()
+        message(STATUS "zlib integration: disabled (zlib not found)")
     endif()
 endif()
 
@@ -152,6 +191,50 @@ target_include_directories(rpcg-client PRIVATE
 target_link_libraries(rpcg-client PRIVATE
     ${XXHASH_LIBRARY}
 )
+
+if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
+    add_executable(jsond
+        examples/jsond.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(jsond PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(jsond PRIVATE
+        ${LLHTTP_LIBRARY}
+        nlohmann_json::nlohmann_json
+    )
+
+    add_executable(jsond-client
+        examples/jsond-client.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(jsond-client PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(jsond-client PRIVATE
+        ${LLHTTP_LIBRARY}
+        nlohmann_json::nlohmann_json
+    )
+
+    if(COTAMER_HAVE_CURL)
+        add_executable(jsond-curl-client
+            examples/jsond-curl-client.cc
+            $<TARGET_OBJECTS:Cotamer>
+            $<TARGET_OBJECTS:CotamerCurl>
+        )
+        target_include_directories(jsond-curl-client PRIVATE
+            ${LLHTTP_INCLUDE_DIR}
+        )
+        target_link_libraries(jsond-curl-client PRIVATE
+            CURL::libcurl
+            ${LLHTTP_LIBRARY}
+            nlohmann_json::nlohmann_json
+        )
+    endif()
+endif()
 
 if(COTAMER_HAVE_LLHTTP)
     add_executable(httpd

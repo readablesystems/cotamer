@@ -4,7 +4,7 @@
 namespace cot = cotamer;
 
 cot::task<> run_one(cot::fd cfd, double delay) {
-    cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+    cot::http_parser hp(std::move(cfd), cot::http_parser::server);
     cot::http_message req, res;
 
     while (true) {
@@ -36,7 +36,7 @@ cot::task<> run_one(cot::fd cfd, double delay) {
 cot::task<> start(std::string address, double delay) {
     auto lfd = co_await cot::tcp_listen(address);
     while (true) {
-        run_one(co_await cot::accept(lfd), delay).detach();
+        run_one(co_await cot::tcp_accept(lfd), delay).detach();
     }
 }
 

@@ -1,17 +1,7 @@
-// -*- mode: c++ -*-
-/* Copyright (c) 2015, Eddie Kohler
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, subject to the conditions
- * listed in the Tamer LICENSE file. These conditions include: you must
- * preserve this copyright notice, and you cannot mention the copyright
- * holders in advertising related to the Software without their permission.
- * The Software is provided WITHOUT ANY WARRANTY, EXPRESS OR IMPLIED. This
- * notice is a summary of the Tamer LICENSE file; the license in that file is
- * legally binding.
- */
 #include "cotamer/http.hh"
+#if COTAMER_HAVE_NLOHMANN_JSON
+# include <nlohmann/json.hpp>
+#endif
 
 namespace {
 struct status_code_map {
@@ -343,9 +333,15 @@ std::string_view http_message::search_param(std::string_view name) const {
 }
 
 
-http_parser::http_parser(fd f, enum llhttp_type hp_type)
+http_parser::http_parser(fd f, parser_type direction)
     : f_(std::move(f)) {
+    auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
     llhttp_init(&hp_, hp_type, &settings);
+}
+
+http_parser::http_parser(fd f, enum llhttp_type receive_type)
+    : f_(std::move(f)) {
+    llhttp_init(&hp_, receive_type, &settings);
 }
 
 void http_parser::clear() {
@@ -462,10 +458,12 @@ int http_parser::on_message_complete(::llhttp_t* hp) {
     return HPE_PAUSED;
 }
 
-task<http_message> http_parser::receive() {
+task<http_message> http_parser::receive(ticket_type ticket) {
+    assert(ticket.mutex() == &m_[0]);
     char stackbuf[bufsize];
     message_data md;
     md.hm.status_code(0);
+    unique_lock guard(co_await ticket);
     hp_.data = &md;
 
     while (true) {
@@ -473,10 +471,11 @@ task<http_message> http_parser::receive() {
         size_t nr;
         if (receive_buffer_.empty()) {
             buf = stackbuf;
-            nr = co_await read_once(f_, stackbuf, sizeof(stackbuf));
-            if (nr == 0) {
+            auto nx = co_await recv_once(f_, stackbuf, sizeof(stackbuf));
+            if (!nx || *nx == 0) {
                 break;
             }
+            nr = *nx;
         } else {
             // Drain bytes left from the previous call (pipelined data, or a
             // partial frame we couldn't process in one llhttp_execute).
@@ -513,14 +512,14 @@ task<http_message> http_parser::receive() {
     }
 
     if (md.state != state_done && !md.hm.error_) {
-        hp_.error = md.hm.error_ = HPE_USER;
+        hp_.error = md.hm.error_ = HPE_CLOSED_CONNECTION;
     }
     co_return std::move(md.hm);
 }
 
-task<> http_parser::send_request(http_message m) {
+task<http_parser::ticket_type> http_parser::send_request(http_message m) {
     std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
-        llhttp_method_name(m.method()), m.url(), m.http_major(), m.http_minor());
+        m.method_name(), m.url(), m.http_major(), m.http_minor());
     if (m.has_body_
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
@@ -536,7 +535,13 @@ task<> http_parser::send_request(http_message m) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
-    co_await writev(f_, iov, iovcnt);
+
+    // lock for writing, then obtain read ticket
+    unique_lock guard(co_await m_[1].lock());
+    auto ticket = m_[0].lock();
+
+    co_await sendv(f_, iov, iovcnt);
+    co_return std::move(ticket);
 }
 
 task<> http_parser::send_response(http_message m) {
@@ -580,15 +585,18 @@ task<> http_parser::send_response(http_message m) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
-    co_await writev(f_, iov, iovcnt);
+
+    unique_lock guard(co_await m_[1].lock());
+    co_await sendv(f_, iov, iovcnt);
 }
 
 task<> http_parser::send(http_message m) {
     assert(hp_.type == (int) HTTP_RESPONSE || hp_.type == (int) HTTP_REQUEST);
     if (hp_.type == (int) HTTP_RESPONSE) {
-        return send_request(std::move(m));
+        co_await send_request(std::move(m));
+    } else {
+        co_await send_response(std::move(m));
     }
-    return send_response(std::move(m));
 }
 
 task<> http_parser::send_response_chunk(std::string str) {
@@ -597,11 +605,24 @@ task<> http_parser::send_response_chunk(std::string str) {
     iov[0] = iovec{ lenline.data(), lenline.length() };
     iov[1] = iovec{ str.data(), str.length() };
     iov[2] = iovec{ (void*) "\r\n", 2 };
-    co_await writev(f_, iov, 3);
+    unique_lock guard(co_await m_[1].lock());
+    co_await sendv(f_, iov, 3);
 }
 
 task<> http_parser::send_response_end_chunk() {
-    co_await write(f_, "0\r\n\r\n", 5);
+    unique_lock guard(co_await m_[1].lock());
+    co_await cotamer::send(f_, "0\r\n\r\n", 5);
 }
+
+#if COTAMER_HAVE_NLOHMANN_JSON
+http_message& http_message::body(const nlohmann::json& j) {
+    if (!has_header("Content-Type")) {
+        add_header("Content-Type", "application/json");
+    }
+    body_ = j.dump();
+    has_body_ = 1;
+    return *this;
+}
+#endif
 
 } // namespace cotamer

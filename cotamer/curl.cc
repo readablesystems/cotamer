@@ -1,6 +1,8 @@
+#include "cotamer/config.hh"
 #include "cotamer/curl.hh"
 #include "cotamer/io.hh"
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 

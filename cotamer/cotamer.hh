@@ -5,6 +5,7 @@
 #include <coroutine>
 #include <deque>
 #include <exception>
+#include <expected>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -50,7 +51,7 @@ class event {
 public:
     inline event();
     inline event(detail::event_handle ev);
-    explicit inline event(nullptr_t);
+    explicit inline event(nullptr_t);          // construct already-triggered event
     ~event() = default;
     event(const event&) = default;
     event(event&&) = default;
@@ -349,10 +350,10 @@ public:
     inline fd& operator=(fd&&) noexcept;
     inline ~fd();
 
-    int fileno() const noexcept;
-    bool valid() const noexcept;
+    int fileno() const noexcept;               // underlying file descriptor
+    bool valid() const noexcept;               // is `fd` open?
     explicit operator bool() const noexcept;
-    void close();
+    void close();                              // close `fd`
 
     detail::fd_body* body() const noexcept { return body_; }
 
@@ -368,21 +369,28 @@ inline event closed(const fd&);        // triggers when `fd` errors or closes
 
 // File-related functions
 
+inline void ignore_sigpipe();
 inline void set_nonblocking(int fileno);
 inline void set_nonblocking(const fd& f);
 
-inline task<size_t> read_once(const fd& f, void* buf, size_t count);
-inline task<size_t> write_once(const fd& f, const void* buf, size_t count);
-inline task<size_t> read(const fd& f, void* buf, size_t count);
-inline task<size_t> write(const fd& f, const void* buf, size_t count);
-task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt);
+using ioresult = std::expected<size_t, std::error_code>;
+inline task<ioresult> read_once(fd f, void* buf, size_t count);
+inline task<ioresult> write_once(fd f, const void* buf, size_t count);
+inline task<ioresult> read(fd f, void* buf, size_t count);
+inline task<ioresult> write(fd f, const void* buf, size_t count);
+task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt);
+inline task<ioresult> recv_once(fd f, void* buf, size_t count);
+inline task<ioresult> send_once(fd f, const void* buf, size_t count);
+inline task<ioresult> recv(fd f, void* buf, size_t count);
+inline task<ioresult> send(fd f, const void* buf, size_t count);
+task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt);
 
-inline task<> connect(const fd& f, const struct sockaddr* addr, socklen_t len);
-inline task<fd> accept(const fd& listen_fd);
+inline task<> connect(fd f, const struct sockaddr* addr, socklen_t len);
+inline task<fd> accept(fd listen_fd);
 
 task<fd> tcp_listen(std::string address, int backlog = 128);
 task<fd> tcp_connect(std::string address);
-inline task<fd> tcp_accept(const fd& listen_fd);
+inline task<fd> tcp_accept(fd listen_fd);
 
 
 // mutex, mutex_event, unique_lock, shared_lock
@@ -393,8 +401,6 @@ inline task<fd> tcp_accept(const fd& listen_fd);
 //    counterparts. For instance:
 //        cot::unique_lock guard(co_await mutex.lock());
 //    When that guard goes out of scope the mutex will automatically unlock.
-
-class mutex;
 
 template <bool shared>
 struct locked_mutex_t {

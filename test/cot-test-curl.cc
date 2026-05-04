@@ -34,7 +34,7 @@ cot::task<> run_server(uint16_t port,
         auto conn = [](cot::fd c,
                        std::function<cot::http_message(const cot::http_message&)> h)
                        -> cot::task<> {
-            cot::http_parser hp(std::move(c), HTTP_REQUEST);
+            cot::http_parser hp(std::move(c), cot::http_parser::server);
             while (true) {
                 auto req = co_await hp.receive();
                 if (!hp.ok()) {
