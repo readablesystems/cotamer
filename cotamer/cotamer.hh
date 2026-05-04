@@ -50,7 +50,7 @@ class event {
 public:
     inline event();
     inline event(detail::event_handle ev);
-    explicit inline event(nullptr_t);
+    explicit inline event(nullptr_t);          // construct already-triggered event
     ~event() = default;
     event(const event&) = default;
     event(event&&) = default;
@@ -354,6 +354,9 @@ public:
     explicit operator bool() const noexcept;
     void close();
 
+    inline mutex_event<false> lock(fdevent) const;
+    inline void unlock(fdevent) const;
+
     detail::fd_body* body() const noexcept { return body_; }
 
 private:
@@ -393,8 +396,6 @@ inline task<fd> tcp_accept(const fd& listen_fd);
 //    counterparts. For instance:
 //        cot::unique_lock guard(co_await mutex.lock());
 //    When that guard goes out of scope the mutex will automatically unlock.
-
-class mutex;
 
 template <bool shared>
 struct locked_mutex_t {

@@ -1,22 +1,35 @@
-// examples/jsond.cc
-//    A small in-memory notes REST API. Showcases JSON parsing of request
-//    bodies (POST/PUT) and JSON generation of responses (objects, arrays,
-//    nested values) using nlohmann::json.
-//
-//    Endpoints:
-//      GET /notes          list all notes
-//      POST /notes         create note; body = {"title": "...", "body": "..."}
-//      GET /notes/<id>     fetch a note
-//      PUT /notes/<id>     replace a note
-//      DELETE /notes/<id>  delete a note
-//      GET /stats          aggregate counts and recent ids
-//
-//    Try it with examples/jsond-tester, or with curl:
-//      curl -s -XPOST localhost:11112/notes \
-//           -H 'Content-Type: application/json' \
-//           -d '{"title":"hi","body":"first"}'
-//      curl -s localhost:11112/notes
-//      curl -s localhost:11112/stats
+/*
+  examples/jsond.cc
+     A small in-memory “notes” REST API. Showcases JSON parsing of
+     request bodies (POST/PUT) and JSON generation of responses
+     (objects, arrays, nested values) using nlohmann::json.
+     Companion clients are in `jsond-client.cc` and `jsond-curl-client.cc`.
+
+     Architecture: `main` calls `start`, which listens on a TCP port
+     and `co_await`s connections. Each accepted connection is handed
+     to its own `run_one` coroutine, which parses HTTP requests via
+     `cot::http_parser`, dispatches them through `handle()`, and
+     writes JSON responses back. Connections stay open across
+     requests via HTTP keepalive.
+
+     Endpoints:
+       GET    /notes        list all notes
+       POST   /notes        create note; body = {"title": "...", "body": "..."}
+       GET    /notes/<id>   fetch a note
+       PUT    /notes/<id>   partial update of a note
+       DELETE /notes/<id>   delete a note
+       GET    /stats        aggregate counts and recent ids
+
+     Try it with curl:
+       curl -s -XPOST localhost:11112/notes \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"hi","body":"first"}'
+       curl -s localhost:11112/notes
+       curl -s localhost:11112/stats
+
+     Usage:
+         ./jsond -p PORT
+*/
 
 #include "cotamer/cotamer.hh"
 #include "cotamer/http.hh"
@@ -31,18 +44,26 @@ using json = nlohmann::json;
 
 namespace {
 
+bool verbose = false;
+
+// A note in our toy database.
 struct note {
     uint64_t id;
     std::string title;
     std::string body;
 };
 
-// to_json overloads let us write `json(n)` and `j["note"] = n` directly.
+// `nlohmann::json` calls a free function named `to_json` to serialize a
+// `note`. Defining this hook once lets the rest of the file build JSON from
+// notes without repeating the field-by-field assignment.
 [[maybe_unused]] void to_json(json& j, const note& n) {
     j = json{{"id", n.id}, {"title", n.title}, {"body", n.body}};
 }
 
 
+// In-memory note storage. Ids are assigned monotonically from 1 and
+// never reused, even after deletion, so a deleted id will never later
+// resolve to a different note.
 class notes_db {
 public:
     note& create(std::string title, std::string body) {
@@ -66,26 +87,33 @@ private:
 };
 
 
+// Build an HTTP response with the given status and JSON body. The body is
+// pretty-printed with `dump(2)` (2-space indent).
+//
+// The compact form
+//     return cot::http_message().status_code(status).body(body);
+// would also work, as `http_message::body` has an overload that takes a
+// `nlohmann::json`.
 static cot::http_message make_response(unsigned status, const json& body) {
-    // The compact form `res.status_code(status).body(body)` would also work:
-    // http_message has a `body(const nlohmann::json&)` overload that calls
-    // `dump()` and sets Content-Type. We do it by hand here to show the
-    // moving parts and to pretty-print the JSON.
     cot::http_message res;
     std::string s = body.dump(2);
     s.push_back('\n');
+    s.append(std::string(1000000, ' ')); // fill buffer
     res.status_code(status)
        .header("Content-Type", "application/json")
        .body(std::move(s));
     return res;
 }
 
+// Build an HTTP error response
 static cot::http_message error_response(unsigned status, std::string_view msg) {
     return make_response(status, json{{"error", msg}, {"status", status}});
 }
 
-// Parse "/notes/123" -> 123. The input is `req.path()`, so any query
-// string or fragment is already stripped.
+
+// Given "/notes/<id>", parse `id` and assign `out = id`.
+// Returns false if the path doesn't match the prefix or the id isn't
+// a complete unsigned integer.
 static bool parse_note_id(std::string_view path, uint64_t& out) {
     constexpr std::string_view prefix = "/notes/";
     if (!path.starts_with(prefix)) {
@@ -100,13 +128,21 @@ static bool parse_note_id(std::string_view path, uint64_t& out) {
 }
 
 
+// Dispatch one parsed request to the right handler and return a
+// response. The dispatch is layered:
+//   1. Collection endpoints on `/notes`         (GET list, POST create)
+//   2. Per-id endpoints on `/notes/<id>`        (GET, PUT, DELETE)
+//   3. `/stats`                                 (aggregate JSON)
+//   4. Anything else -> 404
 static cot::http_message handle(const cot::http_message& req, notes_db& db) {
     auto method = req.method();
     auto path = req.path();
 
-    // Collection endpoints.
+    // /notes — collection endpoints.
     if (path == "/notes") {
         if (method == HTTP_GET) {
+            // List all notes as a JSON array. The `to_json` hook above
+            // lets `arr.push_back(n)` serialize each note directly.
             json arr = json::array();
             for (auto& [_, n] : db.all()) {
                 arr.push_back(n);
@@ -114,12 +150,15 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
             return make_response(200, json{{"notes", std::move(arr)}});
         }
         if (method == HTTP_POST) {
+            // Parse the request body as JSON. `json::parse` throws on
+            // malformed input; we catch and surface a 400.
             json body;
             try {
                 body = json::parse(req.body());
             } catch (const json::parse_error& e) {
                 return error_response(400, std::string("invalid JSON: ") + e.what());
             }
+            // Both `title` and `body` are required and must be strings.
             if (!body.is_object()
                 || !body.contains("title") || !body["title"].is_string()
                 || !body.contains("body")  || !body["body"].is_string()) {
@@ -127,12 +166,12 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
             }
             note& n = db.create(body["title"].get<std::string>(),
                                 body["body"].get<std::string>());
-            return make_response(201, json(n));
+            return make_response(201, json(n));    // 201 Created
         }
         return error_response(405, "method not allowed on /notes");
     }
 
-    // Per-id endpoints.
+    // /notes/<id> — per-note endpoints.
     uint64_t id;
     if (parse_note_id(path, id)) {
         note* n = db.find(id);
@@ -152,7 +191,10 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
             } catch (const json::parse_error& e) {
                 return error_response(400, std::string("invalid JSON: ") + e.what());
             }
-            // Each field is optional on PUT; missing fields are left alone.
+            // Each field is optional on PUT; missing fields are left
+            // alone. `body.find(key)` does a single lookup that tells
+            // us both whether the key is present and gives us the
+            // value if it is.
             if (auto it = body.find("title"); it != body.end()) {
                 if (!it->is_string()) {
                     return error_response(400, "title must be a string");
@@ -176,16 +218,20 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
         return error_response(405, "method not allowed on /notes/<id>");
     }
 
-    // Aggregate stats endpoint, demonstrating nested JSON generation.
+    // /stats — aggregate stats, demonstrating nested JSON construction.
     if (path == "/stats" && method == HTTP_GET) {
         size_t total_bytes = 0;
         json recent = json::array();
+        // Walk in reverse to gather the most recent ids first.
         for (auto it = db.all().rbegin(); it != db.all().rend(); ++it) {
             total_bytes += it->second.title.size() + it->second.body.size();
             if (recent.size() < 5) {
                 recent.push_back(it->second.id);
             }
         }
+        // Brace-initialization composes nested objects: `{"server",
+        // {{"name", ...}, {"version", ...}}}` is an object inside an
+        // object.
         return make_response(200, json{
             {"count", db.all().size()},
             {"total_text_bytes", total_bytes},
@@ -198,31 +244,56 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
 }
 
 
-cot::task<> run_one(cot::fd cfd, notes_db& db) {
+// Handle a client connection. Parse one request at a time; dispatch that
+// request through `handle()` and write the corresponding response. writes the
+// response, and loops until either the parser errors out or the peer asks to
+// close (via `Connection: close` or HTTP/1.0 default).
+//
+// This task holds the only reference to `cfd`, so when it returns, the file
+// descriptor will be closed.
+cot::task<> handle_connection(cot::fd cfd, notes_db& db) {
     cot::http_parser hp(std::move(cfd), HTTP_REQUEST);
+    cot::event sends{nullptr};
     while (true) {
+        // receive request
+        std::print(std::cerr, "fd {}: read\n", hp.file().fileno());
         auto req = co_await hp.receive();
         if (!hp.ok()) {
             break;
         }
-        std::cerr << req.method_name() << " " << req.url() << '\n';
+        if (verbose) {
+            std::cerr << req.method_name() << " " << req.url() << '\n';
+        }
+
+        // process request
         auto res = handle(req, db);
-        co_await hp.send(std::move(res));
+
+        // send response
+        auto task = hp.send(std::move(res));
+        sends = cot::all(sends, task.resolution());
+        task.detach();
+
         if (!hp.should_keep_alive()) {
             break;
         }
     }
+    std::print(std::cerr, "triggered? {}\n", sends.triggered());
+    co_await sends;
 }
 
+// Listen on `address`; for each accepted connection, spawn a per-
+// connection coroutine via `run_one(...).detach()`. `detach` lets
+// the coroutine outlive this loop iteration; it cleans itself up
+// when the connection ends.
 cot::task<> start(std::string address, notes_db& db) {
     auto lfd = co_await cot::tcp_listen(address);
     while (true) {
-        run_one(co_await cot::accept(lfd), db).detach();
+        handle_connection(co_await cot::accept(lfd), db).detach();
     }
 }
 
 void usage() {
-    fprintf(stderr, "Usage: jsond [-p PORT]\n");
+    fprintf(stderr, "Usage: jsond [-p PORT] [-V]\n");
 }
 
 } // namespace
@@ -230,13 +301,16 @@ void usage() {
 int main(int argc, char* argv[]) {
     int opt;
     int port = 11112;
-    while ((opt = getopt(argc, argv, "hp:")) != -1) {
+    while ((opt = getopt(argc, argv, "hp:V")) != -1) {
         switch (opt) {
         case 'h':
             usage();
             exit(0);
         case 'p':
             port = strtol(optarg, 0, 0);
+            break;
+        case 'V':
+            verbose = true;
             break;
         case '?':
         default:
@@ -251,6 +325,7 @@ int main(int argc, char* argv[]) {
 
     notes_db db;
     cot::set_clock(cot::clock::real_time);
+    // Keep the start task alive until cot::loop() exits.
     cot::task<> t = start(std::format("localhost:{}", port), db);
     cot::loop();
 }

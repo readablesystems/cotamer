@@ -1,12 +1,14 @@
-// examples/jsond-curl-client.cc
-//    Like `jsond-client.cc`, but uses Cotamer's libcurl integration
-//    (`cot::curl_fetch`) instead of speaking HTTP directly. Same
-//    end-to-end examples; libcurl manages the TCP connection pool, so
-//    HTTP keepalive happens automatically without our help.
-//
-//    Usage:
-//        ./jsond -p 21997 &
-//        ./jsond-curl-client -p 21997
+/*
+  examples/jsond-curl-client.cc
+     Like `jsond-client.cc`, but uses Cotamer's libcurl integration
+     (`cot::curl_fetch`) instead of speaking HTTP directly. Same
+     end-to-end examples; libcurl manages the TCP connection pool, so
+     HTTP keepalive happens automatically without our help.
+
+     Usage:
+         ./jsond -p 21997 &
+         ./jsond-curl-client -p 21997
+*/
 
 #include "cotamer/cotamer.hh"
 #include "cotamer/curl.hh"

@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstring>
 #include <ctime>
 #if COTAMER_HAVE_NLOHMANN_JSON
 # include <nlohmann/json_fwd.hpp>
@@ -259,6 +260,8 @@ public:
     inline const std::string& receive_buffer() const;
     inline std::string& receive_buffer();
 
+    // Underlying fd
+    inline const fd& file() const;
     // Release ownership of the underlying fd (e.g., for protocol upgrades)
     inline fd take_file();
 
@@ -573,6 +576,10 @@ inline bool http_parser::should_keep_alive() const {
 
 inline void http_parser::clear_should_keep_alive() {
     hp_.flags = (hp_.flags & ~F_CONNECTION_KEEP_ALIVE) | F_CONNECTION_CLOSE;
+}
+
+inline const fd& http_parser::file() const {
+    return f_;
 }
 
 inline fd http_parser::take_file() {

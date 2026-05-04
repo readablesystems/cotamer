@@ -59,6 +59,7 @@ struct fd_body {
     std::atomic<uint32_t> ref_ = 1;
     std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
     small_vector<driver*, 1> drivers_;
+    mutex mutex_[2];
 
     static constexpr uint32_t wr_lock = 1;
 
@@ -2056,6 +2057,14 @@ inline void fd::close() {
     if (body_) {
         body_->close(false);
     }
+}
+
+inline mutex_event<false> fd::lock(fdevent fde) const {
+    return body_->mutex_[fde == fdevent::read ? 0 : 1].lock();
+}
+
+inline void fd::unlock(fdevent fde) const {
+    body_->mutex_[fde == fdevent::read ? 0 : 1].unlock();
 }
 
 

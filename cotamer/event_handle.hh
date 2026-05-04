@@ -11,6 +11,8 @@ class event;
 template <typename T> class task;
 class driver;
 class fd;
+class mutex;
+template <bool shared> class mutex_event;
 template <typename T> task<T> forward(task<T>);
 namespace detail {
 struct event_body;

@@ -568,10 +568,21 @@ task<cotamer::fd> tcp_connect(std::string address) {
 // Writes all bytes in the `iovec`s, suspending as needed. Returns bytes
 // written.
 task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt) {
-    size_t nw = 0;
     std::vector<struct iovec> iovcopy;
+    size_t nw = 0;
+    size_t nwa = 0;
+    size_t rd = 0;
+    for (size_t i =0; i != iovcnt; ++i) {
+        nwa += iov[i].iov_len;
+    }
+    std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
+    unique_lock guard(co_await f.lock(fdevent::write));
     do {
+        if (rd > 0) {
+            std::print(std::cerr, "fd {}: writing {} @{} #{:x}\n", f.fileno(), nwa - nw, rd, uintptr_t(&nw));
+        }
         ssize_t r = ::writev(f.fileno(), iov, iovcnt);
+        ++rd;
         if (r > 0) {
             nw += r;
             while (r > 0) {
@@ -595,6 +606,7 @@ task<size_t> writev(const fd& f, const struct iovec* iov, size_t iovcnt) {
             // At other times, treat it like EOF on read.
             break;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            std::cerr<< "block on " << nw << "\n";
             co_await writable(f);
         } else if (nw > 0) {
             break;

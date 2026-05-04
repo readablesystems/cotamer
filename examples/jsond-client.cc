@@ -1,12 +1,14 @@
-// examples/jsond-client.cc
-//    End-to-end test of `jsond` using Cotamer's native HTTP client
-//    (`cot::tcp_connect` + `cot::http_parser`). Exercises the same scenarios
-//    as `jsond-tester-curl`, but speaks HTTP directly with no third-party
-//    HTTP library involved.
-//
-//    Usage:
-//        ./jsond -p 21997 &
-//        ./jsond-client -p 21997
+/*
+  examples/jsond-client.cc
+     End-to-end test of `jsond` using Cotamer's native HTTP client
+     (`cot::tcp_connect` + `cot::http_parser`). Exercises the same
+     scenarios as `jsond-curl-client`, but speaks HTTP directly with
+     no third-party HTTP library involved.
+
+     Usage:
+         ./jsond -p 21997 &
+         ./jsond-client -p 21997
+*/
 
 #include "cotamer/cotamer.hh"
 #include "cotamer/http.hh"
@@ -80,6 +82,15 @@ cot::task<jsond_response> rpc(llhttp_method method, std::string url,
 }
 
 
+cot::task<> rpcx() {
+    auto r1 = co_await rpc(HTTP_POST, "/notes",
+                           R"({"title":"hello","body":"world"})");
+    assert(r1.status == 201); // `201 Created`
+    // Check components of response
+    assert(r1.body["title"] == "hello");   // json compares directly against strings, ints, bool, etc.
+    assert(r1.body["body"] == "world");
+    assert(r1.body["id"].is_number_unsigned());
+}
 
 cot::task<> normal_examples() {
     // Example 1: Create a new note, and check that the response matches.
@@ -186,6 +197,11 @@ cot::task<> normal_examples() {
     assert(r10.status == 201);
     assert(r10.body["title"] == "tagged");
     assert(!r10.body.contains("metadata"));   // server dropped our extra field
+
+
+    for (int i = 0; i != 100; ++i) {
+        //rpcx().detach();
+    }
 }
 
 

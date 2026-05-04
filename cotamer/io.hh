@@ -81,6 +81,7 @@ inline task<size_t> write_once(const fd& f, const void* buf, size_t count) {
 inline task<size_t> read(const fd& f, void* buf, size_t count) {
     char* p = static_cast<char*>(buf);
     size_t nr = 0;
+    unique_lock guard(co_await f.lock(fdevent::read));
     do {
         ssize_t r = ::read(f.fileno(), p + nr, count - nr);
         if (r > 0) {
@@ -102,6 +103,7 @@ inline task<size_t> read(const fd& f, void* buf, size_t count) {
 inline task<size_t> write(const fd& f, const void* buf, size_t count) {
     const char* p = static_cast<const char*>(buf);
     size_t nw = 0;
+    unique_lock guard(co_await f.lock(fdevent::write));
     do {
         ssize_t r = ::write(f.fileno(), p + nw, count - nw);
         if (r > 0) {
