@@ -15,7 +15,7 @@ endif
 
 targets = cot-test cot-test-threads cot-test-io cot-manual cot-benchmark \
 	ctconsensus rpcg-server rpcg-client httpd jsond \
-	jsond-tester jsond-tester-curl ws-echo \
+	jsond-client jsond-tester-curl ws-echo \
 	cot-test-curl cot-test-http cot-test-ws
 
 all:

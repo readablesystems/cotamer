@@ -123,12 +123,17 @@ class http_message {
   public:
     typedef http_header_iterator header_iterator;
 
-    inline http_message();
+    inline http_message(llhttp_method method = HTTP_GET, std::string url = std::string());
+    http_message(http_message&&) = default;
+    http_message& operator=(http_message&&) = default;
+    inline http_message(const http_message&);
+    inline http_message& operator=(const http_message&);
 
     inline constexpr bool ok() const;
     explicit inline constexpr operator bool() const;
     inline constexpr bool operator!() const;
     inline constexpr llhttp_errno error() const;
+    inline const char* error_name() const;
 
     inline constexpr unsigned http_major() const;
     inline constexpr unsigned http_minor() const;
@@ -167,6 +172,7 @@ class http_message {
     // Examine body
     inline const std::string& body() const;
 
+    // Modify message
     inline http_message& clear();
     void add_header(std::string key, std::string value);
     inline void add_header(std::string key, size_t value);
@@ -234,7 +240,8 @@ public:
     http_parser(fd f, enum llhttp_type type);
 
     inline bool ok() const;
-    inline enum llhttp_errno error() const;
+    inline constexpr llhttp_errno error() const;
+    inline const char* error_name() const;
 
     void clear();
 
@@ -289,9 +296,37 @@ private:
     inline void copy_parser_status(message_data& md);
 };
 
-inline http_message::http_message()
-    : major_(1), minor_(1), method_(HTTP_GET), error_(HPE_OK),
-      status_code_(200), upgrade_(0), has_body_(0) {
+inline http_message::http_message(llhttp_method method, std::string url)
+    : major_(1), minor_(1), method_(method), error_(HPE_OK),
+      status_code_(200), upgrade_(0), has_body_(0), url_(std::move(url)) {
+}
+
+inline http_message::http_message(const http_message& x)
+    : major_(x.major_), minor_(x.minor_), method_(x.method_), error_(x.error_),
+      status_code_(x.status_code_), upgrade_(x.upgrade_), has_body_(x.has_body_),
+      url_(x.url_), status_message_(x.status_message_), headers_(x.headers_),
+      body_(x.body_) {
+}
+
+inline http_message& http_message::operator=(const http_message& x) {
+    if (&x != this) {
+        major_ = x.major_;
+        minor_ = x.minor_;
+        method_ = x.method_;
+        error_ = x.error_;
+        status_code_ = x.status_code_;
+        upgrade_ = x.upgrade_;
+        has_body_ = x.has_body_;
+        url_ = x.url_;
+        status_message_ = x.status_message_;
+        headers_ = x.headers_;
+        hpairs_ = x.hpairs_;
+        body_ = x.body_;
+        if (info_) {
+            info_->flags = 0;
+        }
+    }
+    return *this;
 }
 
 inline void http_message::kill_info(unsigned fl) const {
@@ -322,6 +357,10 @@ inline constexpr bool http_message::operator!() const {
 
 inline constexpr llhttp_errno http_message::error() const {
     return (llhttp_errno) error_;
+}
+
+inline const char* http_message::error_name() const {
+    return llhttp_errno_name((llhttp_errno) error_);
 }
 
 inline constexpr unsigned http_message::status_code() const {
@@ -520,8 +559,12 @@ inline bool http_parser::ok() const {
     return hp_.error == (unsigned) HPE_OK;
 }
 
-inline llhttp_errno http_parser::error() const {
+inline constexpr llhttp_errno http_parser::error() const {
     return (llhttp_errno) hp_.error;
+}
+
+inline const char* http_parser::error_name() const {
+    return llhttp_errno_name((llhttp_errno) hp_.error);
 }
 
 inline bool http_parser::should_keep_alive() const {

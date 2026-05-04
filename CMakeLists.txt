@@ -243,15 +243,15 @@ if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
         nlohmann_json::nlohmann_json
     )
 
-    add_executable(jsond-tester
-        examples/jsond-tester.cc
+    add_executable(jsond-client
+        examples/jsond-client.cc
         $<TARGET_OBJECTS:Cotamer>
         $<TARGET_OBJECTS:CotamerHttp>
     )
-    target_include_directories(jsond-tester PRIVATE
+    target_include_directories(jsond-client PRIVATE
         ${LLHTTP_INCLUDE_DIR}
     )
-    target_link_libraries(jsond-tester PRIVATE
+    target_link_libraries(jsond-client PRIVATE
         ${LLHTTP_LIBRARY}
         nlohmann_json::nlohmann_json
     )
