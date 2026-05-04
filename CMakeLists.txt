@@ -257,13 +257,17 @@ if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
     )
 
     if(COTAMER_HAVE_CURL)
-        add_executable(jsond-tester-curl
-            examples/jsond-tester-curl.cc
+        add_executable(jsond-curl-client
+            examples/jsond-curl-client.cc
             $<TARGET_OBJECTS:Cotamer>
             $<TARGET_OBJECTS:CotamerCurl>
         )
-        target_link_libraries(jsond-tester-curl PRIVATE
+        target_include_directories(jsond-curl-client PRIVATE
+            ${LLHTTP_INCLUDE_DIR}
+        )
+        target_link_libraries(jsond-curl-client PRIVATE
             CURL::libcurl
+            ${LLHTTP_LIBRARY}
             nlohmann_json::nlohmann_json
         )
     endif()

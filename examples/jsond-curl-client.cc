@@ -1,16 +1,17 @@
-// examples/jsond-client.cc
-//    End-to-end test of `jsond` using Cotamer's native HTTP client
-//    (`cot::tcp_connect` + `cot::http_parser`). Exercises the same scenarios
-//    as `jsond-tester-curl`, but speaks HTTP directly with no third-party
-//    HTTP library involved.
+// examples/jsond-curl-client.cc
+//    Like `jsond-client.cc`, but uses Cotamer's libcurl integration
+//    (`cot::curl_fetch`) instead of speaking HTTP directly. Same
+//    end-to-end examples; libcurl manages the TCP connection pool, so
+//    HTTP keepalive happens automatically without our help.
 //
 //    Usage:
 //        ./jsond -p 21997 &
-//        ./jsond-client -p 21997
+//        ./jsond-curl-client -p 21997
 
 #include "cotamer/cotamer.hh"
-#include "cotamer/http.hh"
+#include "cotamer/curl.hh"
 #include <nlohmann/json.hpp>
+#include <llhttp.h>
 #include <cassert>
 #include <cstdlib>
 #include <format>
@@ -24,11 +25,8 @@ using json = nlohmann::json;
 
 namespace {
 
-// Address of server; assigned by `main` from -h/-p flags.
+// `host:port` of the server; assigned by `main` from -h/-p flags.
 std::string server_address;
-
-// Connection to server; set on first connection
-cot::fd cfd;
 
 struct jsond_response {
     unsigned status = 0;
@@ -38,45 +36,46 @@ struct jsond_response {
 
 // rpc(method, url, body)
 //    Task to make an RPC to a running `jsond` and return the result.
+//
+// libcurl manages its own connection pool: successive calls to
+// `curl_fetch` reuse the underlying TCP connection automatically, so
+// HTTP keepalive Just Works without us tracking an fd ourselves.
 
 cot::task<jsond_response> rpc(llhttp_method method, std::string url,
                               std::string body = "") {
-    if (!cfd) {
-        cfd = co_await cot::tcp_connect(server_address);
-    }
-
-    // construct request
-    cot::http_message m(method, url);
-    m.header("Host", "localhost");
-    if (!body.empty()) {
-        m.header("Content-Type", "application/json").body(body);
-    }
-    // If we had set the header `Connection: close`, the server would close
-    // the connection after processing this RPC. We don’t set that, so the
-    // connection remains active for the next RPC via the HTTP keepalive
-    // mechanism.
+    // libcurl wants a full URL; jsond's path is just the tail.
+    auto full_url = std::format("http://{}{}", server_address, url);
 
     // print request
-    std::print(std::cout, "{} {}", m.method_name(), m.url());
+    std::print(std::cout, "{} {}", llhttp_method_name(method), url);
     if (!body.empty()) {
         std::print(std::cout, " {}", body);
     }
     std::print("\n");
 
-    // send request, receive response
-    cot::http_parser hp(cfd, HTTP_RESPONSE);
-    co_await hp.send(std::move(m));
-    auto resp = co_await hp.receive();
+    // Drive libcurl. The configure lambda runs once before the transfer
+    // to set verb-specific options. CURLOPT_COPYPOSTFIELDS makes libcurl
+    // copy the body, so `body` need not outlive the lambda.
+    auto resp = co_await cot::curl_fetch(std::move(full_url),
+        [method, body = std::move(body)](CURL* easy) {
+            // GET is the default; POST has its own option; everything
+            // else (PUT, DELETE, PATCH) goes via CUSTOMREQUEST.
+            if (method == HTTP_POST) {
+                curl_easy_setopt(easy, CURLOPT_POST, 1L);
+            } else if (method != HTTP_GET) {
+                curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST,
+                                 llhttp_method_name(method));
+            }
+            if (!body.empty()) {
+                curl_easy_setopt(easy, CURLOPT_COPYPOSTFIELDS, body.c_str());
+            }
+        });
 
     // print response
-    std::print("→ {} {}\n", resp.status_code(), resp.body());
+    std::print("→ {} {}\n", resp.status, resp.body);
 
-    // check response and return result
-    if (!hp.ok()) {
-        throw std::runtime_error(std::format("http parse error: {}", hp.error_name()));
-    }
-    auto j = resp.body().empty() ? json() : json::parse(resp.body());
-    co_return jsond_response{resp.status_code(), std::move(j)};
+    auto j = resp.body.empty() ? json() : json::parse(resp.body);
+    co_return jsond_response{static_cast<unsigned>(resp.status), std::move(j)};
 }
 
 
@@ -218,14 +217,16 @@ cot::task<> main_task() {
         co_await error_examples();
     } catch (const std::exception& e) {
         std::cerr << "EXCEPTION: " << e.what() << "\n";
+        cot::curl_reset();
         std::exit(1);
     }
+    cot::curl_reset();   // release the curl driver and its connection pool
     std::cerr << "PASS\n";
     std::exit(0);
 }
 
 void usage() {
-    std::cerr << "Usage: jsond-client [-h HOST] [-p PORT]\n"
+    std::cerr << "Usage: jsond-curl-client [-h HOST] [-p PORT]\n"
               << "  -h HOST  jsond hostname (default localhost)\n"
               << "  -p PORT  jsond port (default 11112, matches jsond)\n";
 }
