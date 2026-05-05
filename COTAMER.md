@@ -133,11 +133,11 @@ co_await cot::any(cot::after(1h), cot::after(10h));
 co_await cot::all(cot::after(1h), cot::after(10h));
 ```
 
-`cotamer::attempt(task, event...)` runs a task with early exit: if any of the
-`event`s trigger before the `task` completes, the `attempt` task exits early.
-`co_await attempt(task<T>, ...)` returns a `std::optional<T>`, which contains
-the task’s return value if it completed before the events, or `std::nullopt`
-if an event completed first. `attempt` is a natural fit for timeouts:
+`cotamer::attempt(task, event...)` runs a task with cancellation: if any of
+the `event`s trigger before the task completes, the task is destroyed.
+`co_await attempt(task<T>, ...)` returns a `std::optional<T>`, which either
+contains the return value from the task or `std::nullopt` if the task was
+destroyed first at a suspension point. `attempt` is a natural fit for timeouts:
 
 ```cpp
 auto result = co_await cot::attempt(slow_task(), cot::after(1h));
