@@ -121,7 +121,7 @@ endif()
 
 # Find wslay (WebSockets)
 set(COTAMER_HAVE_WSLAY 0)
-if(NOT COTAMER_WSLAY STREQUAL "OFF")
+if(NOT COTAMER_WSLAY STREQUAL "OFF" AND COTAMER_HAVE_LLHTTP)
     find_path(WSLAY_INCLUDE_DIR wslay/wslay.h HINTS /opt/homebrew/include /usr/local/include)
     find_library(WSLAY_LIBRARY wslay HINTS /opt/homebrew/lib /usr/local/lib)
     if(WSLAY_INCLUDE_DIR AND WSLAY_LIBRARY)
@@ -285,27 +285,18 @@ if(COTAMER_HAVE_LLHTTP)
     target_link_libraries(httpd PRIVATE
         ${LLHTTP_LIBRARY}
     )
-endif()
 
-add_executable(cot-test-http
-    test/cot-test-http.cc
-    $<TARGET_OBJECTS:Cotamer>
-    $<TARGET_OBJECTS:CotamerHttp>
-)
-target_include_directories(cot-test-http PRIVATE
-    ${LLHTTP_INCLUDE_DIR}
-)
-target_link_libraries(cot-test-http PRIVATE
-    ${LLHTTP_LIBRARY}
-)
-if(COTAMER_HAVE_WSLAY)
-    target_sources(httpd PRIVATE $<TARGET_OBJECTS:CotamerWebSocket>)
-    target_include_directories(httpd PRIVATE ${WSLAY_INCLUDE_DIR})
-    target_link_libraries(httpd PRIVATE ${WSLAY_LIBRARY})
-    target_compile_definitions(httpd PRIVATE COTAMER_HTTPD_HAS_WSLAY=1)
-    if(COTAMER_HAVE_ZLIB)
-        target_link_libraries(httpd PRIVATE ZLIB::ZLIB)
-    endif()
+    add_executable(cot-test-http
+        test/cot-test-http.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(cot-test-http PRIVATE
+        ${LLHTTP_INCLUDE_DIR}
+    )
+    target_link_libraries(cot-test-http PRIVATE
+        ${LLHTTP_LIBRARY}
+    )
 endif()
 
 # Optional libcurl integration
@@ -350,7 +341,7 @@ if(COTAMER_HAVE_MBEDTLS)
 endif()
 
 # Optional wslay (WebSocket) integration
-if(COTAMER_HAVE_WSLAY)
+if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_WSLAY)
     add_library(CotamerWebSocket OBJECT
         cotamer/websocket.cc
     )
@@ -361,6 +352,14 @@ if(COTAMER_HAVE_WSLAY)
     endif()
     if(COTAMER_HAVE_ZLIB)
         target_link_libraries(CotamerWebSocket PUBLIC ZLIB::ZLIB)
+    endif()
+
+    target_sources(httpd PRIVATE $<TARGET_OBJECTS:CotamerWebSocket>)
+    target_include_directories(httpd PRIVATE ${WSLAY_INCLUDE_DIR})
+    target_link_libraries(httpd PRIVATE ${WSLAY_LIBRARY})
+    target_compile_definitions(httpd PRIVATE COTAMER_HTTPD_HAS_WSLAY=1)
+    if(COTAMER_HAVE_ZLIB)
+        target_link_libraries(httpd PRIVATE ZLIB::ZLIB)
     endif()
 
     add_executable(cot-test-ws
