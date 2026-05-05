@@ -47,7 +47,6 @@ cot::task<jsond_response> rpc(cot::http_parser& hp, llhttp_method method,
                               std::string url, std::string body = "") {
     // construct request
     cot::http_message m(method, url);
-    m.header("Host", "localhost");
     if (!body.empty()) {
         m.header("Content-Type", "application/json").body(body);
     }
@@ -231,10 +230,10 @@ cot::task<> error_examples(cot::http_parser& hp) {
 }
 
 
-cot::task<> main_task(std::string server_address) {
+cot::task<> main_task(std::string host, unsigned port) {
     // connect to server, construct parser
-    auto cfd = co_await cot::tcp_connect(server_address);
-    cot::http_parser hp(std::move(cfd), cot::http_parser::client);
+    auto cfd = co_await cot::tcp_connect(std::format("{}:{}", host, port));
+    cot::http_parser hp(std::move(cfd), cot::http_parser::client, host);
 
     // pass parser through normal and error examples
     try {
@@ -283,7 +282,7 @@ int main(int argc, char* argv[]) {
     }
 
     cot::set_clock(cot::clock::real_time);
-    main_task(std::format("{}:{}", host, port)).detach();
+    main_task(host, port).detach();
     cot::loop();
     return 0;
 }

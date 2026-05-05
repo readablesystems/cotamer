@@ -124,7 +124,8 @@ class http_message {
 public:
     typedef http_header_iterator header_iterator;
 
-    inline http_message(llhttp_method method = HTTP_GET, std::string url = std::string());
+    inline http_message(llhttp_method method = HTTP_GET,
+                        std::string url = std::string());
     http_message(http_message&&) = default;
     http_message& operator=(http_message&&) = default;
     inline http_message(const http_message&);
@@ -239,7 +240,8 @@ private:
 class http_parser {
 public:
     enum parser_type { client, server };
-    http_parser(fd f, parser_type direction = server);
+    http_parser(fd f, parser_type direction = server,
+                std::string host = std::string());
     http_parser(fd f, enum llhttp_type receive_type);
 
     inline bool ok() const;
@@ -247,6 +249,10 @@ public:
     inline const char* error_name() const;
 
     void clear();
+
+    inline const std::string& host() const;
+    inline http_parser& set_host(const std::string& host);
+    inline http_parser& clear_host();
 
     inline task<http_message> receive();
     using ticket_type = mutex_event<false>;
@@ -277,6 +283,7 @@ private:
     fd f_;
     mutex m_[2];
     std::string receive_buffer_;
+    std::string host_;
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
 
@@ -574,6 +581,20 @@ inline constexpr llhttp_errno http_parser::error() const {
 
 inline const char* http_parser::error_name() const {
     return llhttp_errno_name((llhttp_errno) hp_.error);
+}
+
+inline const std::string& http_parser::host() const {
+    return host_;
+}
+
+inline http_parser& http_parser::set_host(const std::string& host) {
+    host_ = host;
+    return *this;
+}
+
+inline http_parser& http_parser::clear_host() {
+    host_.clear();
+    return *this;
 }
 
 inline bool http_parser::should_keep_alive() const {

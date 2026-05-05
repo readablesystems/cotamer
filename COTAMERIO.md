@@ -57,8 +57,8 @@ ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 File descriptors must be in non-blocking mode for readiness events to work
 correctly. I/O helpers that return a `cotamer::fd` (`accept`, `tcp_listen`,
 `tcp_connect`, `tcp_accept`) automatically put that fd in non-blocking mode;
-for file descriptors obtained in other ways, call
-`cotamer::set_nonblocking(fileno)` or `cotamer::set_nonblocking(fd)`.
+for file descriptors obtained in other ways, call `cotamer::set_nonblocking`,
+which is overloaded for both a raw `int` fd and a `cotamer::fd`.
 
 When a file descriptor closes or experiences a serious error, Cotamer triggers
 all three readiness events for that file descriptor. This means that most code
@@ -66,42 +66,57 @@ doesn’t need `closed()`. It can be useful nevertheless for coroutines that
 passively track files without reading or writing them.
 
 
-## Wrapper functions
+## Byte transfer
 
 The `cotamer::read_once`, `cotamer::write_once`, `cotamer::read`, and
 `cotamer::write` coroutines are suspendable wrappers around `::read` and
-`::write`. The `*once` versions retry while blocked; the other versions retry
-until all requested bytes are transferred (or end-of-file or error). These
-functions return the number of bytes transferred (which might be zero at
-end-of-file).
+`::write`.
 
-Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions
-to retry. On serious errors (anything else), the functions exit early. If any
-data had been transferred, they return a short count; but if the error
-occurred before data transfer, they throw a `std::system_error` with the
-`errno` number as its `code()`. Recover the errno number with `catch (const
-std::system_error& ex) { ... ex.code() ... }`.
+Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions to
+retry. On serious errors (anything else), the functions exit early. If any data
+had been transferred, they return a short count; but if the error occurred
+before data transfer, they return an error indication. The `*once` versions
+retry while blocked, while the others retry until all requested bytes are
+transferred (or end-of-file or error).
 
-Since the functions throw exceptions instead of returning -1 on error, their
-return type is `task<size_t>`, not `task<ssize_t>`.
+These coroutines return a
+[`std::expected`](https://en.cppreference.com/cpp/utility/expected) object,
+which encapsulates either a real value or an error code. Specifically, they
+return `cotamer::ioresult`, a synonym for `std::expected<size_t,
+std::error_code>`. On success, this value encapsulates the number of transferred
+bytes; you can access that count with `*result`. On failure, it encapsulates the
+`errno` number (in a
+[`std::error_code`](https://en.cppreference.com/cpp/error/error_code) object).
+Some example uses:
 
-`cotamer::connect` and `cotamer::accept` perform asynchronous versions of the
-corresponding socket system calls. `connect` connects a client socket to a
-remote address; the coroutine suspends until the connection attempt succeeds.
-`accept` suspends until a new connection request arrives on `lfd`; when one
-does, it is accepted, put into non-blocking mode, and returned as an `fd`
-object. Again, these functions throw `std::system_error` on serious error.
+```c++
+cot::ioresult result = cot::read(fd, buf, n);
+
+if (result) {
+    // transfer succeeded (or end-of-file)
+    size_t nbytes = *result;   // fetch number of bytes
+} else {
+    // serious error
+    int errc = result.error().value();
+}
+
+if (!result || *result == 0) {
+    // no bytes transferred
+}
+
+size_t nb = *result;    // will throw exception if `result` is an error
+```
 
 Signatures:
 
 | Function | Description |
 |:---------|:------------|
-| `task<size_t> read_once(fd, void* buf, size_t count)` | Read until first success |
-| `task<size_t> read(fd, void* buf, size_t count)` | Read until completion |
-| `task<size_t> write_once(fd, const void* buf, size_t count)` | Write until first success |
-| `task<size_t> write(fd, const void* buf, size_t count)` | Write until completion |
-| `task<> connect(fd, const sockaddr*, socklen_t)` | Connect client socket to address |
-| `task<fd> accept(fd)` | Accept new nonblocking socket from listening fd |
+| `task<ioresult> read_once(fd, void* buf, size_t count)` | Read until first success |
+| `task<ioresult> read(fd, void* buf, size_t count)` | Read until completion |
+| `task<ioresult> write_once(fd, const void* buf, size_t count)` | Write until first success |
+| `task<ioresult> write(fd, const void* buf, size_t count)` | Write until completion |
+| `task<ioresult> writev(fd, const iovec* iov, size_t iovcnt)` | Scatter-gather write until completion |
+
 
 Here is a complete pipe example:
 
@@ -121,10 +136,40 @@ cot::task<> pipe_echo() {
 
     // reader
     char buf[64] = {};
-    auto r = co_await cot::read_once(rfd, buf, sizeof(buf));
-    std::print("read {} bytes: {}\n", r, std::string_view(buf, r));
+    if (auto r = co_await cot::read_once(rfd, buf, sizeof(buf))) {
+        std::print("read {} bytes: {}\n", *r, std::string_view(buf, *r));
+    }
 }
 ```
+
+
+## Sockets
+
+`cotamer::connect` and `cotamer::accept` perform asynchronous versions of the
+corresponding socket system calls. `connect` connects a client socket to a
+remote address; the coroutine suspends until the connection attempt succeeds.
+`accept` suspends until a new connection request arrives on `lfd`; when one
+does, it is accepted, put into non-blocking mode, and returned as an `fd`
+object. These functions throw `std::system_error` on serious error, rather
+than returning an `ioresult`.
+
+To read and write the resulting sockets, prefer `cotamer::send` and
+`cotamer::recv`. Although `write` and `read` also work, the `send` and `recv`
+versions supply arguments useful for typical socket use; for instance, consider
+a socket whose remote peer has shut down; `write` to such a socket may kill the
+process via the `SIGPIPE` signal, while `send` just returns an error.
+
+Signatures:
+
+| Function | Description |
+|:---------|:------------|
+| `task<ioresult> send_once(fd, const void* buf, size_t count)` | Send to first success |
+| `task<ioresult> send(fd, const void* buf, size_t count)` | Send to completion |
+| `task<ioresult> sendv(fd, const iovec* iov, size_t iovcnt)` | Scatter-gather send to completion |
+| `task<ioresult> recv_once(fd, void* buf, size_t count)` | Receive to first success |
+| `task<ioresult> recv(fd, void* buf, size_t count)` | Receive to completion |
+| `task<> connect(fd, const sockaddr*, socklen_t)` | Connect client socket to address |
+| `task<fd> accept(fd)` | Accept new nonblocking socket from listening fd |
 
 
 ## TCP
@@ -158,11 +203,11 @@ cot::task<> echo_server() {
 cot::task<> handle_connection(cot::fd f) {
     char buf[4096];
     while (true) {
-        auto n = co_await cot::read_once(f, buf, sizeof(buf));
-        if (n == 0) {
+        auto n = co_await cot::recv_once(f, buf, sizeof(buf));
+        if (!n || *n == 0) {
             break;
         }
-        co_await cot::write(f, buf, n);
+        co_await cot::send(f, buf, *n);
     }
 }
 ```
@@ -213,19 +258,10 @@ struct lockable_fd {
 cot::task<> write_message(lockable_fd& lfd, std::string message) {
     cot::unique_lock guard(co_await lfd.mutex);
     // critical section — automatically unlocked when guard goes out of scope
-    // or coroutine is destroyed
-    size_t pos = 0;
-    while (pos != message.size()) {
-        auto rv = ::write(lfd.f.fileno(), message.data() + pos, message.size() - pos);
-        if (rv > 0) {
-            pos += rv;
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // suspension point: coroutine might be destroyed!
-            co_await cot::writable(lfd.f);
-        } else {
-            throw std::system_error(errno, std::generic_category());
-        }
-    }
+    // or coroutine is destroyed. `cot::send` may suspend internally on
+    // `writable(lfd.f)`; the guard keeps interleaved writes from other
+    // coroutines from corrupting our message across those suspensions.
+    co_await cot::send(lfd.f, message.data(), message.size());
 }
 ```
 
@@ -234,7 +270,7 @@ cot::task<> write_message(lockable_fd& lfd, std::string message) {
 construction tags:
 
 ```cpp
-cot::unique_lock guard(m, std::defer_lock);    // don't lock yet
+cot::unique_lock guard(m, std::defer_lock);    // don’t lock yet
 co_await guard.lock();                         // lock explicitly later
 
 cot::unique_lock guard(m, std::try_to_lock);   // non-blocking attempt
@@ -279,3 +315,98 @@ already been enqueued, then another coroutine that calls `m.lock_shared()`
 will suspend until the exclusive lock attempt has been serviced. On the other
 hand, if no exclusive attempts are waiting, then `m.lock_shared()` will
 proceed right away.
+
+
+## HTTP
+
+Cotamer integrates [llhttp](https://github.com/nodejs/llhttp) to parse and
+build HTTP/1.x messages on top of a connected `cotamer::fd`.
+`cotamer::http_message` represents a request or response in memory;
+`cotamer::http_parser` wraps an `fd` and turns bytes on the wire into
+messages and back.
+
+The central class is `cotamer::http_parser`, which can read and write HTTP
+messages. This example uses `cot::http_parser` to return the contents of
+`/robots.txt` on a given HTTP host:
+
+```c++
+#include "cotamer/http.hh"
+
+cot::task<std::string> fetch_robots_txt(std::string host) {
+    auto fd = co_await cot::tcp_connect(std::format("{}:80", host));
+    cot::http_parser hp(std::move(fd), cot::http_parser::client, host);
+
+    cot::http_message req(HTTP_GET, "/robots.txt");
+    auto ticket = co_await hp.send_request(std::move(req));
+    co_return (co_await hp.receive(std::move(ticket))).body();
+}
+```
+
+(The third constructor argument tells `http_parser` to add a `Host:` header to
+each outgoing request automatically.)
+
+This uses `cot::http_parser` in server mode to serve HTTP on a given connection:
+
+```cpp
+cot::task<> http_connection(cot::fd cfd) {
+    cot::http_parser hp(std::move(cfd), cot::http_parser::server);
+    do {
+        auto req = co_await hp.receive();
+        if (!hp.ok()) {
+            break;                                 // peer closed or parse error
+        }
+        cot::http_message res;
+        res.status_code(200)
+            .header("Content-Type", "text/plain")
+            .body(std::format("you asked for {}\n", req.url()));
+        co_await hp.send(std::move(res));
+    } while (hp.should_keep_alive());
+}
+```
+
+
+### http_message
+
+A default-constructed `http_message` is a `GET /` request with HTTP/1.1 and
+status 200; pass `(method, url)` to construct otherwise. `http_message` uses
+[“fluent” accessors](https://en.wikipedia.org/wiki/Fluent_interface) to set
+parameters:
+
+```cpp
+cot::http_message res;
+res.status_code(200)
+    .header("Content-Type", "text/plain")
+    .body("hello\n");
+```
+
+| Member                              | Returns                                         |
+|:------------------------------------|:------------------------------------------------|
+| `method()`, `method_name()`         | request method                                  |
+| `status_code()`                     | response status                                 |
+| `url()`                             | full request URL                                |
+| `path()`                            | URL path part (no `?...` or `#...`)             |
+| `body()`                            | message body                                    |
+| `header_begin/end()`                | iterate over headers; each iterator has `.name()` and `.value()` |
+| `search_param_begin/end()`          | iterate over `?key=value` parameters            |
+
+If `nlohmann::json` is enabled at build time, `http_message::body(const
+nlohmann::json&)` is also available; it serializes the JSON, sets the body,
+and adds a `Content-Type: application/json` header if none is already
+present.
+
+
+### Pipelining
+
+HTTP/1.1 supports request pipelining: a client can pass multiple requests over
+the connection without waiting for any responses; the server then returns their
+responses in order. Cotamer `http_parser` also supports request pipelining, but
+some care is required to ensure requests and responses match. The
+`http_parser::send_request` coroutine therefore returns a *ticket*, the caller’s
+reserved position in line. If you aren’t using pipelining, you can ignore the
+ticket. If you are using pipelining, pass the ticket to `receive()` via
+`hp.receive(std::move(ticket))` to claim the matching response in line.
+
+
+For fuller examples covering routing, JSON request and response bodies, error
+responses, and a pipelined client, see `examples/jsond.cc` and
+`examples/jsond-client.cc`.

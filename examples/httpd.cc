@@ -28,7 +28,7 @@ cot::task<> run_one(cot::fd cfd, double delay) {
     cot::http_parser hp(std::move(cfd), cot::http_parser::server);
     cot::http_message req, res;
 
-    while (true) {
+    do {
         auto req = co_await hp.receive();
         if (!hp.ok()) {
             break;
@@ -60,10 +60,7 @@ cot::task<> run_one(cot::fd cfd, double delay) {
             .header("Content-Type", "text/plain")
             .body(s);
         co_await hp.send(std::move(res));
-        if (!hp.should_keep_alive()) {
-            break;
-        }
-    }
+    } while (hp.should_keep_alive());
 }
 
 cot::task<> start(std::string address, double delay) {

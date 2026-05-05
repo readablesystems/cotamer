@@ -333,8 +333,8 @@ std::string_view http_message::search_param(std::string_view name) const {
 }
 
 
-http_parser::http_parser(fd f, parser_type direction)
-    : f_(std::move(f)) {
+http_parser::http_parser(fd f, parser_type direction, std::string host)
+    : f_(std::move(f)), host_(std::move(host)) {
     auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
     llhttp_init(&hp_, hp_type, &settings);
 }
@@ -520,6 +520,10 @@ task<http_message> http_parser::receive(ticket_type ticket) {
 task<http_parser::ticket_type> http_parser::send_request(http_message m) {
     std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
         m.method_name(), m.url(), m.http_major(), m.http_minor());
+    if (!host_.empty()
+        && !m.has_header("host")) {
+        m.add_header("Host", host_);
+    }
     if (m.has_body_
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {

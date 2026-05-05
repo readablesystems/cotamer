@@ -189,7 +189,7 @@ using system_time_point = std::chrono::system_clock::time_point;
 using steady_time_point = std::chrono::steady_clock::time_point;
 using duration = std::chrono::steady_clock::duration;
 
-enum class clock { virtual_time = 0, real_time = 0 };
+enum class clock { virtual_time = 0, real_time };
 
 class driver {
 public:
