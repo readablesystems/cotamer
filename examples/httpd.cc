@@ -25,11 +25,11 @@ cot::task<> run_ws_echo(cot::ws_stream ws) {
 #endif
 
 cot::task<> run_one(cot::fd cfd, double delay) {
-    cot::http_parser hp(std::move(cfd), cot::http_parser::server);
+    cot::http_parser hp(cot::http_parser::server);
     cot::http_message req, res;
 
     do {
-        auto req = co_await hp.receive();
+        auto req = co_await hp.receive(cfd);
         if (!hp.ok()) {
             break;
         }
@@ -59,7 +59,7 @@ cot::task<> run_one(cot::fd cfd, double delay) {
             .date_header("Date", time(NULL))
             .header("Content-Type", "text/plain")
             .body(s);
-        co_await hp.send(std::move(res));
+        co_await hp.send(cfd, std::move(res));
     } while (hp.should_keep_alive());
 }
 

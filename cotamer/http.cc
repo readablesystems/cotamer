@@ -333,6 +333,12 @@ std::string_view http_message::search_param(std::string_view name) const {
 }
 
 
+http_parser::http_parser(parser_type direction, std::string host)
+    : host_(std::move(host)) {
+    auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
+    llhttp_init(&hp_, hp_type, &settings);
+}
+
 http_parser::http_parser(fd f, parser_type direction, std::string host)
     : f_(std::move(f)), host_(std::move(host)) {
     auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
@@ -458,67 +464,47 @@ int http_parser::on_message_complete(::llhttp_t* hp) {
     return HPE_PAUSED;
 }
 
-task<http_message> http_parser::receive(ticket_type ticket) {
-    assert(ticket.mutex() == &m_[0]);
-    char stackbuf[bufsize];
-    message_data md;
-    md.hm.status_code(0);
-    unique_lock guard(co_await ticket);
-    hp_.data = &md;
-
-    while (true) {
-        const char* buf;
-        size_t nr;
-        if (receive_buffer_.empty()) {
-            buf = stackbuf;
-            auto nx = co_await recv_once(f_, stackbuf, sizeof(stackbuf));
-            if (!nx || *nx == 0) {
-                break;
-            }
-            nr = *nx;
-        } else {
-            // Drain bytes left from the previous call (pipelined data, or a
-            // partial frame we couldn't process in one llhttp_execute).
-            buf = receive_buffer_.data();
-            nr = receive_buffer_.size();
-        }
-
-        llhttp_errno_t err = llhttp_execute(&hp_, buf, nr);
-
-        // save unconsumed bytes in `receive_buffer_`
-        size_t consumed = nr;
-        if (err != HPE_OK) {
-            consumed = llhttp_get_error_pos(&hp_) - buf;
-        }
-        if (consumed == nr) {
-            receive_buffer_.clear();
-        } else {
-            receive_buffer_ = std::string(buf + consumed, buf + nr);
-        }
-
-        if (err == HPE_PAUSED_UPGRADE) {
-            llhttp_resume_after_upgrade(&hp_);
-            md.state = state_done;
-        } else if (err == HPE_PAUSED) {
-            // we only pause at a message boundary
-            llhttp_resume(&hp_);
-            md.state = state_done;
-        }
-        if (err != HPE_OK || md.state == state_done) {
-            copy_parser_status(md);
-            break;
-        }
-        // otherwise, message incomplete: loop to read more.
+bool http_parser::receive_chunk(message_data& md, const char* buf, size_t sz) {
+    if (sz == 0) {
+        hp_.error = md.hm.error_ = HPE_CLOSED_CONNECTION;
+        return false;
     }
 
+    llhttp_errno_t err = llhttp_execute(&hp_, buf, sz);
+
+    // save unconsumed bytes in `receive_buffer_`
+    size_t consumed = sz;
+    if (err != HPE_OK) {
+        consumed = llhttp_get_error_pos(&hp_) - buf;
+    }
+    if (consumed == sz) {
+        receive_buffer_.clear();
+    } else {
+        receive_buffer_ = std::string(buf + consumed, buf + sz);
+    }
+
+    if (err == HPE_PAUSED_UPGRADE) {
+        llhttp_resume_after_upgrade(&hp_);
+        md.state = state_done;
+    } else if (err == HPE_PAUSED) {
+        // we only pause at a message boundary
+        llhttp_resume(&hp_);
+        md.state = state_done;
+    }
+
+    if (err == HPE_OK && md.state != state_done) {
+        return true;
+    }
+
+    copy_parser_status(md);
     if (md.state != state_done && !md.hm.error_) {
         hp_.error = md.hm.error_ = HPE_CLOSED_CONNECTION;
     }
-    co_return std::move(md.hm);
+    return false;
 }
 
-task<http_parser::ticket_type> http_parser::send_request(http_message m) {
-    std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
+size_t http_parser::prepare_request(std::string& first, http_message& m, iovec* iov) {
+    first = std::format("{} {} HTTP/{}.{}\r\n",
         m.method_name(), m.url(), m.http_major(), m.http_minor());
     if (!host_.empty()
         && !m.has_header("host")) {
@@ -531,24 +517,17 @@ task<http_parser::ticket_type> http_parser::send_request(http_message m) {
     }
     m.headers_.append("\r\n", 2);
 
-    iovec iov[3];
-    iov[0] = iovec{ urlline.data(), urlline.length() };
+    iov[0] = iovec{ first.data(), first.length() };
     iov[1] = iovec{ m.headers_.data(), m.headers_.length() };
     size_t iovcnt = 2;
     if (m.body_.length()) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
-
-    // lock for writing, then obtain read ticket
-    unique_lock guard(co_await m_[1].lock());
-    auto ticket = m_[0].lock();
-
-    co_await sendv(f_, iov, iovcnt);
-    co_return std::move(ticket);
+    return iovcnt;
 }
 
-task<> http_parser::send_response(http_message m) {
+size_t http_parser::prepare_response(std::string& first, http_message& m, iovec* iov) {
     // If the response is marked `Connection: close`, then ensure
     // should_keep_alive() returns 0
     http_message::header_iterator connhdr;
@@ -572,7 +551,7 @@ task<> http_parser::send_response(http_message m) {
     std::string_view status_message = m.status_message_.empty()
         ? std::string_view(m.default_status_message(m.status_code()))
         : std::string_view(m.status_message());
-    std::string codeline = std::format("HTTP/{}.{} {} {}\r\n",
+    first = std::format("HTTP/{}.{} {} {}\r\n",
         m.http_major(), m.http_minor(), m.status_code(), status_message);
     if (m.has_body_
         && !m.has_header("content-length")
@@ -581,41 +560,14 @@ task<> http_parser::send_response(http_message m) {
     }
     m.headers_.append("\r\n", 2);
 
-    iovec iov[3];
-    iov[0] = iovec{ codeline.data(), codeline.length() };
+    iov[0] = iovec{ first.data(), first.length() };
     iov[1] = iovec{ m.headers_.data(), m.headers_.length() };
     size_t iovcnt = 2;
     if (m.body_.length()) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
-
-    unique_lock guard(co_await m_[1].lock());
-    co_await sendv(f_, iov, iovcnt);
-}
-
-task<> http_parser::send(http_message m) {
-    assert(hp_.type == (int) HTTP_RESPONSE || hp_.type == (int) HTTP_REQUEST);
-    if (hp_.type == (int) HTTP_RESPONSE) {
-        co_await send_request(std::move(m));
-    } else {
-        co_await send_response(std::move(m));
-    }
-}
-
-task<> http_parser::send_response_chunk(std::string str) {
-    std::string lenline = std::format("{}\r\n", str.length());
-    iovec iov[3];
-    iov[0] = iovec{ lenline.data(), lenline.length() };
-    iov[1] = iovec{ str.data(), str.length() };
-    iov[2] = iovec{ (void*) "\r\n", 2 };
-    unique_lock guard(co_await m_[1].lock());
-    co_await sendv(f_, iov, 3);
-}
-
-task<> http_parser::send_response_end_chunk() {
-    unique_lock guard(co_await m_[1].lock());
-    co_await cotamer::send(f_, "0\r\n\r\n", 5);
+    return iovcnt;
 }
 
 #if COTAMER_HAVE_NLOHMANN_JSON

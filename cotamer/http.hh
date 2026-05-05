@@ -120,6 +120,7 @@ private:
     const http_opair* pair_;
 };
 
+
 class http_message {
 public:
     typedef http_header_iterator header_iterator;
@@ -237,12 +238,17 @@ private:
     friend class http_parser;
 };
 
+
 class http_parser {
 public:
     enum parser_type { client, server };
-    http_parser(fd f, parser_type direction = server,
+    using ticket_type = mutex_event<false>;
+
+    http_parser(parser_type direction = server,
                 std::string host = std::string());
-    http_parser(fd f, enum llhttp_type receive_type);
+    [[deprecated]] http_parser(fd f, parser_type direction = server,
+                               std::string host = std::string());
+    [[deprecated]] http_parser(fd f, enum llhttp_type receive_type);
 
     inline bool ok() const;
     inline constexpr llhttp_errno error() const;
@@ -254,15 +260,23 @@ public:
     inline http_parser& set_host(const std::string& host);
     inline http_parser& clear_host();
 
-    inline task<http_message> receive();
-    using ticket_type = mutex_event<false>;
-    task<http_message> receive(ticket_type);
+    template <typename Stream> inline task<http_message> receive(Stream);
+    template <typename Stream> task<http_message> receive(Stream, ticket_type);
 
-    task<> send(http_message);
-    task<ticket_type> send_request(http_message);
-    task<> send_response(http_message);
-    task<> send_response_chunk(std::string);
-    task<> send_response_end_chunk();
+    template <typename Stream> task<> send(Stream, http_message);
+    template <typename Stream> task<ticket_type> send_request(Stream, http_message);
+    template <typename Stream> task<> send_response(Stream, http_message);
+    template <typename Stream> task<> send_response_chunk(Stream, std::string);
+    template <typename Stream> task<> send_response_end_chunk(Stream);
+
+    [[deprecated]] inline task<http_message> receive();
+    [[deprecated]] inline task<http_message> receive(ticket_type);
+
+    [[deprecated]] inline task<> send(http_message);
+    [[deprecated]] inline task<ticket_type> send_request(http_message);
+    [[deprecated]] inline task<> send_response(http_message);
+    [[deprecated]] inline task<> send_response_chunk(std::string);
+    [[deprecated]] inline task<> send_response_end_chunk();
 
     inline bool should_keep_alive() const;
     inline void clear_should_keep_alive();
@@ -272,9 +286,9 @@ public:
     inline std::string& receive_buffer();
 
     // Underlying fd
-    inline const fd& file() const;
+    [[deprecated]] inline const fd& file() const;
     // Release ownership of the underlying fd (e.g., for protocol upgrades)
-    inline fd take_file();
+    [[deprecated]] inline fd take_file();
 
 private:
     static constexpr size_t bufsize = 8192;
@@ -310,6 +324,10 @@ private:
     static int on_body(::llhttp_t* hp, const char* s, size_t len);
     static int on_message_complete(::llhttp_t* hp);
     inline void copy_parser_status(message_data& md);
+
+    bool receive_chunk(message_data&, const char* buf, size_t sz);
+    size_t prepare_request(std::string&, http_message&, iovec*);
+    size_t prepare_response(std::string&, http_message&, iovec*);
 };
 
 inline http_message::http_message(llhttp_method method, std::string url)
@@ -601,8 +619,117 @@ inline bool http_parser::should_keep_alive() const {
     return llhttp_should_keep_alive(&hp_);
 }
 
+template <typename Stream>
+task<http_message> http_parser::receive(Stream s, ticket_type ticket) {
+    assert(ticket.mutex() == &m_[0]);
+    char stackbuf[bufsize];
+    message_data md;
+    md.hm.status_code(0);
+    unique_lock guard(co_await ticket);
+    hp_.data = &md;
+
+    const char* buf;
+    size_t nr;
+    do {
+        if (receive_buffer_.empty()) {
+            buf = stackbuf;
+            auto nx = co_await recv_once(s, stackbuf, sizeof(stackbuf));
+            if (!nx || *nx == 0) {
+                break;
+            }
+            nr = *nx;
+        } else {
+            // Drain bytes left from the previous call (pipelined data, or a
+            // partial frame we couldn't process in one llhttp_execute).
+            buf = receive_buffer_.data();
+            nr = receive_buffer_.size();
+        }
+    } while (receive_chunk(md, buf, nr));
+    co_return std::move(md.hm);
+}
+
+template <typename Stream>
+inline task<http_message> http_parser::receive(Stream s) {
+    return receive(std::move(s), m_[0].lock());
+}
+
 inline task<http_message> http_parser::receive() {
-    return receive(m_[0].lock());
+    return receive(f_, m_[0].lock());
+}
+
+inline task<http_message> http_parser::receive(ticket_type ticket) {
+    return receive(f_, std::move(ticket));
+}
+
+template <typename Stream>
+task<> http_parser::send(Stream s, http_message m) {
+    assert(hp_.type == (int) HTTP_RESPONSE || hp_.type == (int) HTTP_REQUEST);
+    if (hp_.type == (int) HTTP_RESPONSE) {
+        co_await send_request(std::move(s), std::move(m));
+    } else {
+        co_await send_response(std::move(s), std::move(m));
+    }
+}
+
+template <typename Stream>
+task<http_parser::ticket_type> http_parser::send_request(Stream s, http_message m) {
+    std::string urlline;
+    iovec iov[3];
+    size_t iovcnt = prepare_request(urlline, m, iov);
+
+    // lock for writing, then obtain read ticket
+    unique_lock guard(co_await m_[1].lock());
+    auto ticket = m_[0].lock();
+
+    co_await sendv(s, iov, iovcnt);
+    co_return std::move(ticket);
+}
+
+template <typename Stream>
+task<> http_parser::send_response(Stream s, http_message m) {
+    std::string first;
+    iovec iov[3];
+    size_t iovcnt = prepare_response(first, m, iov);
+    unique_lock guard(co_await m_[1].lock());
+    co_await sendv(s, iov, iovcnt);
+}
+
+template <typename Stream>
+task<> http_parser::send_response_chunk(Stream s, std::string str) {
+    std::string lenline = std::format("{}\r\n", str.length());
+    iovec iov[3];
+    iov[0] = iovec{ lenline.data(), lenline.length() };
+    iov[1] = iovec{ str.data(), str.length() };
+    iov[2] = iovec{ (void*) "\r\n", 2 };
+    unique_lock guard(co_await m_[1].lock());
+    co_await sendv(s, iov, 3);
+}
+
+template <typename Stream>
+task<> http_parser::send_response_end_chunk(Stream s) {
+    using cotamer::send;
+    unique_lock guard(co_await m_[1].lock());
+    co_await send(s, "0\r\n\r\n", 5);
+}
+
+inline task<> http_parser::send(http_message m) {
+    return send(f_, std::move(m));
+}
+
+inline task<http_parser::ticket_type> http_parser::send_request(http_message m) {
+    return send_request(f_, std::move(m));
+}
+
+inline task<> http_parser::send_response(http_message m) {
+    return send_response(f_, std::move(m));
+}
+
+inline task<> http_parser::send_response_chunk(std::string str) {
+    return send_response_chunk(f_, std::move(str));
+}
+
+inline task<> http_parser::send_response_end_chunk() {
+    return send_response_end_chunk(f_);
 }
 
 inline void http_parser::clear_should_keep_alive() {
