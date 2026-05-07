@@ -292,6 +292,89 @@ cot::task<> test_method_string_ctor() {
 }
 
 
+// Query-string parsing: has_search_param, search_param, and iteration.
+cot::task<> test_search_param() {
+    {
+        cot::http_message m("GET", "/path?a=1&b=hello&c=2");
+        assert(m.has_search_param("a"));
+        assert(m.has_search_param("b"));
+        assert(m.has_search_param("c"));
+        assert(!m.has_search_param("d"));
+        assert(m.search_param("a") == "1");
+        assert(m.search_param("b") == "hello");
+        assert(m.search_param("c") == "2");
+        assert(m.search_param("d") == "");
+    }
+
+    // Percent-encoding in keys and values; '+' decodes as space.
+    {
+        cot::http_message m("GET", "/p?hello%20world=a+b&plus=1%2B1");
+        assert(m.has_search_param("hello world"));
+        assert(m.search_param("hello world") == "a b");
+        assert(m.search_param("plus") == "1+1");
+    }
+
+    // key= (empty value) and bare key (no '=').
+    {
+        cot::http_message m("GET", "/p?empty=&bare&full=x");
+        assert(m.has_search_param("empty"));
+        assert(m.search_param("empty") == "");
+        assert(m.has_search_param("bare"));
+        assert(m.search_param("bare") == "");
+        assert(m.search_param("full") == "x");
+    }
+
+    // No query string at all.
+    {
+        cot::http_message m("GET", "/path");
+        assert(!m.has_search_param("a"));
+        assert(m.search_param("a") == "");
+    }
+
+    // Empty query string ("?" with nothing after).
+    {
+        cot::http_message m("GET", "/path?");
+        assert(!m.has_search_param("a"));
+        assert(m.search_param("a") == "");
+    }
+
+    // Fragment after query string is not part of search params.
+    {
+        cot::http_message m("GET", "/p?a=1&b=2#frag");
+        assert(m.search_param("a") == "1");
+        assert(m.search_param("b") == "2");
+        assert(!m.has_search_param("frag"));
+    }
+
+    // First match wins for repeated keys.
+    {
+        cot::http_message m("GET", "/p?a=first&a=second");
+        assert(m.search_param("a") == "first");
+    }
+
+    // Iteration order matches the URL order; both params visited exactly once.
+    {
+        cot::http_message m("GET", "/p?a=1&b=2&c=3");
+        std::string keys, values;
+        for (auto it = m.search_param_begin(); it != m.search_param_end(); ++it) {
+            keys += it->first;
+            values += it->second;
+        }
+        assert(keys == "abc");
+        assert(values == "123");
+    }
+
+    // Iterator range over a URL with no query string is empty.
+    {
+        cot::http_message m("GET", "/path");
+        assert(m.search_param_begin() == m.search_param_end());
+    }
+
+    std::cerr << "search_param: ok\n";
+    co_return;
+}
+
+
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
 
@@ -316,6 +399,7 @@ int main(int argc, char* argv[]) {
     run("pipelining_with_bodies", test_pipelining_with_bodies);
     run("upgrade_residual", test_upgrade_residual);
     run("method_string_ctor", test_method_string_ctor);
+    run("search_param", test_search_param);
 
     if (ran == 0) {
         std::cerr << "No matching tests\n";

@@ -13,39 +13,17 @@
 namespace cotamer {
 class http_parser;
 
-struct http_opair {
+struct http_kvoffsets {
     unsigned name1;
     unsigned name2;
     unsigned value1;
     unsigned value2;
 
-    inline bool name_eq(const char* base, const char* s, size_t len) const {
-        return name2 - name1 == len
-            && memcmp(base + name1, s, len) == 0;
+    constexpr std::string_view name(const char* base) const noexcept {
+        return {base + name1, name2 - name1};
     }
-    inline bool name_eq(const char* base, std::string_view str) const {
-        return name_eq(base, str.data(), str.length());
-    }
-    inline bool name_eq_case(const char* base, const char* s, size_t len) const {
-        return name2 - name1 == len
-            && case_eq_prefix(base + name1, s, len);
-    }
-    inline bool name_eq_case(const char* base, std::string_view str) const {
-        return name_eq_case(base, str.data(), str.length());
-    }
-
-    static inline bool case_eq_prefix(const char* s1, const char* s2, size_t len) {
-        const char* e2 = s2 + len;
-        while (s2 != e2) {
-            unsigned char d = *s1 ^ *s2;
-            if (d != 0
-                && (d != 0x20 || (unsigned char) ((*s1 | 0x20) - 'a') >= 26)) {
-                return false;
-            }
-            ++s1;
-            ++s2;
-        }
-        return true;
+    constexpr std::string_view value(const char* base) const noexcept {
+        return {base + value1, value2 - value1};
     }
 };
 
@@ -64,7 +42,7 @@ public:
     using pointer = http_header_iterator_proxy;
 
     http_header_iterator() = default;
-    http_header_iterator(const char* base, const http_opair* pair)
+    http_header_iterator(const char* base, const http_kvoffsets* pair)
         : base_(base), pair_(pair) {
     }
     http_header_iterator(const http_header_iterator&) = default;
@@ -73,23 +51,17 @@ public:
     http_header_iterator& operator=(http_header_iterator&&) = default;
 
     constexpr std::string_view name() const noexcept {
-        return std::string_view{base_ + pair_->name1, base_ + pair_->name2};
+        return pair_->name(base_);
     }
-    bool name_eq(const char* s, size_t len) const noexcept {
-        return pair_->name_eq(base_, s, len);
+    constexpr bool name_eq(std::string_view str) const noexcept {
+        return pair_->name(base_) == str;
     }
-    bool name_eq(std::string_view str) const noexcept {
-        return pair_->name_eq(base_, str);
-    }
-    bool name_eq_case(const char* s, size_t len) const noexcept {
-        return pair_->name_eq_case(base_, s, len);
-    }
-    bool name_eq_case(std::string_view str) const noexcept {
-        return pair_->name_eq_case(base_, str);
+    constexpr bool name_eq_case(std::string_view str) const noexcept {
+        return strings::ieq(pair_->name(base_), str);
     }
 
     constexpr std::string_view value() const noexcept {
-        return std::string_view{base_ + pair_->value1, base_ + pair_->value2};
+        return pair_->value(base_);
     }
 
     value_type operator*() const noexcept { return {name(), value()}; }
@@ -114,7 +86,7 @@ public:
 
 private:
     const char* base_;
-    const http_opair* pair_;
+    const http_kvoffsets* pair_;
 };
 
 class http_message {
@@ -207,7 +179,7 @@ private:
         unsigned flags = 0;
         std::pair<unsigned, unsigned> f[3];
         std::string qurl;
-        std::vector<http_opair> qpairs;
+        std::vector<http_kvoffsets> qpairs;
         inline info_type()
             : flags(0) {
         }
@@ -224,7 +196,7 @@ private:
     std::string url_;
     std::string status_message_;
     std::string headers_;
-    std::vector<http_opair> hpairs_;
+    std::vector<http_kvoffsets> hpairs_;
     std::string body_;
     mutable std::unique_ptr<info_type> info_;
 

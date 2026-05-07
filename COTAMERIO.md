@@ -440,11 +440,12 @@ res.status_code(200)
 | `status_code()`                     | response status code (e.g. 200, 404)  | Response     | Read/write |
 | `url()`                             | request URL                           | Request      | Read/write |
 | `body()`                            | message body                          | Any          | Read/write |
-| `header(key, value)`                | header                                | Any          | Write      |
-| `header(key)`                       | header by name                        | Any          | Read       |
+| `header(name, value)`               | header                                | Any          | Write      |
+| `header(name)`                      | header by name                        | Any          | Read       |
 | `path()`                            | URL path part (no `?...` or `#...`)   | Request      | Read       |
 | `header_begin/end()`                | iterate over headers; each iterator has `.name()` and `.value()` | Any | Read |
-| `search_param_begin/end()`          | iterate over `?key=value` parameters  | Request      | Read       |
+| `search_param_begin/end()`          | iterate over `?name=value` parameters | Request      | Read       |
+| `search_param(name)`                | search parameter by name              | Request      | Read       |
 
 If `nlohmann::json` is enabled at build time, `http_message::body(const
 nlohmann::json&)` is also available; it serializes the JSON, sets the body,

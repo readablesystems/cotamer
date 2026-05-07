@@ -589,6 +589,17 @@ extern statistics stats;
 inline detail::describe_task_awaiter describe(const std::string&);
 
 
+// String helpers.
+
+namespace strings {
+// Are the first `count` characters of `a` and `b` equal, ignoring ASCII case?
+inline bool ieq(const char* a, const char* b, size_t count) noexcept;
+
+// Are `a` and `b` equal, ignoring ASCII case?
+inline bool ieq(std::string_view a, std::string_view b) noexcept;
+}
+
+
 // Metaprogramming.
 
 template <typename T> struct is_task : public std::false_type { };
