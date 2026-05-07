@@ -449,10 +449,12 @@ public:
     inline ~mutex() = default;
 
     [[nodiscard]] inline mutex_event<false> lock();
+    [[nodiscard]] inline mutex_event<false> lock(bool& notify);
     [[nodiscard]] inline bool try_lock();
     inline void unlock();
 
     [[nodiscard]] inline mutex_event<true> lock_shared();
+    [[nodiscard]] inline mutex_event<true> lock_shared(bool& notify);
     [[nodiscard]] inline bool try_lock_shared();
     inline void unlock_shared();
 
@@ -468,14 +470,14 @@ private:
     // protects waiters_, tracks information about lock
     std::atomic<latch_type> latch_ = 0;          // see mf_ constants
     // queue of events waiting for mutex; see `lock_impl`
-    std::deque<detail::event_handle> waiters_;
+    std::deque<std::pair<detail::event_handle, bool*>> waiters_;
 
     inline latch_type latch();
     inline void unlatch(latch_type);
     inline bool allow(bool shared, latch_type) const noexcept;
     inline bool waiter_shared(const detail::event_handle&) const noexcept;
     [[nodiscard]] inline latch_type notify_locked(latch_type);
-    void lock_impl(bool shared, detail::event_handle& ep);
+    void lock_impl(bool shared, detail::event_handle& ep, bool* notify);
     void unlock_impl(bool shared);
 };
 
@@ -498,7 +500,7 @@ public:
     unique_lock& operator=(const unique_lock&) = delete;
     inline ~unique_lock();
 
-    [[nodiscard]] inline task<> lock();
+    [[nodiscard]] inline mutex_event<false> lock();
     [[nodiscard]] inline bool try_lock();
     inline void unlock();
 
@@ -529,7 +531,7 @@ public:
     shared_lock& operator=(const shared_lock&) = delete;
     inline ~shared_lock();
 
-    [[nodiscard]] inline task<> lock();
+    [[nodiscard]] inline mutex_event<true> lock();
     [[nodiscard]] inline bool try_lock();
     inline void unlock();
 
