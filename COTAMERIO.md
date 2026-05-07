@@ -73,11 +73,11 @@ The `cotamer::read_once`, `cotamer::write_once`, `cotamer::read`, and
 `::write`.
 
 Transient errors (`EINTR`, `EAGAIN`, and `EWOULDBLOCK`) cause these functions to
-retry. On serious errors (anything else), the functions exit early. If any data
-had been transferred, they return a short count; but if the error occurred
-before data transfer, they return an error indication. The `*once` versions
-retry while blocked, while the others retry until all requested bytes are
-transferred (or end-of-file or error).
+retry. On serious errors (anything else), the functions exit early, returning
+either a short count (if any data has been transferred) or an error indication
+(if the error occurred before transfer). The `once` versions retry only while
+blocked; the others loop until all bytes are transferred (or end-of-file or
+error).
 
 These coroutines return a
 [`std::expected`](https://en.cppreference.com/cpp/utility/expected) object,
@@ -155,19 +155,24 @@ than returning an `ioresult`.
 
 To read and write the resulting sockets, prefer `cotamer::send` and
 `cotamer::recv`. Although `write` and `read` also work, the `send` and `recv`
-versions supply arguments useful for typical socket use; for instance, consider
-a socket whose remote peer has shut down; `write` to such a socket may kill the
-process via the `SIGPIPE` signal, while `send` just returns an error.
+versions supply arguments useful for typical socket use. For instance, if a
+socket’s remote peer has shut down, `write` might kill the process via the
+`SIGPIPE` signal, whereas `send` just returns an error.
+
+`cotamer::send` and `cotamer::recv` behave like the `send` and `recv` system
+calls: they retry only while blocked, rather than looping until all data is
+transferred. Use `send_all` or set `MSG_WAITALL` in `flags` to loop.
 
 Signatures:
 
 | Function | Description |
 |:---------|:------------|
-| `task<ioresult> send_once(fd, const void* buf, size_t count)` | Send to first success |
-| `task<ioresult> send(fd, const void* buf, size_t count)` | Send to completion |
-| `task<ioresult> sendv(fd, const iovec* iov, size_t iovcnt)` | Scatter-gather send to completion |
-| `task<ioresult> recv_once(fd, void* buf, size_t count)` | Receive to first success |
-| `task<ioresult> recv(fd, void* buf, size_t count)` | Receive to completion |
+| `task<ioresult> send(fd, const void* buf, size_t count)` | Send to first success |
+| `task<ioresult> send_all(fd, const void* buf, size_t count)` | Send to completion |
+| `task<ioresult> sendv_all(fd, const iovec* iov, size_t iovcnt)` | Scatter-gather send to completion |
+| `task<ioresult> sendmsg(fd, const msghdr* msg, int flags)` | Send message |
+| `task<ioresult> recv(fd, void* buf, size_t count)` | Receive to first success |
+| `task<ioresult> recvmsg(fd, msghdr* msg, int flags)` | Receive message |
 | `task<> connect(fd, const sockaddr*, socklen_t)` | Connect client socket to address |
 | `task<fd> accept(fd)` | Accept new nonblocking socket from listening fd |
 
@@ -203,11 +208,11 @@ cot::task<> echo_server() {
 cot::task<> handle_connection(cot::fd f) {
     char buf[4096];
     while (true) {
-        auto n = co_await cot::recv_once(f, buf, sizeof(buf));
+        auto n = co_await cot::recv(f, buf, sizeof(buf));
         if (!n || *n == 0) {
             break;
         }
-        co_await cot::send(f, buf, *n);
+        co_await cot::send_all(f, buf, *n);
     }
 }
 ```
@@ -257,11 +262,11 @@ struct lockable_fd {
 
 cot::task<> write_message(lockable_fd& lfd, std::string message) {
     cot::unique_lock guard(co_await lfd.mutex);
-    // critical section — automatically unlocked when guard goes out of scope
-    // or coroutine is destroyed. `cot::send` may suspend internally on
+    // Critical section. `cot::send_all` may suspend internally on
     // `writable(lfd.f)`; the guard keeps interleaved writes from other
     // coroutines from corrupting our message across those suspensions.
-    co_await cot::send(lfd.f, message.data(), message.size());
+    // The guard automatically unlocks the mutex when the coroutine exits.
+    co_await cot::send_all(lfd.f, message.data(), message.size());
 }
 ```
 
