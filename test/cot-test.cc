@@ -1234,6 +1234,56 @@ cot::task<> test_mutex_event_combinators() {
     std::cerr << "mutex_event_combinators: ok\n";
 }
 
+// TEST: race between event trigger and mutex unlock during cot::first.
+// In `co_await cot::first(ev, guard.lock())`, when `ev` triggers in the
+// same tick that another coroutine unlocks the mutex, `m.unlock()` grants
+// the lock to `guard.lock()`'s waiter (incrementing the latch and queuing
+// the lock() coroutine to resume), but `cot::first` may select `ev` as
+// winner and destroy the guard.lock() task before its `owned_ = true`
+// runs. The mutex's latch is never decremented — the mutex stays locked
+// forever, and the unique_lock destructor (owned_ == false) does nothing.
+//
+// Trigger order in this test: `ev.trigger()` first, then `m.unlock()` via
+// h's destructor. That puts cot::first ahead of guard.lock() in asap_, so
+// cot::first wakes first, picks ev, and tears down the still-suspended
+// guard.lock() — closing on the latch increment from notify_locked.
+cot::task<> test_unique_lock_first_race() {
+    cot::mutex m;
+    cot::event ev;
+
+    auto holder = [&]() -> cot::task<> {
+        cot::unique_lock h(co_await m.lock());
+        co_await cot::after(1h);
+        ev.trigger();           // queues cot::first via the quorum
+        // h goes out of scope here: ~unique_lock -> m.unlock() ->
+        // notify_locked grants the lock to guard.lock()'s waiter
+        // (latch incremented) and queues that coroutine in asap_.
+    };
+
+    auto racer = [&]() -> cot::task<> {
+        cot::unique_lock guard(m, std::defer_lock);
+        auto x = co_await cot::first(ev, guard.lock());
+        int winner_index = static_cast<int>(x.index());
+        // This should *always* be true, regardless of which won
+        assert(winner_index == 0 || guard.owns_lock());
+        // In this test, though, the `ev` should have won
+        assert(winner_index == 0);
+    };
+
+    auto ht = holder();
+    auto rt = racer();
+    co_await ht;
+    co_await rt;
+
+    // The mutex should be unlocked because it was only locked by guards. Bug:
+    // the mutex granted the lock, but the guard was never made aware of its
+    // ownership.
+    assert(m.try_lock());
+
+    std::cerr << "test_unique_lock_first_race: "
+              << (soft_assert_failed ? "FAIL (mutex leaked)" : "ok") << "\n";
+}
+
 // TEST: first() returns the earliest-completing task's result as a variant
 cot::task<int> first_slow() {
     co_await cot::after(10h);
@@ -2584,6 +2634,7 @@ int main(int argc, char* argv[]) {
     run("shared_lock_move", test_shared_lock_move);
     run("lock_errors", test_lock_errors);
     run("mutex_event_combinators", test_mutex_event_combinators);
+    run("unique_lock_first_race", test_unique_lock_first_race);
     run("first", test_first);
     run("first_immediate", test_first_immediate);
     run("first_last_wins", test_first_last_wins);
