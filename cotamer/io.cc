@@ -462,6 +462,19 @@ struct getaddrinfo_value {
         }
     }
 };
+
+struct getaddrinfo_error_category_impl : public std::error_category {
+public:
+    const char* name() const noexcept override { return "getaddrinfo"; }
+    std::string message(int value) const override {
+        return gai_strerror(value);
+    }
+};
+}
+
+const std::error_category& getaddrinfo_error_category() noexcept {
+    static getaddrinfo_error_category_impl c;
+    return c;
 }
 
 static void getaddrinfo_thread(std::string address,
@@ -493,7 +506,7 @@ task<cotamer::fd> tcp_listen(std::string address, int backlog) {
     std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
     co_await notifier;
     if (res->status != 0) {
-        throw std::runtime_error(gai_strerror(res->status));
+        throw std::system_error(std::error_code(res->status, getaddrinfo_error_category()));
     }
 
     // `getaddrinfo` can return multiple addresses (e.g., IPv4 and IPv6);
@@ -540,7 +553,7 @@ task<cotamer::fd> tcp_connect(std::string address) {
     std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
     co_await notifier;
     if (res->status) {
-        throw std::runtime_error(gai_strerror(res->status));
+        throw std::system_error(std::error_code(res->status, getaddrinfo_error_category()));
     }
 
     // try each address in turn
@@ -558,6 +571,97 @@ task<cotamer::fd> tcp_connect(std::string address) {
 #endif
         int flag = 1;
         setsockopt(fileno, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+        cotamer::fd f(fileno);
+        try {
+            co_await connect(f, ai->ai_addr, ai->ai_addrlen);
+            co_return std::move(f);
+        } catch (...) {
+            last_err = std::current_exception();
+        }
+    }
+    std::rethrow_exception(last_err);
+}
+
+
+// Create a UDP socket bound to `address`. Unlike TCP there is no `listen()`
+// for UDP; the returned descriptor is ready to receive datagrams from any
+// peer (use `recvfrom`/`recvmsg` to capture the sender's address) and to
+// send replies (use `sendto`/`sendmsg`). Throws on error.
+
+task<cotamer::fd> udp_listen(std::string address) {
+    auto res = std::make_shared<getaddrinfo_value>();
+    res->hints.ai_family = AF_UNSPEC;
+    res->hints.ai_socktype = SOCK_DGRAM;
+    res->hints.ai_flags = AI_PASSIVE;
+
+    event notifier;
+    driver_guard guard;
+    std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
+    co_await notifier;
+    if (res->status != 0) {
+        throw std::system_error(std::error_code(res->status, getaddrinfo_error_category()));
+    }
+
+    int last_errno = EADDRNOTAVAIL;
+    for (auto ai = res->ai; ai; ai = ai->ai_next) {
+        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fileno < 0) {
+            last_errno = errno;
+            continue;
+        }
+
+        set_nonblocking(fileno);
+#ifdef SO_NOSIGPIPE
+        set_no_sigpipe(fileno);
+#endif
+        int flag = 1;
+        setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+        if (ai->ai_family == AF_INET6) {
+            setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
+        }
+
+        if (bind(fileno, ai->ai_addr, ai->ai_addrlen) == 0) {
+            co_return cotamer::fd(fileno);
+        }
+
+        last_errno = errno;
+        ::close(fileno);
+    }
+    throw std::system_error(last_errno, std::generic_category());
+}
+
+
+// Create a UDP socket connected to `address`. After connection, the socket
+// only accepts datagrams from that peer, and `send`/`recv` can be used
+// directly without needing to specify the destination on each call. Throws
+// on error.
+
+task<cotamer::fd> udp_connect(std::string address) {
+    auto res = std::make_shared<getaddrinfo_value>();
+    res->hints.ai_family = AF_UNSPEC;
+    res->hints.ai_socktype = SOCK_DGRAM;
+
+    event notifier;
+    driver_guard guard;
+    std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
+    co_await notifier;
+    if (res->status) {
+        throw std::system_error(std::error_code(res->status, getaddrinfo_error_category()));
+    }
+
+    std::exception_ptr last_err;
+    for (auto ai = res->ai; ai; ai = ai->ai_next) {
+        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fileno < 0) {
+            last_err = std::make_exception_ptr(errno_error());
+            continue;
+        }
+
+        set_nonblocking(fileno);
+#ifdef SO_NOSIGPIPE
+        set_no_sigpipe(fileno);
+#endif
 
         cotamer::fd f(fileno);
         try {
