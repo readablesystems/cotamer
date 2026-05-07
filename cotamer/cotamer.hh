@@ -378,12 +378,17 @@ inline task<ioresult> read_once(fd f, void* buf, size_t count);
 inline task<ioresult> write_once(fd f, const void* buf, size_t count);
 inline task<ioresult> read(fd f, void* buf, size_t count);
 inline task<ioresult> write(fd f, const void* buf, size_t count);
-task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt);
-inline task<ioresult> recv_once(fd f, void* buf, size_t count);
-inline task<ioresult> send_once(fd f, const void* buf, size_t count);
-inline task<ioresult> recv(fd f, void* buf, size_t count);
-inline task<ioresult> send(fd f, const void* buf, size_t count);
-task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt);
+task<ioresult> writev(fd f, const iovec* iov, size_t iovcnt);
+
+task<ioresult> recvmsg(fd f, msghdr* msg, int flags);
+task<ioresult> sendmsg(fd f, const msghdr* msg, int flags);
+inline task<ioresult> recv(fd f, void* buf, size_t count, int flags = 0);
+inline task<ioresult> send(fd f, const void* buf, size_t count, int flags = 0);
+inline task<ioresult> send_all(fd f, const void* buf, size_t count, int flags = 0);
+inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags = 0);
+[[deprecated("Use cot::recv")]] inline task<ioresult> recv_once(fd f, void* buf, size_t count);
+[[deprecated("Use cot::send")]] inline task<ioresult> send_once(fd f, const void* buf, size_t count);
+[[deprecated("Use cot::sendv_all")]] inline task<ioresult> sendv(fd f, const iovec* iov, size_t iovcnt);
 
 inline task<> connect(fd f, const struct sockaddr* addr, socklen_t len);
 inline task<fd> accept(fd listen_fd);

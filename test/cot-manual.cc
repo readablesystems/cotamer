@@ -323,11 +323,11 @@ cot::task<> pipe_echo() {
 cot::task<> handle_echo(cot::fd f) {
     char buf[4096];
     while (true) {
-        auto n = co_await cot::recv_once(f, buf, sizeof(buf));
+        auto n = co_await cot::recv(f, buf, sizeof(buf));
         if (!n || *n == 0) {
             break;
         }
-        co_await cot::send(f, buf, *n);
+        co_await cot::send_all(f, buf, *n);
     }
 }
 

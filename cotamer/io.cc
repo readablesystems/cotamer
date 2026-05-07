@@ -571,31 +571,48 @@ task<cotamer::fd> tcp_connect(std::string address) {
 }
 
 
+namespace {
+template <typename Iovcnt>
+inline void update_iovec(iovec*& iov, Iovcnt& iovcnt,
+                         std::vector<iovec>& iovcopy, size_t r) {
+    while (iovcnt > 0 && r >= iov->iov_len) {
+        r -= iov->iov_len;
+        ++iov;
+        --iovcnt;
+    }
+    if (r != 0) {
+        if (iovcopy.empty()) {
+            iovcopy.append_range(std::span(iov, iovcnt));
+            iov = iovcopy.data();
+        }
+        iov->iov_base = reinterpret_cast<char*>(iov->iov_base) + r;
+        iov->iov_len -= r;
+    }
+}
+
+inline bool msghdr_done(const msghdr* mh, size_t r) {
+    const iovec* iov = mh->msg_iov;
+    auto iovcnt = mh->msg_iovlen;
+    while (iovcnt > 0 && r >= iov->iov_len) {
+        r -= iov->iov_len;
+        ++iov;
+        --iovcnt;
+    }
+    return iovcnt <= 0;
+}
+}
+
+
 // Write all bytes in the `iovec`s, suspending as needed. Returns bytes
 // written.
-task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt) {
-    std::vector<struct iovec> iovcopy;
+task<ioresult> writev(fd f, const iovec* iov, size_t iovcnt) {
+    std::vector<iovec> iovcopy;
     size_t nw = 0;
     do {
         ssize_t r = ::writev(f.fileno(), iov, iovcnt);
         if (r > 0) {
             nw += r;
-            while (r > 0) {
-                if (size_t(r) >= iov->iov_len) {
-                    r -= iov->iov_len;
-                    ++iov;
-                    --iovcnt;
-                    continue;
-                }
-                if (iovcopy.empty()) {
-                    iovcopy.append_range(std::span(iov, iovcnt));
-                    iov = iovcopy.data();
-                }
-                struct iovec* xiov = const_cast<struct iovec*>(iov);
-                xiov->iov_base = reinterpret_cast<char*>(iov->iov_base) + r;
-                xiov->iov_len -= r;
-                r = 0;
-            }
+            update_iovec(const_cast<iovec*&>(iov), iovcnt, iovcopy, r);
         } else if (r == 0) {
             // This result is only expected if the original `count` was 0.
             // At other times, treat it like EOF on read.
@@ -612,37 +629,30 @@ task<ioresult> writev(fd f, const struct iovec* iov, size_t iovcnt) {
 }
 
 
-// Write all bytes in the `iovec`s, suspending as needed. Returns bytes
-// written.
-task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt) {
-    std::vector<struct iovec> iovcopy;
+// Send the message in `mh`. Suspends on EAGAIN. If `flags & MSG_WAITALL`,
+// suspends as needed until all bytes in `mh->msg_iov` are written (or error);
+// this should be used only on connected sockets (e.g., TCP). Returns bytes
+// written or error code.
+
+task<ioresult> sendmsg(fd f, const msghdr* mh, int flags) {
     size_t nw = 0;
-    struct msghdr mh{};
-    mh.msg_iov = const_cast<struct iovec*>(iov);
-    mh.msg_iovlen = iovcnt;
+    msghdr mhx;
+    std::vector<iovec> iovcopy;
+    int xflags = (flags & ~MSG_WAITALL) | MSG_DONTWAIT | MSG_NOSIGNAL;
     do {
-        ssize_t r = ::sendmsg(f.fileno(), &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (r > 0) {
+        ssize_t r = ::sendmsg(f.fileno(), mh, xflags);
+        if (r >= 0) {
             nw += r;
-            while (r > 0) {
-                if (size_t(r) >= mh.msg_iov->iov_len) {
-                    r -= mh.msg_iov->iov_len;
-                    ++mh.msg_iov;
-                    --mh.msg_iovlen;
-                    continue;
-                }
-                if (iovcopy.empty()) {
-                    iovcopy.append_range(std::span(mh.msg_iov, mh.msg_iovlen));
-                    mh.msg_iov = iovcopy.data();
-                }
-                mh.msg_iov->iov_base = reinterpret_cast<char*>(mh.msg_iov->iov_base) + r;
-                mh.msg_iov->iov_len -= r;
-                r = 0;
+            if (r == 0 || !(flags & MSG_WAITALL) || msghdr_done(mh, r)) {
+                break;
             }
-        } else if (r == 0) {
-            // This result is only expected if the original `count` was 0.
-            // At other times, treat it like EOF on read.
-            break;
+            if (mh != &mhx) {
+                mhx = msghdr{};
+                mhx.msg_iov = mh->msg_iov;
+                mhx.msg_iovlen = mh->msg_iovlen;
+                mh = &mhx;
+            }
+            update_iovec(mhx.msg_iov, mhx.msg_iovlen, iovcopy, r);
         } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             co_await writable(f);
         } else if (nw > 0) {
@@ -650,8 +660,44 @@ task<ioresult> sendv(fd f, const struct iovec* iov, size_t iovcnt) {
         } else {
             co_return std::unexpected(errno_code());
         }
-    } while (mh.msg_iovlen != 0);
+    } while (mh->msg_iovlen > 0);
     co_return nw;
+}
+
+
+// Receive the message to `mh`. Suspends on EAGAIN. If `flags & MSG_WAITALL`,
+// additionally suspends as needed until all bytes in `mh->msg_iov` are read (or
+// error); this should be used only on connected sockets (e.g., TCP). Returns
+// bytes read or error code.
+
+task<ioresult> recvmsg(fd f, msghdr* mh, int flags) {
+    size_t nr = 0;
+    msghdr mhx;
+    std::vector<iovec> iovcopy;
+    int xflags = (flags & ~MSG_WAITALL) | MSG_DONTWAIT;
+    do {
+        ssize_t r = ::recvmsg(f.fileno(), mh, xflags);
+        if (r >= 0) {
+            nr += r;
+            if (r == 0 || !(flags & MSG_WAITALL) || msghdr_done(mh, r)) {
+                break;
+            }
+            if (mh != &mhx) {
+                mhx = msghdr{};
+                mhx.msg_iov = mh->msg_iov;
+                mhx.msg_iovlen = mh->msg_iovlen;
+                mh = &mhx;
+            }
+            update_iovec(mhx.msg_iov, mhx.msg_iovlen, iovcopy, r);
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            co_await readable(f);
+        } else if (nr > 0) {
+            break;
+        } else {
+            co_return std::unexpected(errno_code());
+        }
+    } while (mh->msg_iovlen > 0);
+    co_return nr;
 }
 
 }
