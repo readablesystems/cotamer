@@ -170,8 +170,10 @@ Signatures:
 | `task<ioresult> send(fd, const void* buf, size_t count)` | Send to first success |
 | `task<ioresult> send_all(fd, const void* buf, size_t count)` | Send to completion |
 | `task<ioresult> sendv_all(fd, const iovec* iov, size_t iovcnt)` | Scatter-gather send to completion |
+| `task<ioresult> sendto(fd, const void* buf, size_t count, const sockaddr* addr, socklen_t)` | Send datagram to explicit destination |
 | `task<ioresult> sendmsg(fd, const msghdr* msg, int flags)` | Send message |
 | `task<ioresult> recv(fd, void* buf, size_t count)` | Receive to first success |
+| `task<ioresult> recvfrom(fd, void* buf, size_t count, sockaddr* addr, socklen_t*)` | Receive datagram and capture sender address |
 | `task<ioresult> recvmsg(fd, msghdr* msg, int flags)` | Receive message |
 | `task<> connect(fd, const sockaddr*, socklen_t)` | Connect client socket to address |
 | `task<fd> accept(fd)` | Accept new nonblocking socket from listening fd |
@@ -206,13 +208,63 @@ cot::task<> echo_server() {
 }
 
 cot::task<> handle_connection(cot::fd f) {
-    char buf[4096];
     while (true) {
+        char buf[4096];
         auto n = co_await cot::recv(f, buf, sizeof(buf));
         if (!n || *n == 0) {
             break;
         }
         co_await cot::send_all(f, buf, *n);
+    }
+}
+
+cot::task<> echo_client(std::string address, std::string message) {
+    auto f = co_await cot::tcp_connect(address);
+    co_await cot::send_all(f, message.data(), message.size());
+    char buf[4096];
+    auto n = co_await cot::recv(f, buf, sizeof(buf));
+    if (n) {
+        std::print("echo: {}\n", std::string_view(buf, *n));
+    }
+}
+```
+
+
+## UDP
+
+UDP is a datagram protocol: a socket returned by `cot::udp_listen` exchanges
+datagrams with any peer. Each `recvfrom` returns exactly one whole datagram
+and reports the sender’s address; `sendto` directs a reply back.
+
+| Function                                    | Description                               |
+|:--------------------------------------------|:------------------------------------------|
+| `task<fd> udp_listen(std::string address)`  | bind a UDP socket to `address`            |
+| `task<fd> udp_connect(std::string address)` | create a UDP socket connected to `address`; plain `send`/`recv` go to that peer |
+
+```cpp
+cot::task<> udp_echo_server() {
+    auto sock = co_await cot::udp_listen("127.0.0.1:9000");
+    while (true) {
+        sockaddr_storage src{};
+        socklen_t srclen = sizeof(src);
+        char buf[65536];
+        auto n = co_await cot::recvfrom(sock, buf, sizeof(buf),
+                                        reinterpret_cast<sockaddr*>(&src), &srclen);
+        if (!n) {
+            break;
+        }
+        co_await cot::sendto(sock, buf, *n,
+                             reinterpret_cast<sockaddr*>(&src), srclen);
+    }
+}
+
+cot::task<> udp_echo_client(std::string address, std::string message) {
+    auto sock = co_await cot::udp_connect(address);
+    co_await cot::send(sock, message.data(), message.size());
+    char buf[65536];
+    auto n = co_await cot::recv(sock, buf, sizeof(buf));
+    if (n) {
+        std::print("echo: {}\n", std::string_view(buf, *n));
     }
 }
 ```

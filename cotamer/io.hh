@@ -210,10 +210,10 @@ inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags
 }
 
 
-// Receive a single datagram of up to `count` bytes, capturing the sender's
-// address into `*addr`. On entry, `*addrlen` is the capacity of `addr`; on
-// return, it holds the actual address length. Suspends on EAGAIN. Returns
-// bytes read or error code.
+// Receive a message of up to `count` bytes, capturing the sender's address
+// into `*addr`. On entry, `*addrlen` is the capacity of `addr`; on return, it
+// holds the actual address length. Suspends on EAGAIN. Returns bytes read or
+// error code.
 
 inline task<ioresult> recvfrom(fd f, void* buf, size_t count,
                                sockaddr* addr, socklen_t* addrlen, int flags) {
@@ -305,6 +305,9 @@ inline task<fd> accept(fd listen_fd) {
     }
 }
 
+
+// Accepts a connection from a TCP socket. In addition to `cotamer::accept`,
+// this function sets the TCP_NODELAY option.
 
 inline task<fd> tcp_accept(fd listen_fd) {
     auto f = co_await accept(listen_fd);

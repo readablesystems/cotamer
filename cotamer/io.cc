@@ -493,6 +493,12 @@ static void getaddrinfo_thread(std::string address,
     notifier.trigger();
 }
 
+
+// Create a TCP socket passively listening on `address`, which should follow
+// the pattern `ADDR:PORT`. If `ADDR` is empty, accepts connections from any
+// address; if nonempty, accepts connections only from the specified address.
+// Throws on error.
+
 task<cotamer::fd> tcp_listen(std::string address, int backlog) {
     // DNS lookup can block, so do it on a separate thread
     auto res = std::make_shared<getaddrinfo_value>();
@@ -542,6 +548,10 @@ task<cotamer::fd> tcp_listen(std::string address, int backlog) {
     throw std::system_error(last_errno, std::generic_category());
 }
 
+
+// Create a TCP socket actively connected to `address`, which should follow
+// the pattern `ADDR:PORT`. Throws on error.
+
 task<cotamer::fd> tcp_connect(std::string address) {
     auto res = std::make_shared<getaddrinfo_value>();
     res->hints.ai_family = AF_UNSPEC;
@@ -584,10 +594,10 @@ task<cotamer::fd> tcp_connect(std::string address) {
 }
 
 
-// Create a UDP socket bound to `address`. Unlike TCP there is no `listen()`
-// for UDP; the returned descriptor is ready to receive datagrams from any
-// peer (use `recvfrom`/`recvmsg` to capture the sender's address) and to
-// send replies (use `sendto`/`sendmsg`). Throws on error.
+// Create a UDP socket passively bound to `address`, which should follow the
+// pattern `ADDR:PORT`. The returned descriptor is ready to receive datagrams
+// from any peer (use `recvfrom`/`recvmsg` to capture the sender’s address)
+// and to send replies (use `sendto`/`sendmsg`). Throws on error.
 
 task<cotamer::fd> udp_listen(std::string address) {
     auto res = std::make_shared<getaddrinfo_value>();
@@ -632,10 +642,10 @@ task<cotamer::fd> udp_listen(std::string address) {
 }
 
 
-// Create a UDP socket connected to `address`. After connection, the socket
-// only accepts datagrams from that peer, and `send`/`recv` can be used
-// directly without needing to specify the destination on each call. Throws
-// on error.
+// Create a UDP socket actively connected to `address`. After connection, the
+// socket only accepts datagrams from that peer, and `send`/`recv` can be used
+// directly without needing to specify the destination on each call. Throws on
+// error.
 
 task<cotamer::fd> udp_connect(std::string address) {
     auto res = std::make_shared<getaddrinfo_value>();

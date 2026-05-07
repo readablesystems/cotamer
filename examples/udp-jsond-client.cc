@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 namespace cot = cotamer;
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 namespace {
 
@@ -39,16 +39,11 @@ struct jsond_response {
 cot::task<jsond_response> rpc(cot::fd sock, std::string method,
                                  std::string path, json body = {}) {
     json req = {{"method", method}, {"path", path}};
-    if (!body.is_null()) {
-        req["body"] = std::move(body);
+    if (body.is_object()) {
+        req.update(body);
     }
     std::string out = req.dump();
-
-    std::print(std::cout, "{} {}", method, path);
-    if (req.contains("body")) {
-        std::print(std::cout, " {}", req["body"].dump());
-    }
-    std::print("\n");
+    std::print("→ {}\n", out);
 
     auto sr = co_await cot::send(sock, out.data(), out.size());
     if (!sr) {
@@ -61,12 +56,11 @@ cot::task<jsond_response> rpc(cot::fd sock, std::string method,
         throw std::system_error(rr.error());
     }
 
-    json resp = json::parse(std::string_view(buf.data(), *rr));
-    unsigned status = resp.value("status", 0u);
-    json rbody = resp.value("body", json());
-    std::print("→ {} {}\n", status, rbody.dump());
+    std::string_view in(buf.data(), *rr);
+    std::print("← {}\n", in);
 
-    co_return jsond_response{status, std::move(rbody)};
+    json resp = json::parse(in);
+    co_return jsond_response{resp.value("status", 0U), std::move(resp)};
 }
 
 

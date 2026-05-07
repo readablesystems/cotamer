@@ -2,21 +2,20 @@
   examples/udp-jsond.cc
      A UDP-based companion to `jsond.cc`. Same in-memory “notes” API, but
      each request and response is a single UDP datagram carrying a JSON
-     payload. There is no HTTP, no keepalive, and no per-connection task —
-     a single coroutine receives every datagram on one socket and replies
-     to the sender directly.
+     payload.
 
      Wire format:
-       request  = JSON object {"method": <str>, "path": <str>, "body": <obj?>}
-       response = JSON object {"status": <int>, "body": <any>}
+       request: JSON object {"method": <str>, "path": <str>, ...}
+       response: JSON object {"status": <int>, ...}
 
      Methods are the same strings as in HTTP ("GET", "POST", "PUT",
-     "DELETE"); the path looks like the jsond URLs. `body` is optional on
-     methods that don't need it.
+     "DELETE"); the path looks like the jsond URLs. Method-specific
+     parameters and response payload fields live as additional top-level
+     fields alongside `method`/`path` and `status`.
 
      Try it with `nc`:
        printf '{"method":"GET","path":"/notes"}' | nc -u -w1 localhost 11113
-       printf '{"method":"POST","path":"/notes","body":{"title":"hi","body":"x"}}' \
+       printf '{"method":"POST","path":"/notes","title":"hi","body":"x"}' \
            | nc -u -w1 localhost 11113
 
      Companion client is in `udp-jsond-client.cc`.
@@ -34,7 +33,7 @@
 #include <unistd.h>
 
 namespace cot = cotamer;
-using json = nlohmann::json;
+using json = nlohmann::ordered_json;
 
 
 namespace {
@@ -80,14 +79,17 @@ private:
 };
 
 
-// Build a response object: `{"status": ..., "body": ...}`. Mirrors
-// jsond's `make_response`/`error_response` helpers.
-static json make_response(unsigned status, json body) {
-    return json{{"status", status}, {"body", std::move(body)}};
+// Build a response object: `"status"` plus payload fields. `payload` must
+// be a JSON object; its keys appear at the top level of the response
+// alongside `status`.
+static json make_response(unsigned status, json payload) {
+    json out = {{"status", status}};
+    out.update(payload);
+    return out;
 }
 
 static json error_response(unsigned status, std::string_view msg) {
-    return make_response(status, json{{"error", msg}, {"status", status}});
+    return json{{"status", status}, {"error", msg}};
 }
 
 
@@ -106,7 +108,7 @@ static bool parse_note_id(std::string_view path, uint64_t& out) {
 
 
 static json handle(const std::string& method, const std::string& path,
-                   const json& body, notes_db& db) {
+                   const json& req, notes_db& db) {
     if (path == "/notes") {
         if (method == "GET") {
             json arr = json::array();
@@ -116,13 +118,12 @@ static json handle(const std::string& method, const std::string& path,
             return make_response(200, json{{"notes", std::move(arr)}});
         }
         if (method == "POST") {
-            if (!body.is_object()
-                || !body.contains("title") || !body["title"].is_string()
-                || !body.contains("body")  || !body["body"].is_string()) {
-                return error_response(400, "expected body {\"title\": string, \"body\": string}");
+            if (!req.contains("title") || !req["title"].is_string()
+                || !req.contains("body") || !req["body"].is_string()) {
+                return error_response(400, "expected \"title\" and \"body\" string fields");
             }
-            note& n = db.create(body["title"].get<std::string>(),
-                                body["body"].get<std::string>());
+            note& n = db.create(req["title"].get<std::string>(),
+                                req["body"].get<std::string>());
             return make_response(201, json(n));
         }
         return error_response(405, "method not allowed on /notes");
@@ -141,16 +142,13 @@ static json handle(const std::string& method, const std::string& path,
             if (!n) {
                 return error_response(404, "no such note");
             }
-            if (!body.is_object()) {
-                return error_response(400, "expected JSON object body");
-            }
-            if (auto it = body.find("title"); it != body.end()) {
+            if (auto it = req.find("title"); it != req.end()) {
                 if (!it->is_string()) {
                     return error_response(400, "title must be a string");
                 }
                 n->title = it->get<std::string>();
             }
-            if (auto it = body.find("body"); it != body.end()) {
+            if (auto it = req.find("body"); it != req.end()) {
                 if (!it->is_string()) {
                     return error_response(400, "body must be a string");
                 }
@@ -210,14 +208,12 @@ static json process_datagram(std::string_view payload, notes_db& db) {
         return error_response(400, std::string("invalid JSON: ") + e.what());
     }
     if (!req.is_object()
-        || !req.contains("method") || !req["method"].is_string()
-        || !req.contains("path")   || !req["path"].is_string()) {
+        || !req.contains("path")
+        || !req["path"].is_string()
+        || (req.contains("method") && !req["method"].is_string())) {
         return error_response(400, "expected {\"method\": string, \"path\": string, ...}");
     }
-    auto method = req["method"].get<std::string>();
-    auto path   = req["path"].get<std::string>();
-    json body   = req.value("body", json());
-    return handle(method, path, body, db);
+    return handle(req.value("method", "GET"), req["path"].get<std::string>(), req, db);
 }
 
 
@@ -226,7 +222,8 @@ static json process_datagram(std::string_view payload, notes_db& db) {
 //   2. Decode/dispatch synchronously.
 //   3. sendto the reply back to the sender.
 // Send errors and parse errors are logged but don't kill the loop.
-cot::task<> serve(cot::fd sock, notes_db& db) {
+cot::task<> serve(std::string address, notes_db& db) {
+    cotamer::fd sock = co_await cot::udp_listen(address);
     std::vector<char> buf(max_datagram);
     while (true) {
         sockaddr_storage src{};
@@ -244,10 +241,8 @@ cot::task<> serve(cot::fd sock, notes_db& db) {
         std::string out = resp.dump();
 
         if (verbose) {
-            std::print(std::cerr, "{} -> {} ({} bytes in, {} bytes out)\n",
-                       sockaddr_to_string(reinterpret_cast<sockaddr*>(&src), srclen),
-                       resp.value("/status"_json_pointer, json(0)).dump(),
-                       *r, out.size());
+            auto peer = sockaddr_to_string(reinterpret_cast<sockaddr*>(&src), srclen);
+            std::print(std::cerr, "{} ← {}\n{} → {}\n", peer, payload, peer, out);
         }
 
         auto sr = co_await cot::sendto(sock, out.data(), out.size(),
@@ -256,12 +251,6 @@ cot::task<> serve(cot::fd sock, notes_db& db) {
             std::print(std::cerr, "sendto: {}\n", sr.error().message());
         }
     }
-}
-
-
-cot::task<> start(std::string address, notes_db& db) {
-    auto sock = co_await cot::udp_listen(address);
-    co_await serve(std::move(sock), db);
 }
 
 
@@ -299,6 +288,6 @@ int main(int argc, char* argv[]) {
 
     notes_db db;
     cot::set_clock(cot::clock::real_time);
-    cot::task<> t = start(std::format("localhost:{}", port), db);
+    cot::task<> t = serve(std::format("localhost:{}", port), db);
     cot::loop();
 }

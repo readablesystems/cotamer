@@ -386,6 +386,8 @@ inline task<ioresult> recv(fd f, void* buf, size_t count, int flags = 0);
 inline task<ioresult> send(fd f, const void* buf, size_t count, int flags = 0);
 inline task<ioresult> send_all(fd f, const void* buf, size_t count, int flags = 0);
 inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags = 0);
+inline task<ioresult> recvfrom(fd f, void* buf, size_t count, sockaddr* addr, socklen_t* addrlen, int flags = 0);
+inline task<ioresult> sendto(fd f, const void* buf, size_t count, const sockaddr* addr, socklen_t addrlen, int flags = 0);
 [[deprecated("Use cot::recv")]] inline task<ioresult> recv_once(fd f, void* buf, size_t count);
 [[deprecated("Use cot::send")]] inline task<ioresult> send_once(fd f, const void* buf, size_t count);
 [[deprecated("Use cot::sendv_all")]] inline task<ioresult> sendv(fd f, const iovec* iov, size_t iovcnt);
@@ -399,12 +401,6 @@ inline task<fd> tcp_accept(fd listen_fd);
 
 task<fd> udp_listen(std::string address);
 task<fd> udp_connect(std::string address);
-inline task<ioresult> recvfrom(fd f, void* buf, size_t count,
-                               sockaddr* addr, socklen_t* addrlen,
-                               int flags = 0);
-inline task<ioresult> sendto(fd f, const void* buf, size_t count,
-                             const sockaddr* addr, socklen_t addrlen,
-                             int flags = 0);
 
 
 // mutex, mutex_event, unique_lock, shared_lock
