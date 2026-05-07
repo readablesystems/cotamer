@@ -18,6 +18,8 @@ targets = cot-test cot-test-threads cot-test-io cot-manual \
 	httpd jsond jsond-client jsond-curl-client \
 	cot-test-curl
 
+test_targets = cot-test cot-test-threads cot-test-io cot-manual ctconsensus
+
 all:
 	cmake -B $(BUILD) $(cmake_build)
 	cmake --build $(BUILD) $(cmake_verbose)
@@ -33,7 +35,9 @@ $(targets:%=$(BUILD)/%): $(BUILD)/%:
 	cmake -B $(BUILD) $(cmake_build)
 	cmake --build $(BUILD) --target $* $(cmake_verbose)
 
-check test: cot-test cot-test-threads cot-test-io cot-manual ctconsensus
+check test:
+	cmake -B $(BUILD) $(cmake_build)
+	cmake --build $(BUILD) --target $(test_targets) $(cmake_verbose)
 	$(BUILD)/cot-test
 	$(BUILD)/cot-test-threads
 	$(BUILD)/cot-test-io
