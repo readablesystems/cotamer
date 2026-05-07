@@ -19,7 +19,8 @@ targets = cot-test cot-test-threads cot-test-io cot-manual cot-benchmark \
 	ws-echo \
 	cot-test-curl cot-test-http cot-test-ws
 
-test_targets = cot-test cot-test-threads cot-test-io cot-manual ctconsensus
+test_targets = cot-test cot-test-threads cot-test-io cot-manual ctconsensus \
+	cot-test-curl cot-test-http cot-test-ws
 
 all:
 	cmake -B $(BUILD) $(cmake_build)
@@ -44,5 +45,8 @@ check test:
 	$(BUILD)/cot-test-io
 	$(BUILD)/cot-manual
 	$(BUILD)/ctconsensus -q -R 10000
+	$(BUILD)/cot-test-curl
+	$(BUILD)/cot-test-http
+	$(BUILD)/cot-test-ws
 
 .PHONY: all clean check test $(targets) $(targets:%=$(BUILD)/%)

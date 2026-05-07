@@ -33,9 +33,6 @@ struct http_opair {
     inline bool name_eq_case(const char* base, std::string_view str) const {
         return name_eq_case(base, str.data(), str.length());
     }
-    inline bool is_content_length(const char* base) const {
-        return name_eq_case(base, "content-length", 14);
-    }
 
     static inline bool case_eq_prefix(const char* s1, const char* s2, size_t len) {
         const char* e2 = s2 + len;
@@ -124,8 +121,10 @@ class http_message {
 public:
     typedef http_header_iterator header_iterator;
 
-    inline http_message(llhttp_method method = HTTP_GET,
-                        std::string url = std::string());
+    inline http_message();
+    inline http_message(llhttp_method method, std::string url = std::string());
+    inline http_message(std::string_view method, std::string url = std::string());
+    inline http_message(unsigned status_code);
     http_message(http_message&&) = default;
     http_message& operator=(http_message&&) = default;
     inline http_message(const http_message&);
@@ -145,15 +144,9 @@ public:
     inline const char* method_name() const;
 
     // Examine headers
-    inline bool has_header(const char* name) const;
-    inline bool has_header(const char* name, size_t name_length) const;
     inline bool has_header(std::string_view name) const;
-    inline header_iterator find_header(const char* name) const;
-    header_iterator find_header(const char* name, size_t name_length) const;
-    inline header_iterator find_header(std::string_view name) const;
-    inline std::string header(const char* name) const;
-    std::string header(const char* name, size_t name_length) const;
-    inline std::string header(std::string_view name) const;
+    header_iterator find_header(std::string_view name) const;
+    std::string header(std::string_view name) const;
     inline header_iterator header_begin() const;
     inline header_iterator header_end() const;
 
@@ -185,6 +178,8 @@ public:
     inline http_message& status_code(unsigned code);
     inline http_message& status_code(unsigned code, std::string message);
     inline http_message& method(llhttp_method method);
+    inline http_message& method(std::string_view method);
+    inline http_message& method_name(std::string_view method);
     inline http_message& url(std::string url);
     inline http_message& header(std::string key, std::string value);
     inline http_message& header(std::string key, size_t value);
@@ -197,6 +192,11 @@ public:
 #endif
 
     static const char* default_status_message(unsigned code);
+
+    // Deprecated accessors
+    [[deprecated]] inline bool has_header(const char* s, size_t count) const;
+    [[deprecated]] inline header_iterator find_header(const char* s, size_t count) const;
+    [[deprecated]] inline std::string header(const char* s, size_t count) const;
 
 private:
     enum {
@@ -276,6 +276,8 @@ public:
     // Release ownership of the underlying fd (e.g., for protocol upgrades)
     inline fd take_file();
 
+    static llhttp_method parse_method(std::string_view);
+
 private:
     static constexpr size_t bufsize = 8192;
 
@@ -312,9 +314,24 @@ private:
     inline void copy_parser_status(message_data& md);
 };
 
+inline http_message::http_message()
+    : major_(1), minor_(1), method_(HTTP_GET), error_(HPE_OK),
+      status_code_(200), upgrade_(0), has_body_(0) {
+}
+
 inline http_message::http_message(llhttp_method method, std::string url)
     : major_(1), minor_(1), method_(method), error_(HPE_OK),
       status_code_(200), upgrade_(0), has_body_(0), url_(std::move(url)) {
+}
+
+inline http_message::http_message(std::string_view method, std::string url)
+    : major_(1), minor_(1), method_(http_parser::parse_method(method)), error_(HPE_OK),
+      status_code_(200), upgrade_(0), has_body_(0), url_(std::move(url)) {
+}
+
+inline http_message::http_message(unsigned status_code)
+    : major_(1), minor_(1), method_(HTTP_GET), error_(HPE_OK),
+      status_code_(status_code), upgrade_(0), has_body_(0) {
 }
 
 inline http_message::http_message(const http_message& x)
@@ -400,31 +417,19 @@ inline constexpr const std::string& http_message::url() const {
 }
 
 inline bool http_message::has_header(const char* name, size_t length) const {
-    return find_header(name, length) != header_end();
-}
-
-inline bool http_message::has_header(const char* name) const {
-    return find_header(name) != header_end();
+    return find_header({name, length}) != header_end();
 }
 
 inline bool http_message::has_header(std::string_view name) const {
     return find_header(name) != header_end();
 }
 
-inline http_message::header_iterator http_message::find_header(const char* name) const {
-    return find_header(name, strlen(name));
+inline http_message::header_iterator http_message::find_header(const char* name, size_t length) const {
+    return find_header({name, length});
 }
 
-inline http_message::header_iterator http_message::find_header(std::string_view name) const {
-    return find_header(name.data(), name.length());
-}
-
-inline std::string http_message::header(const char* name) const {
-    return header(name, strlen(name));
-}
-
-inline std::string http_message::header(std::string_view name) const {
-    return header(name.data(), name.length());
+inline std::string http_message::header(const char* name, size_t length) const {
+    return header({name, length});
 }
 
 inline const std::string& http_message::body() const {
@@ -503,6 +508,16 @@ inline http_message& http_message::status_code(unsigned code, std::string messag
 
 inline http_message& http_message::method(llhttp_method method) {
     method_ = (unsigned) method;
+    return *this;
+}
+
+inline http_message& http_message::method(std::string_view method) {
+    method_ = (unsigned) http_parser::parse_method(method);
+    return *this;
+}
+
+inline http_message& http_message::method_name(std::string_view method) {
+    method_ = (unsigned) http_parser::parse_method(method);
     return *this;
 }
 

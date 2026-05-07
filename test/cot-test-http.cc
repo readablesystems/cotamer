@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 namespace cot = cotamer;
@@ -191,6 +192,106 @@ cot::task<> test_upgrade_residual() {
 }
 
 
+// The http_message(string_view, ...) constructor parses the method name into
+// an llhttp_method via http_parser::parse_method.
+cot::task<> test_method_string_ctor() {
+    {
+        cot::http_message m("GET", "/foo");
+        assert(m.ok());
+        assert(m.method() == HTTP_GET);
+        assert(std::strcmp(m.method_name(), "GET") == 0);
+        assert(m.url() == "/foo");
+        assert(m.http_major() == 1);
+        assert(m.http_minor() == 1);
+        assert(m.status_code() == 200);
+    }
+    {
+        cot::http_message m("POST", "/p");
+        assert(m.method() == HTTP_POST);
+        assert(m.url() == "/p");
+    }
+    {
+        cot::http_message m("PUT", "/q");
+        assert(m.method() == HTTP_PUT);
+    }
+    {
+        cot::http_message m("DELETE", "/r");
+        assert(m.method() == HTTP_DELETE);
+    }
+    {
+        cot::http_message m("HEAD", "/h");
+        assert(m.method() == HTTP_HEAD);
+    }
+    {
+        cot::http_message m("OPTIONS", "/o");
+        assert(m.method() == HTTP_OPTIONS);
+    }
+    {
+        cot::http_message m("PATCH", "/x");
+        assert(m.method() == HTTP_PATCH);
+    }
+    {
+        cot::http_message m("CONNECT", "example.com:443");
+        assert(m.method() == HTTP_CONNECT);
+        assert(m.url() == "example.com:443");
+    }
+
+    // Default URL argument.
+    {
+        cot::http_message m("GET");
+        assert(m.method() == HTTP_GET);
+        assert(m.url() == "");
+    }
+
+    // string_view that is not null-terminated and only views a prefix of a
+    // larger buffer must still parse correctly.
+    {
+        const char* buf = "GETSOMETHING";
+        std::string_view sv(buf, 3);
+        cot::http_message m(sv, "/y");
+        assert(m.method() == HTTP_GET);
+        assert(m.url() == "/y");
+    }
+
+    // A std::string overload selection check: passing a const char* should
+    // resolve to the string_view constructor (not, e.g., the unsigned status
+    // code constructor).
+    {
+        const char* name = "POST";
+        cot::http_message m(name, "/z");
+        assert(m.method() == HTTP_POST);
+        assert(m.url() == "/z");
+    }
+
+    // Unknown method names must throw std::invalid_argument.
+    auto expect_throw = [](std::string_view name) {
+        bool threw = false;
+        try {
+            cot::http_message m(name, "/");
+            (void) m;
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        assert(threw);
+    };
+    expect_throw("BOGUS");
+    expect_throw("FOO");
+    // Empty input is not a token.
+    expect_throw("");
+    // Token rule rejects '@' as a method-name character.
+    expect_throw("G@T");
+    // Whitespace and other non-tchar characters must be rejected, even when
+    // the leading bytes spell a valid method.
+    expect_throw("GET ");
+    expect_throw(" GET");
+    expect_throw("GET/foo");
+    expect_throw("GET\tFOO");
+
+    std::cerr << "method_string_ctor: ok\n";
+    co_return;
+}
+
+
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
 
@@ -200,7 +301,9 @@ int main(int argc, char* argv[]) {
         for (int i = 1; !found && i < argc; ++i) {
             found = std::strcmp(name, argv[i]) == 0;
         }
-        if (!found) return;
+        if (!found) {
+            return;
+        }
         ++ran;
         std::cerr << "=== " << name << " ===\n";
         fn().detach();
@@ -212,6 +315,7 @@ int main(int argc, char* argv[]) {
     run("pipelining_byte_by_byte", test_pipelining_byte_by_byte);
     run("pipelining_with_bodies", test_pipelining_with_bodies);
     run("upgrade_residual", test_upgrade_residual);
+    run("method_string_ctor", test_method_string_ctor);
 
     if (ran == 0) {
         std::cerr << "No matching tests\n";

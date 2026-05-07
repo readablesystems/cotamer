@@ -81,13 +81,10 @@ struct status_code_map_comparator {
         return a.code < b;
     }
 };
-}
 
-namespace cotamer {
-
-static constexpr uint8_t us_safe = 1;  // all URL-safe characters except ?
-static constexpr uint8_t us_hex = 2;
-static const uint8_t urlsafe[256] = {
+constexpr uint8_t us_safe = 1;  // all URL-safe characters except ?
+constexpr uint8_t us_hex = 2;
+const uint8_t urlsafe[256] = {
     /* 0x00-0x0F */ 0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
     /* 0x10-0x1F */ 0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0,
     /* 0x20-0x2F */ 0, 1, 0, 0, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 1,
@@ -100,6 +97,21 @@ static const uint8_t urlsafe[256] = {
                     1, 1, 1, 1, 1, 1, 1, 1,
     /* 0x70-0x7F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 0,
 };
+
+
+int parse_method_on_method_complete(llhttp_t*) {
+    return -1;
+}
+
+const llhttp_settings_t parse_method_settings = []{
+    llhttp_settings_t s{};
+    s.on_method_complete = parse_method_on_method_complete;
+    return s;
+}();
+
+}
+
+namespace cotamer {
 
 const llhttp_settings_t http_parser::settings = {
     .on_message_begin       = &http_parser::on_message_begin,
@@ -141,20 +153,20 @@ const char* http_message::default_status_message(unsigned code) {
     return llhttp_status_name((llhttp_status_t) code);
 }
 
-http_message::header_iterator http_message::find_header(const char* name, size_t length) const {
+http_message::header_iterator http_message::find_header(std::string_view name) const {
     auto it = header_begin(), end = header_end();
-    while (it != end && !it.name_eq_case(name, length)) {
+    while (it != end && !it.name_eq_case(name)) {
         ++it;
     }
     return it;
 }
 
-std::string http_message::header(const char* name, size_t length) const {
+std::string http_message::header(std::string_view name) const {
     std::string result;
     bool any = false;
     auto it = header_begin(), end = header_end();
     while (it != end) {
-        if (it.name_eq_case(name, length)) {
+        if (it.name_eq_case(name)) {
             if (any) {
                 result += ", ";
                 result += it.value();
@@ -330,6 +342,22 @@ std::string_view http_message::search_param(std::string_view name) const {
         ++it;
     }
     return std::string_view{};
+}
+
+
+llhttp_method http_parser::parse_method(std::string_view s) {
+    llhttp_t hp;
+    llhttp_init(&hp, HTTP_REQUEST, &parse_method_settings);
+    llhttp_errno_t err = llhttp_execute(&hp, s.data(), s.size());
+    const char space[] = " ";
+    if (err == HPE_OK) {
+        err = llhttp_execute(&hp, space, 1);
+    }
+    if (err == HPE_CB_METHOD_COMPLETE
+        && (hp.error_pos == s.data() + s.size() || hp.error_pos == space)) {
+        return (llhttp_method) hp.method;
+    }
+    throw std::invalid_argument("unknown HTTP method");
 }
 
 
@@ -554,7 +582,7 @@ task<> http_parser::send_response(http_message m) {
     http_message::header_iterator connhdr;
     const char* data;
     if (should_keep_alive()
-        && (connhdr = m.find_header("connection", 10)) != m.header_end()
+        && (connhdr = m.find_header("connection")) != m.header_end()
         && (connhdr.value().length() == 5
             && (data = connhdr.value().data())
             && (data[0] == 'C' || data[0] == 'c')

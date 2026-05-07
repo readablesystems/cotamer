@@ -424,10 +424,8 @@ cot::task<> http_connection(cot::fd cfd) {
 
 ### http_message
 
-A default-constructed `http_message` is a `GET /` request with HTTP/1.1 and
-status 200; pass `(method, url)` to construct otherwise. `http_message` uses
-[“fluent” accessors](https://en.wikipedia.org/wiki/Fluent_interface) to set
-parameters:
+HTTP requests and responses are represented by the `http_message` type.
+`http_message` uses [“fluent” accessors](https://en.wikipedia.org/wiki/Fluent_interface) to set parameters:
 
 ```cpp
 cot::http_message res;
@@ -436,15 +434,17 @@ res.status_code(200)
     .body("hello\n");
 ```
 
-| Member                              | Returns                                         |
-|:------------------------------------|:------------------------------------------------|
-| `method()`, `method_name()`         | request method                                  |
-| `status_code()`                     | response status                                 |
-| `url()`                             | full request URL                                |
-| `path()`                            | URL path part (no `?...` or `#...`)             |
-| `body()`                            | message body                                    |
-| `header_begin/end()`                | iterate over headers; each iterator has `.name()` and `.value()` |
-| `search_param_begin/end()`          | iterate over `?key=value` parameters            |
+| Member                              | Accesses                              | Message type | Mode       |
+|:------------------------------------|:--------------------------------------|:-------------|:-----------|
+| `method()`, `method_name()`         | request method                        | Request      | Read/write |
+| `status_code()`                     | response status code (e.g. 200, 404)  | Response     | Read/write |
+| `url()`                             | request URL                           | Request      | Read/write |
+| `body()`                            | message body                          | Any          | Read/write |
+| `header(key, value)`                | header                                | Any          | Write      |
+| `header(key)`                       | header by name                        | Any          | Read       |
+| `path()`                            | URL path part (no `?...` or `#...`)   | Request      | Read       |
+| `header_begin/end()`                | iterate over headers; each iterator has `.name()` and `.value()` | Any | Read |
+| `search_param_begin/end()`          | iterate over `?key=value` parameters  | Request      | Read       |
 
 If `nlohmann::json` is enabled at build time, `http_message::body(const
 nlohmann::json&)` is also available; it serializes the JSON, sets the body,
