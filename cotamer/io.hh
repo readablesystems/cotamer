@@ -210,6 +210,46 @@ inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags
 }
 
 
+// Receive a single datagram of up to `count` bytes, capturing the sender's
+// address into `*addr`. On entry, `*addrlen` is the capacity of `addr`; on
+// return, it holds the actual address length. Suspends on EAGAIN. Returns
+// bytes read or error code.
+
+inline task<ioresult> recvfrom(fd f, void* buf, size_t count,
+                               sockaddr* addr, socklen_t* addrlen, int flags) {
+    struct msghdr mh{};
+    struct iovec iov[1];
+    iov[0].iov_base = buf;
+    iov[0].iov_len = count;
+    mh.msg_iov = iov;
+    mh.msg_iovlen = 1;
+    mh.msg_name = addr;
+    mh.msg_namelen = addrlen ? *addrlen : 0;
+    auto r = co_await recvmsg(std::move(f), &mh, flags);
+    if (addrlen) {
+        *addrlen = mh.msg_namelen;
+    }
+    co_return r;
+}
+
+
+// Send a single datagram of `count` bytes to `addr`. Suspends on EAGAIN.
+// Returns bytes written or error code.
+
+inline task<ioresult> sendto(fd f, const void* buf, size_t count,
+                             const sockaddr* addr, socklen_t addrlen, int flags) {
+    struct msghdr mh{};
+    struct iovec iov[1];
+    iov[0].iov_base = const_cast<void*>(buf);
+    iov[0].iov_len = count;
+    mh.msg_iov = iov;
+    mh.msg_iovlen = 1;
+    mh.msg_name = const_cast<sockaddr*>(addr);
+    mh.msg_namelen = addrlen;
+    co_return co_await sendmsg(std::move(f), &mh, flags);
+}
+
+
 // Deprecated (backward compatibility)
 
 inline task<ioresult> recv_once(fd f, void* buf, size_t count) {

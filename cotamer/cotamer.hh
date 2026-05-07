@@ -397,6 +397,15 @@ task<fd> tcp_listen(std::string address, int backlog = 128);
 task<fd> tcp_connect(std::string address);
 inline task<fd> tcp_accept(fd listen_fd);
 
+task<fd> udp_listen(std::string address);
+task<fd> udp_connect(std::string address);
+inline task<ioresult> recvfrom(fd f, void* buf, size_t count,
+                               sockaddr* addr, socklen_t* addrlen,
+                               int flags = 0);
+inline task<ioresult> sendto(fd f, const void* buf, size_t count,
+                             const sockaddr* addr, socklen_t addrlen,
+                             int flags = 0);
+
 
 // mutex, mutex_event, unique_lock, shared_lock
 //    Event-driven mutual exclusion for coroutines. `mutex` provides exclusive

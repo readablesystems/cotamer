@@ -304,6 +304,24 @@ if(COTAMER_HAVE_LLHTTP)
     )
 endif()
 
+if(COTAMER_HAVE_NLOHMANN_JSON)
+    add_executable(udp-jsond
+        examples/udp-jsond.cc
+        $<TARGET_OBJECTS:Cotamer>
+    )
+    target_link_libraries(udp-jsond PRIVATE
+        nlohmann_json::nlohmann_json
+    )
+
+    add_executable(udp-jsond-client
+        examples/udp-jsond-client.cc
+        $<TARGET_OBJECTS:Cotamer>
+    )
+    target_link_libraries(udp-jsond-client PRIVATE
+        nlohmann_json::nlohmann_json
+    )
+endif()
+
 # Optional libcurl integration
 if(COTAMER_HAVE_CURL)
     add_library(CotamerCurl OBJECT
