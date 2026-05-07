@@ -287,17 +287,17 @@ co_await m.lock();
 cot::unique_lock guard(m, std::adopt_lock);    // take ownership of existing lock
 ```
 
-Active attempts to lock a mutex may be cancelled by destroying the
-corresponding task. For instance, here, if the timeout fires, the `m.lock()`
-attempt is safely removed from the mutex’s queue:
+`guard.lock()` attempts may be safely cancelled, so `cot::first` or `cot::race`
+can add timeouts to lock requests. For instance, here, if the timeout fires
+first, the `m.lock()` attempt is safely removed from the mutex’s queue.
 
 ```cpp
-auto result = co_await cot::attempt(m.lock(), cot::after(1s));
-if (result) {
-    cot::unique_lock guard(*result);
+cot::unique_lock guard(m, std::defer_lock);
+co_await cot::first(guard.lock(), cot::after(1s));
+if (guard.owns_lock()) { // `if (guard)` would also work
     // acquired within 1 second
 } else {
-    // timed out — lock was not acquired; this coroutine loses its place in line
+    // timed out — lock was not acquired
 }
 ```
 
