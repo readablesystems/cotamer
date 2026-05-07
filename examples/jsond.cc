@@ -252,11 +252,11 @@ static cot::http_message handle(const cot::http_message& req, notes_db& db) {
 // This task holds the only reference to `cfd`, so when it returns, the file
 // descriptor will be closed.
 cot::task<> handle_connection(cot::fd cfd, notes_db& db) {
-    cot::http_parser hp(cot::http_parser::server);
+    cot::http_parser hp(cfd, cot::http::server);
     cot::event sends{nullptr};
     do {
         // receive request
-        auto req = co_await hp.receive(cfd);
+        auto req = co_await hp.receive();
         if (!hp.ok()) {
             break;
         }
@@ -268,7 +268,7 @@ cot::task<> handle_connection(cot::fd cfd, notes_db& db) {
         auto res = handle(req, db);
 
         // send response
-        auto task = hp.send(cfd, std::move(res));
+        auto task = hp.send(std::move(res));
         sends = cot::all(sends, task.resolution());
         task.detach();
     } while (hp.should_keep_alive());

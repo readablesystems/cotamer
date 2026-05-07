@@ -380,7 +380,7 @@ cot::task<> test_mutex_with_timeout() {
 
 cot::task<std::string> fetch_robots_txt(std::string host) {
     auto fd = co_await cot::tcp_connect(std::format("{}:80", host));
-    cot::http_parser hp(std::move(fd), cot::http_parser::client, host);
+    cot::http_parser hp(std::move(fd), cot::http::client, host);
     cot::http_message req(HTTP_GET, "/robots.txt");
     auto ticket = co_await hp.send_request(std::move(req));
     co_return (co_await hp.receive(std::move(ticket))).body();
@@ -393,7 +393,7 @@ cot::task<> test_fetch_robots() {
 }
 
 cot::task<> http_connection(cot::fd cfd) {
-    cot::http_parser hp(std::move(cfd), cot::http_parser::server);
+    cot::http_parser hp(std::move(cfd), cot::http::server);
     do {
         auto req = co_await hp.receive();
         if (!hp.ok()) {

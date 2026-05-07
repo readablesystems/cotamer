@@ -1,10 +1,12 @@
 #pragma once
 #include "cotamer/cotamer.hh"
+#include "cotamer/io.hh"
 #include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
+struct iovec;
 
 // cotamer/tls.hh
 //    Coroutine-driven TLS streams built on mbedtls.
@@ -73,12 +75,25 @@ private:
 
 class tls_stream {
 public:
+    // tls_stream is reference-counted, like cotamer::fd: copying produces a
+    // second handle to the same TLS session over the same underlying socket.
+    // The session and fd are torn down when the last handle goes away.
     tls_stream() = default;
-    tls_stream(tls_stream&&) noexcept;
-    tls_stream& operator=(tls_stream&&) noexcept;
-    tls_stream(const tls_stream&) = delete;
-    tls_stream& operator=(const tls_stream&) = delete;
-    ~tls_stream();
+    tls_stream(tls_stream&&) noexcept = default;
+    tls_stream& operator=(tls_stream&&) noexcept = default;
+    tls_stream(const tls_stream&) = default;
+    tls_stream& operator=(const tls_stream&) = default;
+    ~tls_stream() = default;
+
+    // Free-function I/O primitives (in namespace cotamer). These match the
+    // signatures of the fd-based primitives in `io.hh` — including taking
+    // the stream by value, so the coroutine frame's refcount bump keeps the
+    // session alive even if the caller's handle goes out of scope.
+    friend task<ioresult> recv_once(tls_stream, void*, size_t);
+    friend task<ioresult> recv(tls_stream, void*, size_t);
+    friend task<ioresult> send_once(tls_stream, const void*, size_t);
+    friend task<ioresult> send(tls_stream, const void*, size_t);
+    friend task<ioresult> sendv(tls_stream, const struct iovec*, size_t);
 
     // Wrap an already-connected fd in a TLS client stream. `hostname` is used
     // for SNI and certificate verification. Handshake is not performed;
@@ -96,15 +111,14 @@ public:
     task<size_t> write(const void* buf, size_t n);
     task<> shutdown();                                // sends close_notify
 
-    const fd& underlying() const noexcept { return f_; }
+    const fd& underlying() const noexcept;
     std::string_view alpn() const noexcept;           // negotiated protocol, or empty
 
     explicit operator bool() const noexcept { return impl_ != nullptr; }
 
 private:
     struct impl;
-    std::unique_ptr<impl> impl_;
-    fd f_;
+    std::shared_ptr<impl> impl_;
 };
 
 // Convenience: resolve address, connect, handshake.
@@ -114,5 +128,32 @@ task<tls_stream> tls_connect(std::string address,
 
 // Convenience: accept next incoming connection, handshake.
 task<tls_stream> tls_accept(const fd& listen_fd, const tls_context& ctx);
+
+// Free-function I/O on `tls_stream`. Declared in namespace `cotamer`, so
+// unqualified-call code (and ADL) finds them when given a `tls_stream`.
+// Stream is captured by value: the refcount bump keeps the TLS session
+// (and its underlying socket) alive across the coroutine's awaits.
+task<ioresult> recv_once(tls_stream s, void* buf, size_t n);
+task<ioresult> recv(tls_stream s, void* buf, size_t n);
+task<ioresult> send_once(tls_stream s, const void* buf, size_t n);
+task<ioresult> send(tls_stream s, const void* buf, size_t n);
+task<ioresult> sendv(tls_stream s, const struct iovec* iov, size_t iovcnt);
+
+// Aliases for the read/write naming family.
+inline task<ioresult> read_once(tls_stream s, void* buf, size_t n) {
+    return recv_once(std::move(s), buf, n);
+}
+inline task<ioresult> read(tls_stream s, void* buf, size_t n) {
+    return recv(std::move(s), buf, n);
+}
+inline task<ioresult> write_once(tls_stream s, const void* buf, size_t n) {
+    return send_once(std::move(s), buf, n);
+}
+inline task<ioresult> write(tls_stream s, const void* buf, size_t n) {
+    return send(std::move(s), buf, n);
+}
+inline task<ioresult> writev(tls_stream s, const struct iovec* iov, size_t iovcnt) {
+    return sendv(std::move(s), iov, iovcnt);
+}
 
 } // namespace cotamer

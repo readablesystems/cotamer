@@ -1,5 +1,9 @@
 #include "cotamer/cotamer.hh"
 #include "cotamer/tls.hh"
+#include "cotamer/config.hh"
+#if COTAMER_HAVE_LLHTTP
+# include "cotamer/http.hh"
+#endif
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +11,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <sys/uio.h>
 
 namespace cot = cotamer;
 using namespace std::chrono_literals;
@@ -163,6 +168,96 @@ cot::task<> test_alpn() {
 }
 
 
+// TEST: drive the I/O free-function family (recv_once, send, sendv) directly
+// against a tls_stream — the same primitives the http_parser/websocket
+// templates dispatch through.
+cot::task<> test_free_functions() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    auto server = [&]() -> cot::task<> {
+        auto sctx = cot::tls_context::make_server(test_cert_path,
+                                                  test_key_path);
+        auto lfd = co_await cot::tcp_listen(addr);
+        auto s = co_await cot::tls_accept(lfd, sctx);
+
+        char buf[64] = {};
+        auto nr = co_await cot::recv_once(s, buf, sizeof(buf));
+        assert(nr && *nr == 5);
+        assert(std::string(buf, *nr) == "PING\n");
+
+        // sendv: gather across two iovecs.
+        struct iovec iov[2];
+        iov[0] = {(void*) "PO", 2};
+        iov[1] = {(void*) "NG\n", 3};
+        auto nw = co_await cot::sendv(s, iov, 2);
+        assert(nw && *nw == 5);
+    };
+    server().detach();
+
+    co_await cot::after(5ms);
+
+    auto cctx = cot::tls_context::make_client();
+    cctx.add_ca_file(test_cert_path);
+    auto s = co_await cot::tls_connect(addr, "localhost", cctx);
+
+    auto sw = co_await cot::send(s, "PING\n", 5);
+    assert(sw && *sw == 5);
+
+    char buf[64] = {};
+    auto rr = co_await cot::recv(s, buf, 5);
+    assert(rr && *rr == 5);
+    assert(std::string(buf, 5) == "PONG\n");
+    std::cerr << "free_functions: ok\n";
+}
+
+
+#if COTAMER_HAVE_LLHTTP
+// TEST: drive http_parser end-to-end over a tls_stream. This exercises both
+// the new templated http_parser API and the cotamer::recv_once / cotamer::sendv
+// free functions for tls_stream.
+cot::task<> test_http_over_tls() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    auto server = [&]() -> cot::task<> {
+        auto sctx = cot::tls_context::make_server(test_cert_path,
+                                                  test_key_path);
+        auto lfd = co_await cot::tcp_listen(addr);
+        auto s = co_await cot::tls_accept(lfd, sctx);
+
+        cot::http_parser hp(cot::http_parser::server);
+        auto req = co_await hp.receive(s);
+        assert(hp.ok());
+        assert(req.method() == HTTP_GET);
+        assert(req.path() == "/hi");
+
+        cot::http_message res;
+        res.status_code(200)
+            .header("Content-Type", "text/plain")
+            .body("hello over tls\n");
+        co_await hp.send_response(s, std::move(res));
+    };
+    server().detach();
+
+    co_await cot::after(5ms);
+
+    auto cctx = cot::tls_context::make_client();
+    cctx.add_ca_file(test_cert_path);
+    auto s = co_await cot::tls_connect(addr, "localhost", cctx);
+
+    cot::http_parser hp(cot::http_parser::client, "localhost");
+    cot::http_message req(HTTP_GET, "/hi");
+    auto ticket = co_await hp.send_request(s, std::move(req));
+    auto res = co_await hp.receive(s, std::move(ticket));
+    assert(hp.ok());
+    assert(res.status_code() == 200);
+    assert(res.body() == "hello over tls\n");
+    std::cerr << "http_over_tls: ok\n";
+}
+#endif
+
+
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
     make_self_signed();
@@ -184,6 +279,10 @@ int main(int argc, char* argv[]) {
     run("handshake_and_io", test_handshake_and_io);
     run("bad_cert", test_bad_cert);
     run("alpn", test_alpn);
+    run("free_functions", test_free_functions);
+#if COTAMER_HAVE_LLHTTP
+    run("http_over_tls", test_http_over_tls);
+#endif
 
     if (ran == 0) {
         std::cerr << "No matching tests\n";

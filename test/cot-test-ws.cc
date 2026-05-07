@@ -21,8 +21,8 @@ uint16_t unique_port() {
 
 cot::task<> server_one(cot::fd cfd) {
     try {
-        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
-        auto req = co_await hp.receive();
+        cot::http_parser hp(cot::http_parser::server);
+        auto req = co_await hp.receive(cfd);
         if (!hp.ok()) {
             co_return;
         }
@@ -30,20 +30,20 @@ cot::task<> server_one(cot::fd cfd) {
         // writes a 400 itself if the request is malformed.
         if (req.has_header("upgrade")) {
             try {
-                auto ws = co_await cot::ws_upgrade(std::move(hp), req);
+                auto ws = co_await cot::ws_upgrade(hp, cfd, req);
                 while (true) {
-                    auto m = co_await ws.receive();
+                    auto m = co_await ws.receive(cfd);
                     if (std::holds_alternative<cot::ws_close>(m)) {
                         break;
                     }
                     auto& msg = std::get<cot::ws_message>(m);
                     if (msg.opcode == cot::ws_opcode::text) {
-                        co_await ws.send_text(msg.payload);
+                        co_await ws.send_text(cfd, msg.payload);
                     } else {
-                        co_await ws.send_binary(msg.payload);
+                        co_await ws.send_binary(cfd, msg.payload);
                     }
                 }
-                co_await ws.close();
+                co_await ws.close(cfd);
             } catch (const cot::ws_error&) {
                 // ws_upgrade already wrote the 400 response.
             }
@@ -51,7 +51,7 @@ cot::task<> server_one(cot::fd cfd) {
         }
         cot::http_message res;
         res.status_code(400).body("not a ws upgrade\n");
-        co_await hp.send_response(std::move(res));
+        co_await hp.send_response(cfd, std::move(res));
     } catch (const std::exception& e) {
         std::cerr << "server: exception: " << e.what() << "\n";
     } catch (...) {
@@ -67,29 +67,28 @@ cot::task<> run_server(std::string addr, cot::event done) {
 }
 
 // Echo server with a configurable accept_permessage_deflate.
-cot::task<> server_one_deflate(cot::fd cfd, bool accept_deflate) {
+cot::task<> server_one_deflate(cot::fd cfd, cot::ws_options server_opts) {
     try {
-        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
-        auto req = co_await hp.receive();
+        cot::http_parser hp(cot::http_parser::server);
+        auto req = co_await hp.receive(cfd);
         if (!hp.ok() || !req.has_header("upgrade")) {
             co_return;
         }
         try {
-            auto ws = co_await cot::ws_upgrade(std::move(hp), req, {},
-                                               accept_deflate);
+            auto ws = co_await cot::ws_upgrade(hp, cfd, req, {}, server_opts);
             while (true) {
-                auto m = co_await ws.receive();
+                auto m = co_await ws.receive(cfd);
                 if (std::holds_alternative<cot::ws_close>(m)) {
                     break;
                 }
                 auto& msg = std::get<cot::ws_message>(m);
                 if (msg.opcode == cot::ws_opcode::text) {
-                    co_await ws.send_text(msg.payload);
+                    co_await ws.send_text(cfd, msg.payload);
                 } else {
-                    co_await ws.send_binary(msg.payload);
+                    co_await ws.send_binary(cfd, msg.payload);
                 }
             }
-            co_await ws.close();
+            co_await ws.close(cfd);
         } catch (const cot::ws_error&) {}
     } catch (...) {}
 }
@@ -108,17 +107,17 @@ cot::task<> test_text_echo() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/");
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/");
+    co_await ws.handshake(cfd);
 
-    co_await ws.send_text("hello");
+    co_await ws.send_text(cfd, "hello");
 
-    auto m = co_await ws.receive();
+    auto m = co_await ws.receive(cfd);
     auto& msg = std::get<cot::ws_message>(m);
     assert(msg.opcode == cot::ws_opcode::text);
     assert(msg.payload == "hello");
 
-    co_await ws.close();
+    co_await ws.close(cfd);
 
     // Wait for server to clean up. Bound it.
     co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
@@ -137,22 +136,22 @@ cot::task<> test_binary_large() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/");
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/");
+    co_await ws.handshake(cfd);
 
     std::string payload;
     payload.resize(100 * 1024);
     for (size_t i = 0; i < payload.size(); ++i) {
         payload[i] = char(i & 0xff);
     }
-    co_await ws.send_binary(payload);
+    co_await ws.send_binary(cfd, payload);
 
-    auto m = co_await ws.receive();
+    auto m = co_await ws.receive(cfd);
     auto& msg = std::get<cot::ws_message>(m);
     assert(msg.opcode == cot::ws_opcode::binary);
     assert(msg.payload == payload);
 
-    co_await ws.close();
+    co_await ws.close(cfd);
     co_await cot::attempt(cot::task<>{server_done}, cot::after(2000ms));
     std::cerr << "binary_large: ok\n";
 }
@@ -168,11 +167,11 @@ cot::task<> test_server_close() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
-        auto req = co_await hp.receive();
-        auto ws = co_await cot::ws_upgrade(std::move(hp), req);
-        co_await ws.send_close(4321, "bye");
-        co_await ws.close();
+        cot::http_parser hp(cot::http_parser::server);
+        auto req = co_await hp.receive(cfd);
+        auto ws = co_await cot::ws_upgrade(hp, cfd, req);
+        co_await ws.send_close(cfd, 4321, "bye");
+        co_await ws.close(cfd);
         server_done.trigger();
     };
     server().detach();
@@ -180,16 +179,16 @@ cot::task<> test_server_close() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/");
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/");
+    co_await ws.handshake(cfd);
 
-    auto m = co_await ws.receive();
+    auto m = co_await ws.receive(cfd);
     auto* c = std::get_if<cot::ws_close>(&m);
     assert(c);
     assert(c->code == 4321);
     assert(c->reason == "bye");
 
-    co_await ws.close();
+    co_await ws.close(cfd);
     co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
     std::cerr << "server_close: ok\n";
 }
@@ -254,7 +253,7 @@ cot::task<> test_deflate_round_trip() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        co_await server_one_deflate(std::move(cfd), cot::ws_options::permessage_deflate);
         server_done.trigger();
     };
     server().detach();
@@ -262,21 +261,21 @@ cot::task<> test_deflate_round_trip() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, /*offer_deflate=*/true);
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/",
+                                          {}, cot::ws_options::permessage_deflate);
+    co_await ws.handshake(cfd);
     assert(ws.permessage_deflate_negotiated());
 
     // Round-trip a moderate, very-compressible message.
     std::string payload(8192, 'A');
-    co_await ws.send_text(payload);
+    co_await ws.send_text(cfd, payload);
 
-    auto m = co_await ws.receive();
+    auto m = co_await ws.receive(cfd);
     auto& msg = std::get<cot::ws_message>(m);
     assert(msg.opcode == cot::ws_opcode::text);
     assert(msg.payload == payload);
 
-    co_await ws.close();
+    co_await ws.close(cfd);
     co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
     std::cerr << "deflate_round_trip: ok\n";
 }
@@ -292,7 +291,7 @@ cot::task<> test_deflate_client_off() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        co_await server_one_deflate(std::move(cfd), cot::ws_options::permessage_deflate);
         server_done.trigger();
     };
     server().detach();
@@ -300,16 +299,16 @@ cot::task<> test_deflate_client_off() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, /*offer_deflate=*/false);
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/",
+                                          {}, cot::ws_options::none);
+    co_await ws.handshake(cfd);
     assert(!ws.permessage_deflate_negotiated());
 
-    co_await ws.send_text("hello uncompressed");
-    auto m = co_await ws.receive();
+    co_await ws.send_text(cfd, "hello uncompressed");
+    auto m = co_await ws.receive(cfd);
     assert(std::get<cot::ws_message>(m).payload == "hello uncompressed");
 
-    co_await ws.close();
+    co_await ws.close(cfd);
     co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
     std::cerr << "deflate_client_off: ok\n";
 }
@@ -324,7 +323,7 @@ cot::task<> test_deflate_server_off() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/false);
+        co_await server_one_deflate(std::move(cfd), cot::ws_options::none);
         server_done.trigger();
     };
     server().detach();
@@ -332,17 +331,17 @@ cot::task<> test_deflate_server_off() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, /*offer_deflate=*/true);
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/",
+                                          {}, cot::ws_options::permessage_deflate);
+    co_await ws.handshake(cfd);
     assert(!ws.permessage_deflate_negotiated());
 
-    co_await ws.send_text("uncompressed despite client offer");
-    auto m = co_await ws.receive();
+    co_await ws.send_text(cfd, "uncompressed despite client offer");
+    auto m = co_await ws.receive(cfd);
     assert(std::get<cot::ws_message>(m).payload
            == "uncompressed despite client offer");
 
-    co_await ws.close();
+    co_await ws.close(cfd);
     co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
     std::cerr << "deflate_server_off: ok\n";
 }
@@ -358,7 +357,7 @@ cot::task<> test_deflate_multi_message() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        co_await server_one_deflate(std::move(cfd), cot::ws_options::permessage_deflate);
         server_done.trigger();
     };
     server().detach();
@@ -366,9 +365,9 @@ cot::task<> test_deflate_multi_message() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, true);
-    co_await ws.handshake();
+    auto ws = cot::ws_stream::make_client("localhost", "/",
+                                          {}, cot::ws_options::permessage_deflate);
+    co_await ws.handshake(cfd);
     assert(ws.permessage_deflate_negotiated());
 
     // Build a 200 KB highly-compressible binary payload (repeating pattern).
@@ -379,14 +378,14 @@ cot::task<> test_deflate_multi_message() {
     }
 
     for (int round = 0; round < 3; ++round) {
-        co_await ws.send_binary(payload);
-        auto m = co_await ws.receive();
+        co_await ws.send_binary(cfd, payload);
+        auto m = co_await ws.receive(cfd);
         auto& msg = std::get<cot::ws_message>(m);
         assert(msg.opcode == cot::ws_opcode::binary);
         assert(msg.payload == payload);
     }
 
-    co_await ws.close();
+    co_await ws.close(cfd);
     co_await cot::attempt(cot::task<>{server_done}, cot::after(2000ms));
     std::cerr << "deflate_multi_message: ok\n";
 }

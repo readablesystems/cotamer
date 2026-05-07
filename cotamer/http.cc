@@ -84,7 +84,130 @@ struct status_code_map_comparator {
 }
 
 namespace cotamer {
+namespace strings {
+bool ieq(const char* a, const char* b, size_t n) noexcept {
+    for (; n != 0; ++a, ++b, --n) {
+        char ac = *a, bc = *b;
+        if (ac >= 'A' && ac <= 'Z') {
+            ac += 32;
+        }
+        if (bc >= 'A' && bc <= 'Z') {
+            bc += 32;
+        }
+        if (ac != bc) {
+            return false;
+        }
+    }
+    return true;
+}
 
+namespace {
+inline std::string_view trim_ows(std::string_view s) noexcept {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+}  // namespace
+
+// --- http_header_param_iterator -------------------------------------------------
+
+http_header_param_iterator::http_header_param_iterator(std::string_view rest) noexcept
+    : rest_(rest) {
+    ++*this;
+}
+
+http_header_param_iterator& http_header_param_iterator::operator++() noexcept {
+    while (true) {
+        // Skip leading separators and OWS.
+        while (!rest_.empty()
+               && (rest_.front() == ';'
+                   || rest_.front() == ' '
+                   || rest_.front() == '\t')) {
+            rest_.remove_prefix(1);
+        }
+        if (rest_.empty()) {
+            current_ = {};
+            return *this;
+        }
+        size_t semi = rest_.find(';');
+        std::string_view chunk = (semi == std::string_view::npos)
+            ? rest_ : rest_.substr(0, semi);
+        rest_ = (semi == std::string_view::npos)
+            ? std::string_view{} : rest_.substr(semi + 1);
+        chunk = trim_ows(chunk);
+        if (chunk.empty()) {
+            continue;        // ";;" — skip empty params
+        }
+        size_t eq = chunk.find('=');
+        if (eq == std::string_view::npos) {
+            current_.name = chunk;
+            current_.value = {};
+        } else {
+            current_.name = trim_ows(chunk.substr(0, eq));
+            current_.value = trim_ows(chunk.substr(eq + 1));
+        }
+        return *this;
+    }
+}
+
+// --- http_header_value ----------------------------------------------------------
+
+std::string_view http_header_value::name() const noexcept {
+    size_t semi = raw_.find(';');
+    return trim_ows(semi == std::string_view::npos
+                    ? raw_ : raw_.substr(0, semi));
+}
+
+http_header_param_range http_header_value::params() const noexcept {
+    size_t semi = raw_.find(';');
+    return http_header_param_range{
+        semi == std::string_view::npos
+            ? std::string_view{} : raw_.substr(semi + 1)
+    };
+}
+
+// --- http_header_value_iterator -------------------------------------------------
+
+http_header_value_iterator::http_header_value_iterator(std::string_view rest) noexcept
+    : rest_(rest) {
+    ++*this;
+}
+
+http_header_value_iterator& http_header_value_iterator::operator++() noexcept {
+    while (true) {
+        // Skip leading separators and OWS.
+        while (!rest_.empty()
+               && (rest_.front() == ','
+                   || rest_.front() == ' '
+                   || rest_.front() == '\t')) {
+            rest_.remove_prefix(1);
+        }
+        if (rest_.empty()) {
+            current_ = {};
+            return *this;
+        }
+        size_t comma = rest_.find(',');
+        std::string_view chunk = (comma == std::string_view::npos)
+            ? rest_ : rest_.substr(0, comma);
+        rest_ = (comma == std::string_view::npos)
+            ? std::string_view{} : rest_.substr(comma + 1);
+        chunk = trim_ows(chunk);
+        if (chunk.empty()) {
+            continue;        // ",," — skip
+        }
+        current_ = chunk;
+        return *this;
+    }
+}
+
+}
+
+
+namespace {
 static constexpr uint8_t us_safe = 1;  // all URL-safe characters except ?
 static constexpr uint8_t us_hex = 2;
 static const uint8_t urlsafe[256] = {
@@ -100,34 +223,37 @@ static const uint8_t urlsafe[256] = {
                     1, 1, 1, 1, 1, 1, 1, 1,
     /* 0x70-0x7F */ 1, 1, 1, 1, 1, 1, 1, 1,  1, 1, 1, 1, 1, 1, 1, 0,
 };
+}
 
-const llhttp_settings_t http_parser::settings = {
-    .on_message_begin       = &http_parser::on_message_begin,
+namespace http {
+const llhttp_settings_t parser_base::settings = {
+    .on_message_begin       = &parser_base::on_message_begin,
     .on_protocol            = nullptr,
-    .on_url                 = &http_parser::on_url,
-    .on_status              = &http_parser::on_status,
+    .on_url                 = &parser_base::on_url,
+    .on_status              = &parser_base::on_status,
     .on_method              = nullptr,
     .on_version             = nullptr,
-    .on_header_field        = &http_parser::on_header_field,
-    .on_header_value        = &http_parser::on_header_value,
+    .on_header_field        = &parser_base::on_header_field,
+    .on_header_value        = &parser_base::on_header_value,
     .on_chunk_extension_name = nullptr,
     .on_chunk_extension_value = nullptr,
-    .on_headers_complete    = &http_parser::on_headers_complete,
-    .on_body                = &http_parser::on_body,
-    .on_message_complete    = &http_parser::on_message_complete,
+    .on_headers_complete    = &parser_base::on_headers_complete,
+    .on_body                = &parser_base::on_body,
+    .on_message_complete    = &parser_base::on_message_complete,
     .on_protocol_complete   = nullptr,
     .on_url_complete        = nullptr,
     .on_status_complete     = nullptr,
     .on_method_complete     = nullptr,
     .on_version_complete    = nullptr,
-    .on_header_field_complete = &http_parser::on_header_field_complete,
-    .on_header_value_complete = &http_parser::on_header_value_complete,
+    .on_header_field_complete = &parser_base::on_header_field_complete,
+    .on_header_value_complete = &parser_base::on_header_value_complete,
     .on_chunk_extension_name_complete = nullptr,
     .on_chunk_extension_value_complete = nullptr,
-    .on_chunk_header        = &http_parser::on_chunk_header,
+    .on_chunk_header        = &parser_base::on_chunk_header,
     .on_chunk_complete      = nullptr,
     .on_reset               = nullptr
 };
+}
 
 const char* http_message::default_status_message(unsigned code) {
     size_t ncodes = sizeof(default_status_codes) / sizeof(status_code_map);
@@ -141,20 +267,20 @@ const char* http_message::default_status_message(unsigned code) {
     return llhttp_status_name((llhttp_status_t) code);
 }
 
-http_message::header_iterator http_message::find_header(const char* name, size_t length) const {
+http_message::header_iterator http_message::find_header(std::string_view name) const {
     auto it = header_begin(), end = header_end();
-    while (it != end && !it.name_eq_case(name, length)) {
+    while (it != end && !it.name_ieq(name)) {
         ++it;
     }
     return it;
 }
 
-std::string http_message::header(const char* name, size_t length) const {
+std::string http_message::header(std::string_view name) const {
     std::string result;
     bool any = false;
     auto it = header_begin(), end = header_end();
     while (it != end) {
-        if (it.name_eq_case(name, length)) {
+        if (it.name_ieq(name)) {
             if (any) {
                 result += ", ";
                 result += it.value();
@@ -312,7 +438,7 @@ bool http_message::has_search_param(std::string_view name) const {
     const info_type& inf = info(info_params);
     auto it = inf.qpairs.begin(), end = inf.qpairs.end();
     while (it != end) {
-        if (it->name_eq(inf.qurl.data(), name)) {
+        if (it->name(inf.qurl.data()) == name) {
             return true;
         }
         ++it;
@@ -324,7 +450,7 @@ std::string_view http_message::search_param(std::string_view name) const {
     const info_type& inf = info(info_params);
     auto it = inf.qpairs.begin(), end = inf.qpairs.end();
     while (it != end) {
-        if (it->name_eq(inf.qurl.data(), name)) {
+        if (it->name(inf.qurl.data()) == name) {
             return std::string_view{inf.qurl.data() + it->value1, it->value2};
         }
         ++it;
@@ -333,29 +459,19 @@ std::string_view http_message::search_param(std::string_view name) const {
 }
 
 
-http_parser::http_parser(parser_type direction, std::string host)
+namespace http {
+parser_base::parser_base(parser_type direction, std::string host)
     : host_(std::move(host)) {
     auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
     llhttp_init(&hp_, hp_type, &settings);
 }
 
-http_parser::http_parser(fd f, parser_type direction, std::string host)
-    : f_(std::move(f)), host_(std::move(host)) {
-    auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
-    llhttp_init(&hp_, hp_type, &settings);
-}
-
-http_parser::http_parser(fd f, enum llhttp_type receive_type)
-    : f_(std::move(f)) {
-    llhttp_init(&hp_, receive_type, &settings);
-}
-
-void http_parser::clear() {
+void parser_base::clear() {
     llhttp_reset(&hp_);
     receive_buffer_.clear();
 }
 
-inline void http_parser::copy_parser_status(message_data& md) {
+inline void parser_base::copy_parser_status(message_data& md) {
     md.hm.major_ = hp_.http_major;
     md.hm.minor_ = hp_.http_minor;
     md.hm.status_code_ = hp_.status_code;
@@ -364,29 +480,29 @@ inline void http_parser::copy_parser_status(message_data& md) {
     md.hm.upgrade_ = hp_.upgrade;
 }
 
-inline http_parser* http_parser::get_parser(::llhttp_t* hp) {
-    return reinterpret_cast<http_parser*>(hp);
+inline parser_base* parser_base::get_parser(::llhttp_t* hp) {
+    return reinterpret_cast<parser_base*>(hp);
 }
 
-inline http_parser::message_data* http_parser::get_message_data(::llhttp_t* hp) {
+inline parser_base::message_data* parser_base::get_message_data(::llhttp_t* hp) {
     return static_cast<message_data*>(hp->data);
 }
 
-int http_parser::on_message_begin(::llhttp_t* hp) {
+int parser_base::on_message_begin(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->hm.clear();
     md->state = state_unknown;
     return 0;
 }
 
-int http_parser::on_url(::llhttp_t* hp, const char* s, size_t len) {
+int parser_base::on_url(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     md->hm.url_.append(s, len);
     md->state = state_unknown;
     return 0;
 }
 
-int http_parser::on_status(::llhttp_t* hp, const char* s, size_t len) {
+int parser_base::on_status(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     if (md->hm.major_ == 0) {
         get_parser(hp)->copy_parser_status(*md);
@@ -396,7 +512,7 @@ int http_parser::on_status(::llhttp_t* hp, const char* s, size_t len) {
     return 0;
 }
 
-int http_parser::on_header_field(::llhttp_t* hp, const char* s, size_t len) {
+int parser_base::on_header_field(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
@@ -406,7 +522,7 @@ int http_parser::on_header_field(::llhttp_t* hp, const char* s, size_t len) {
     return 0;
 }
 
-int http_parser::on_header_field_complete(::llhttp_t* hp) {
+int parser_base::on_header_field_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
@@ -414,19 +530,19 @@ int http_parser::on_header_field_complete(::llhttp_t* hp) {
     md->name2 = md->hm.headers_.length();
     md->hm.headers_.append(": ", 2);
     md->value1 = md->name2 + 2;
-    md->state = state_header_value;
+    md->state = state_http_header_value;
     return 0;
 }
 
-int http_parser::on_header_value(::llhttp_t* hp, const char* s, size_t len) {
+int parser_base::on_header_value(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     md->hm.headers_.append(s, len);
     return 0;
 }
 
-int http_parser::on_header_value_complete(::llhttp_t* hp) {
+int parser_base::on_header_value_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
-    if (md->state == state_header_value) {
+    if (md->state == state_http_header_value) {
         md->hm.hpairs_.emplace_back(md->name1, md->name2, md->value1, md->hm.headers_.length());
     }
     md->hm.headers_.append("\r\n", 2);
@@ -434,7 +550,7 @@ int http_parser::on_header_value_complete(::llhttp_t* hp) {
     return 0;
 }
 
-int http_parser::on_headers_complete(::llhttp_t* hp) {
+int parser_base::on_headers_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     get_parser(hp)->copy_parser_status(*md);
     if (md->hm.body_.capacity() < md->hm.body_.length() + hp->content_length) {
@@ -443,7 +559,7 @@ int http_parser::on_headers_complete(::llhttp_t* hp) {
     return 0;
 }
 
-int http_parser::on_chunk_header(::llhttp_t* hp) {
+int parser_base::on_chunk_header(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     if (md->hm.body_.capacity() < md->hm.body_.length() + hp->content_length) {
         md->hm.body_.reserve(md->hm.body_.length() + hp->content_length);
@@ -451,20 +567,20 @@ int http_parser::on_chunk_header(::llhttp_t* hp) {
     return 0;
 }
 
-int http_parser::on_body(::llhttp_t* hp, const char* s, size_t len) {
+int parser_base::on_body(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
     md->hm.body_.append(s, len);
     return 0;
 }
 
-int http_parser::on_message_complete(::llhttp_t* hp) {
+int parser_base::on_message_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->state = state_done;
     // Pause llhttp so receive() task can yield
     return HPE_PAUSED;
 }
 
-bool http_parser::receive_chunk(message_data& md, const char* buf, size_t sz) {
+bool parser_base::receive_chunk(message_data& md, const char* buf, size_t sz) {
     if (sz == 0) {
         hp_.error = md.hm.error_ = HPE_CLOSED_CONNECTION;
         return false;
@@ -503,7 +619,7 @@ bool http_parser::receive_chunk(message_data& md, const char* buf, size_t sz) {
     return false;
 }
 
-size_t http_parser::prepare_request(std::string& first, http_message& m, iovec* iov) {
+size_t parser_base::prepare_request(std::string& first, http_message& m, iovec* iov) {
     first = std::format("{} {} HTTP/{}.{}\r\n",
         m.method_name(), m.url(), m.http_major(), m.http_minor());
     if (!host_.empty()
@@ -527,13 +643,13 @@ size_t http_parser::prepare_request(std::string& first, http_message& m, iovec* 
     return iovcnt;
 }
 
-size_t http_parser::prepare_response(std::string& first, http_message& m, iovec* iov) {
+size_t parser_base::prepare_response(std::string& first, http_message& m, iovec* iov) {
     // If the response is marked `Connection: close`, then ensure
     // should_keep_alive() returns 0
     http_message::header_iterator connhdr;
     const char* data;
     if (should_keep_alive()
-        && (connhdr = m.find_header("connection", 10)) != m.header_end()
+        && (connhdr = m.find_header("connection")) != m.header_end()
         && (connhdr.value().length() == 5
             && (data = connhdr.value().data())
             && (data[0] == 'C' || data[0] == 'c')
@@ -568,6 +684,7 @@ size_t http_parser::prepare_response(std::string& first, http_message& m, iovec*
         ++iovcnt;
     }
     return iovcnt;
+}
 }
 
 #if COTAMER_HAVE_NLOHMANN_JSON

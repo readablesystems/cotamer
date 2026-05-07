@@ -6,6 +6,9 @@
 #if COTAMER_HAVE_ZLIB
 # include <zlib.h>
 #endif
+#if COTAMER_HAVE_MBEDTLS
+# include <psa/crypto.h>
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -21,6 +24,7 @@ namespace cotamer {
 // --- error -----------------------------------------------------------------
 
 namespace {
+
 const char* wslay_error_message(int err) {
     switch (err) {
     case WSLAY_ERR_WANT_READ:        return "want read";
@@ -35,20 +39,65 @@ const char* wslay_error_message(int err) {
     default:                         return "wslay error";
     }
 }
+
+class ws_error_category_impl : public std::error_category {
+public:
+    const char* name() const noexcept override { return "wslay"; }
+    std::string message(int value) const override {
+        return wslay_error_message(value);
+    }
+};
+
+const ws_error_category_impl& ws_error_category_singleton() {
+    static ws_error_category_impl c;
+    return c;
+}
+
 } // namespace
 
-ws_error::ws_error(int err)
-    : std::runtime_error(wslay_error_message(err)), err_(err) {
+const std::error_category& ws_error_category() noexcept {
+    return ws_error_category_singleton();
 }
-ws_error::ws_error(int err, const std::string& what)
-    : std::runtime_error(what), err_(err) {
+
+ws_error::ws_error(int wslay_err)
+    : std::system_error(std::error_code(wslay_err, ws_error_category_singleton())) {
+}
+ws_error::ws_error(int wslay_err, const std::string& what)
+    : std::system_error(std::error_code(wslay_err, ws_error_category_singleton()), what) {
 }
 
 
-// --- SHA-1 (RFC 3174 reference, public domain) -----------------------------
-// Steve Reid's well-known implementation, condensed.
+// --- SHA-1 -----------------------------------------------------------------
+//
+// Used only by `ws_compute_accept` for the WebSocket handshake. When mbedtls
+// is available we defer to it; otherwise fall back to a small reference
+// implementation (Steve Reid's, RFC 3174, public domain).
 
 namespace {
+
+#if COTAMER_HAVE_MBEDTLS
+
+void sha1_oneshot(std::string_view a, std::string_view b, uint8_t out[20]) {
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    if (psa_hash_setup(&op, PSA_ALG_SHA_1) != PSA_SUCCESS
+        || psa_hash_update(&op,
+                           reinterpret_cast<const unsigned char*>(a.data()),
+                           a.size()) != PSA_SUCCESS
+        || psa_hash_update(&op,
+                           reinterpret_cast<const unsigned char*>(b.data()),
+                           b.size()) != PSA_SUCCESS) {
+        psa_hash_abort(&op);
+        throw ws_error(WSLAY_ERR_NOMEM, "psa_hash_update failed");
+    }
+    size_t hash_len = 0;
+    if (psa_hash_finish(&op, out, 20, &hash_len) != PSA_SUCCESS
+        || hash_len != 20) {
+        psa_hash_abort(&op);
+        throw ws_error(WSLAY_ERR_NOMEM, "psa_hash_finish failed");
+    }
+}
+
+#else
 
 struct sha1_state {
     uint32_t h[5];
@@ -83,10 +132,19 @@ void sha1_compress(sha1_state& s, const uint8_t* block) {
     uint32_t a = s.h[0], b = s.h[1], c = s.h[2], d = s.h[3], e = s.h[4];
     for (int i = 0; i < 80; ++i) {
         uint32_t f, k;
-        if (i < 20)      { f = (b & c) | ((~b) & d);          k = 0x5A827999; }
-        else if (i < 40) { f = b ^ c ^ d;                     k = 0x6ED9EBA1; }
-        else if (i < 60) { f = (b & c) | (b & d) | (c & d);   k = 0x8F1BBCDC; }
-        else             { f = b ^ c ^ d;                     k = 0xCA62C1D6; }
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6;
+        }
         uint32_t t = rol(a, 5) + f + e + k + w[i];
         e = d; d = c; c = rol(b, 30); b = a; a = t;
     }
@@ -128,6 +186,16 @@ void sha1_final(sha1_state& s, uint8_t out[20]) {
     }
 }
 
+void sha1_oneshot(std::string_view a, std::string_view b, uint8_t out[20]) {
+    sha1_state s;
+    sha1_init(s);
+    sha1_update(s, a.data(), a.size());
+    sha1_update(s, b.data(), b.size());
+    sha1_final(s, out);
+}
+
+#endif
+
 
 // --- Base64 ---------------------------------------------------------------
 
@@ -148,7 +216,9 @@ std::string base64_encode(const void* data, size_t n) {
     }
     if (i < n) {
         uint32_t v = uint32_t(p[i]) << 16;
-        if (i + 1 < n) v |= uint32_t(p[i+1]) << 8;
+        if (i + 1 < n) {
+            v |= uint32_t(p[i+1]) << 8;
+        }
         out.push_back(b64_chars[(v >> 18) & 0x3f]);
         out.push_back(b64_chars[(v >> 12) & 0x3f]);
         if (i + 1 < n) {
@@ -167,12 +237,10 @@ std::string base64_encode(const void* data, size_t n) {
 constexpr const char ws_magic[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 std::string ws_compute_accept(std::string_view key) {
-    sha1_state s;
-    sha1_init(s);
-    sha1_update(s, key.data(), key.size());
-    sha1_update(s, ws_magic, sizeof(ws_magic) - 1);
     uint8_t digest[20];
-    sha1_final(s, digest);
+    sha1_oneshot(key,
+                 std::string_view(ws_magic, sizeof(ws_magic) - 1),
+                 digest);
     return base64_encode(digest, 20);
 }
 
@@ -180,35 +248,12 @@ std::string ws_compute_accept(std::string_view key) {
 // --- header utilities ------------------------------------------------------
 
 bool header_contains_ci_token(std::string_view value, std::string_view token) {
-    auto match = [&](size_t pos) {
-        if (pos + token.size() > value.size()) return false;
-        for (size_t i = 0; i < token.size(); ++i) {
-            char a = value[pos + i], b = token[i];
-            if (a >= 'A' && a <= 'Z') a = a + 32;
-            if (b >= 'A' && b <= 'Z') b = b + 32;
-            if (a != b) return false;
+    for (auto v : strings::http_header_values(value)) {
+        if (strings::ieq(v.name(), token)) {
+            return true;
         }
-        char before = pos == 0 ? ',' : value[pos - 1];
-        char after = pos + token.size() == value.size()
-                     ? ',' : value[pos + token.size()];
-        auto sep = [](char c) { return c == ',' || c == ' ' || c == '\t'; };
-        return sep(before) && sep(after);
-    };
-    for (size_t i = 0; i + token.size() <= value.size(); ++i) {
-        if (match(i)) return true;
     }
     return false;
-}
-
-bool ieq(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        char ca = a[i], cb = b[i];
-        if (ca >= 'A' && ca <= 'Z') ca += 32;
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-        if (ca != cb) return false;
-    }
-    return true;
 }
 
 } // namespace
@@ -344,22 +389,22 @@ struct ws_state {
 
     // Inbound bytes pulled from the transport, awaiting wslay_event_recv()
     // consumption. recv_pos is the next byte to deliver.
-    std::vector<uint8_t> recv_buf;
+    std::string recv_buf;
     size_t recv_pos = 0;
     bool recv_eof = false;
 
     // Outbound bytes wslay has serialized but we haven't yet flushed to the
     // transport.
-    std::vector<uint8_t> send_buf;
+    std::string send_buf;
 
     // Completed messages (data + close), enqueued by on_msg_recv_callback
     // and consumed by receive().
     std::deque<std::variant<ws_message, ws_close>> msg_queue;
 
-    // permessage-deflate state. Allocated lazily when negotiation succeeds.
-    bool deflate_enabled = false;
-    bool inbound_no_context_takeover = false;
-    bool outbound_no_context_takeover = false;
+    // permessage-deflate state. The zlib streams are allocated lazily when
+    // negotiation succeeds; `options` carries the negotiated flags
+    // (permessage_deflate plus the takeover bits).
+    ws_options options = ws_options::none;
 #if COTAMER_HAVE_ZLIB
     std::unique_ptr<deflate_compressor> deflate_strm;
     std::unique_ptr<inflate_decompressor> inflate_strm;
@@ -404,7 +449,7 @@ ssize_t cb_recv(wslay_event_context_ptr ctx, uint8_t* buf, size_t len,
 ssize_t cb_send(wslay_event_context_ptr /*ctx*/, const uint8_t* data,
                 size_t len, int /*flags*/, void* user_data) {
     auto* s = static_cast<detail::ws_state*>(user_data);
-    s->send_buf.insert(s->send_buf.end(), data, data + len);
+    s->send_buf.append(reinterpret_cast<const char*>(data), len);
     return ssize_t(len);
 }
 
@@ -435,12 +480,18 @@ void cb_on_msg_recv(wslay_event_context_ptr ctx,
         m.opcode = arg->opcode == WSLAY_TEXT_FRAME ? ws_opcode::text
                                                    : ws_opcode::binary;
 #if COTAMER_HAVE_ZLIB
-        if ((arg->rsv & WSLAY_RSV1_BIT) && s->deflate_enabled
+        if ((arg->rsv & WSLAY_RSV1_BIT)
+            && !!(s->options & ws_options::permessage_deflate)
             && s->inflate_strm) {
+            // Inbound = peer's outbound: a server reads what the client sent
+            // (so client_no_context_takeover applies), and vice versa.
+            ws_options peer_flag = s->is_client
+                ? ws_options::server_no_context_takeover
+                : ws_options::client_no_context_takeover;
             try {
                 auto out = s->inflate_strm->decompress(
                     arg->msg, arg->msg_length,
-                    s->inbound_no_context_takeover);
+                    !!(s->options & peer_flag));
                 m.payload.assign(reinterpret_cast<const char*>(out.data()),
                                  out.size());
             } catch (...) {
@@ -475,300 +526,60 @@ const wslay_event_callbacks ws_event_callbacks = {
 } // namespace
 
 
-// --- transport adapters ----------------------------------------------------
-
-namespace detail {
-
-// Read up to n bytes from a transport. Returns 0 at EOF.
-inline task<ioresult> ws_xport_read(fd& f, void* buf, size_t n) {
-    co_return co_await read_once(f, buf, n);
-}
-inline task<ioresult> ws_xport_write(fd& f, const void* buf, size_t n) {
-    co_return co_await write(f, buf, n);
-}
-
-} // namespace detail
-
-
-// --- basic_ws_stream -------------------------------------------------------
-
-template <class Transport>
-basic_ws_stream<Transport>::basic_ws_stream(basic_ws_stream&&) noexcept = default;
-template <class Transport>
-basic_ws_stream<Transport>& basic_ws_stream<Transport>::operator=(basic_ws_stream&&) noexcept = default;
-template <class Transport>
-basic_ws_stream<Transport>::~basic_ws_stream() = default;
-
-template <class Transport>
-basic_ws_stream<Transport>::basic_ws_stream(Transport t, bool is_client)
-    : t_(std::move(t)),
-      state_(std::make_unique<detail::ws_state>()) {
-    state_->is_client = is_client;
-    int rv = is_client
-        ? wslay_event_context_client_init(&state_->ctx,
-                                          &ws_event_callbacks,
-                                          state_.get())
-        : wslay_event_context_server_init(&state_->ctx,
-                                          &ws_event_callbacks,
-                                          state_.get());
-    if (rv != 0) throw ws_error(rv);
-}
-
-template <class Transport>
-basic_ws_stream<Transport> basic_ws_stream<Transport>::wrap_client(
-    Transport t, std::string host, std::string path,
-    std::vector<std::string> subprotocols,
-    bool offer_permessage_deflate)
-{
-    basic_ws_stream s(std::move(t), /*is_client=*/true);
-    s.client_host_ = std::move(host);
-    s.client_path_ = std::move(path);
-    s.client_subprotocols_ = std::move(subprotocols);
-    s.client_offer_deflate_ = offer_permessage_deflate;
-    return s;
-}
-
-template <class Transport>
-basic_ws_stream<Transport> basic_ws_stream<Transport>::wrap_server(
-    Transport t, std::string residual,
-    bool permessage_deflate,
-    bool inbound_no_context_takeover,
-    bool outbound_no_context_takeover)
-{
-    basic_ws_stream s(std::move(t), /*is_client=*/false);
-    if (!residual.empty()) {
-        const auto* p = reinterpret_cast<const uint8_t*>(residual.data());
-        s.state_->recv_buf.assign(p, p + residual.size());
-    }
-#if COTAMER_HAVE_ZLIB
-    if (permessage_deflate) {
-        s.state_->deflate_enabled = true;
-        s.state_->inbound_no_context_takeover = inbound_no_context_takeover;
-        s.state_->outbound_no_context_takeover = outbound_no_context_takeover;
-        s.state_->deflate_strm = std::make_unique<detail::deflate_compressor>();
-        s.state_->inflate_strm = std::make_unique<detail::inflate_decompressor>();
-        wslay_event_config_set_allowed_rsv_bits(s.state_->ctx, WSLAY_RSV1_BIT);
-    }
-#else
-    (void) permessage_deflate;
-    (void) inbound_no_context_takeover;
-    (void) outbound_no_context_takeover;
-#endif
-    return s;
-}
-
-template <class Transport>
-bool basic_ws_stream<Transport>::is_open() const noexcept {
-    if (!state_) return false;
-    return wslay_event_get_read_enabled(state_->ctx)
-        || wslay_event_get_write_enabled(state_->ctx);
-}
-
-template <class Transport>
-bool basic_ws_stream<Transport>::permessage_deflate_negotiated() const noexcept {
-    return state_ && state_->deflate_enabled;
-}
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::pump_writes() {
-    if (!state_) co_return;
-    while (wslay_event_want_write(state_->ctx)) {
-        int rv = wslay_event_send(state_->ctx);
-        if (rv != 0) {
-            throw ws_error(rv);
-        }
-        if (state_->send_buf.empty()) {
-            break;
-        }
-        std::vector<uint8_t> tmp;
-        tmp.swap(state_->send_buf);
-        co_await detail::ws_xport_write(t_, tmp.data(), tmp.size());
-    }
-    if (!state_->send_buf.empty()) {
-        std::vector<uint8_t> tmp;
-        tmp.swap(state_->send_buf);
-        co_await detail::ws_xport_write(t_, tmp.data(), tmp.size());
-    }
-}
-
-template <class Transport>
-task<bool> basic_ws_stream<Transport>::pump_reads() {
-    if (!state_ || !wslay_event_get_read_enabled(state_->ctx)) {
-        co_return false;
-    }
-    // If we already have buffered bytes (e.g. left over from the handshake
-    // parse, or held over from a previous wslay_event_recv that produced a
-    // message and then would have woudblocked), drain them through wslay
-    // before doing another transport read.
-    if (state_->recv_buf.size() > state_->recv_pos) {
-        int rv = wslay_event_recv(state_->ctx);
-        if (rv != 0) {
-            throw ws_error(rv);
-        }
-        co_return true;
-    }
-    constexpr size_t bufsz = 8192;
-    uint8_t buf[bufsz];
-    auto n = co_await detail::ws_xport_read(t_, buf, bufsz);
-    if (!n || *n == 0) {
-        state_->recv_eof = true;
-        wslay_event_shutdown_read(state_->ctx);
-        co_return false;
-    }
-    state_->recv_buf.insert(state_->recv_buf.end(), buf, buf + *n);
-    int rv = wslay_event_recv(state_->ctx);
-    if (rv != 0) {
-        throw ws_error(rv);
-    }
-    co_return true;
-}
-
-template <class Transport>
-task<typename basic_ws_stream<Transport>::receive_result>
-basic_ws_stream<Transport>::receive() {
-    while (true) {
-        co_await pump_writes();
-
-        if (!state_->msg_queue.empty()) {
-            auto m = std::move(state_->msg_queue.front());
-            state_->msg_queue.pop_front();
-            co_return m;
-        }
-
-        if (!wslay_event_get_read_enabled(state_->ctx)
-            || state_->recv_eof) {
-            // Read side is done, no more messages will arrive. If we got a
-            // close frame it should already be on the queue; otherwise this
-            // is an abnormal close.
-            ws_close c;
-            c.code = wslay_event_get_close_received(state_->ctx)
-                ? wslay_event_get_status_code_received(state_->ctx)
-                : WSLAY_CODE_ABNORMAL_CLOSURE;
-            co_return c;
-        }
-
-        bool ok = co_await pump_reads();
-        if (!ok && state_->msg_queue.empty()) {
-            ws_close c;
-            c.code = wslay_event_get_close_received(state_->ctx)
-                ? wslay_event_get_status_code_received(state_->ctx)
-                : WSLAY_CODE_ABNORMAL_CLOSURE;
-            co_return c;
-        }
-    }
-}
+// --- helpers (anonymous, all non-template) ---------------------------------
 
 namespace {
 
 // Switch a ws_state into permessage-deflate mode. Allocates the zlib
 // streams and tells wslay to allow the RSV1 bit on incoming frames.
+// `takeover_flags` should carry the negotiated `*_no_context_takeover` bits
+// (the `permessage_deflate` bit is added unconditionally by this function).
 void enable_permessage_deflate(detail::ws_state* s,
-                               bool inbound_no_context_takeover,
-                               bool outbound_no_context_takeover) {
+                               ws_options takeover_flags) {
 #if COTAMER_HAVE_ZLIB
-    s->deflate_enabled = true;
-    s->inbound_no_context_takeover = inbound_no_context_takeover;
-    s->outbound_no_context_takeover = outbound_no_context_takeover;
+    s->options = takeover_flags | ws_options::permessage_deflate;
     s->deflate_strm = std::make_unique<detail::deflate_compressor>();
     s->inflate_strm = std::make_unique<detail::inflate_decompressor>();
     wslay_event_config_set_allowed_rsv_bits(s->ctx, WSLAY_RSV1_BIT);
 #else
     (void) s;
-    (void) inbound_no_context_takeover;
-    (void) outbound_no_context_takeover;
+    (void) takeover_flags;
     throw ws_error(WSLAY_ERR_INVALID_ARGUMENT,
                    "permessage-deflate requested but zlib is not available");
 #endif
 }
 
 // Parse a Sec-WebSocket-Extensions value, looking for permessage-deflate.
-// Returns true if found. On true, sets server_no_context_takeover and
-// client_no_context_takeover according to the parameters present.
+// Returns true if found. On true, sets `takeover` to the negotiated takeover
+// bits (subset of {server_no_context_takeover, client_no_context_takeover}).
 bool parse_extension_header(std::string_view header,
-                            bool& server_no_ctx_takeover,
-                            bool& client_no_ctx_takeover,
+                            ws_options& takeover,
                             bool& has_unknown_param) {
-    server_no_ctx_takeover = false;
-    client_no_ctx_takeover = false;
+    takeover = ws_options::none;
     has_unknown_param = false;
 
-    // The header may list several offers separated by commas. We only care
-    // about the first permessage-deflate occurrence.
-    size_t i = 0;
-    while (i < header.size()) {
-        // Skip leading whitespace.
-        while (i < header.size() && (header[i] == ' ' || header[i] == '\t')) ++i;
-        size_t end = header.find(',', i);
-        std::string_view ext = header.substr(
-            i, (end == std::string_view::npos ? header.size() : end) - i);
-        // Strip trailing whitespace.
-        while (!ext.empty() && (ext.back() == ' ' || ext.back() == '\t')) {
-            ext.remove_suffix(1);
+    for (auto v : strings::http_header_values(header)) {
+        if (!strings::ieq(v.name(), "permessage-deflate")) {
+            continue;
         }
-        // Split on ';'.
-        size_t semi = ext.find(';');
-        std::string_view name = ext.substr(0, semi);
-        // Trim whitespace.
-        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) {
-            name.remove_prefix(1);
-        }
-        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
-            name.remove_suffix(1);
-        }
-        if (ieq(name, "permessage-deflate")) {
-            // Walk the parameters.
-            size_t p = (semi == std::string_view::npos ? ext.size() : semi + 1);
-            while (p < ext.size()) {
-                while (p < ext.size() && (ext[p] == ' ' || ext[p] == '\t' || ext[p] == ';')) ++p;
-                size_t pend = p;
-                while (pend < ext.size() && ext[pend] != ';') ++pend;
-                std::string_view param = ext.substr(p, pend - p);
-                while (!param.empty()
-                       && (param.back() == ' ' || param.back() == '\t')) {
-                    param.remove_suffix(1);
-                }
-                // param is "name" or "name=value"; ignore values for the
-                // *_no_context_takeover parameters (they're standalone).
-                size_t eq = param.find('=');
-                std::string_view pname = param.substr(0, eq);
-                while (!pname.empty()
-                       && (pname.back() == ' ' || pname.back() == '\t')) {
-                    pname.remove_suffix(1);
-                }
-                if (ieq(pname, "server_no_context_takeover")) {
-                    server_no_ctx_takeover = true;
-                } else if (ieq(pname, "client_no_context_takeover")) {
-                    client_no_ctx_takeover = true;
-                } else if (ieq(pname, "server_max_window_bits")
-                           || ieq(pname, "client_max_window_bits")) {
-                    // We always use 15-bit windows. The standalone form (no
-                    // value) is informational only; with a value, the peer
-                    // is restricting the window size — we don't honor that
-                    // and would need to negotiate a smaller value. For now
-                    // accept the parameter (we still send 15-bit) but mark
-                    // it as unknown if the value is something other than 15.
-                    if (eq != std::string_view::npos) {
-                        std::string_view pval = param.substr(eq + 1);
-                        while (!pval.empty()
-                               && (pval.front() == ' ' || pval.front() == '\t')) {
-                            pval.remove_prefix(1);
-                        }
-                        while (!pval.empty()
-                               && (pval.back() == ' ' || pval.back() == '\t')) {
-                            pval.remove_suffix(1);
-                        }
-                        if (pval != "15") {
-                            has_unknown_param = true;
-                        }
-                    }
-                } else if (!pname.empty()) {
+        for (auto p : v.params()) {
+            if (strings::ieq(p.name, "server_no_context_takeover")) {
+                takeover |= ws_options::server_no_context_takeover;
+            } else if (strings::ieq(p.name, "client_no_context_takeover")) {
+                takeover |= ws_options::client_no_context_takeover;
+            } else if (strings::ieq(p.name, "server_max_window_bits")
+                       || strings::ieq(p.name, "client_max_window_bits")) {
+                // We always use 15-bit windows. The standalone form (no
+                // value) is informational; a value other than 15 is a
+                // window restriction we don't honor.
+                if (!p.value.empty() && p.value != "15") {
                     has_unknown_param = true;
                 }
-                p = pend + 1;
+            } else if (!p.name.empty()) {
+                has_unknown_param = true;
             }
-            return true;
         }
-        i = (end == std::string_view::npos ? header.size() : end + 1);
+        return true;
     }
     return false;
 }
@@ -778,9 +589,14 @@ bool parse_extension_header(std::string_view header,
 int queue_data_message(detail::ws_state* s, uint8_t opcode,
                        const void* data, size_t n) {
 #if COTAMER_HAVE_ZLIB
-    if (s->deflate_enabled && s->deflate_strm) {
+    if (!!(s->options & ws_options::permessage_deflate) && s->deflate_strm) {
+        // Outbound = our own side: server uses server_no_context_takeover,
+        // client uses client_no_context_takeover.
+        ws_options own_flag = s->is_client
+            ? ws_options::client_no_context_takeover
+            : ws_options::server_no_context_takeover;
         auto compressed = s->deflate_strm->compress(
-            data, n, s->outbound_no_context_takeover);
+            data, n, !!(s->options & own_flag));
         wslay_event_msg msg = {
             opcode, compressed.data(), compressed.size()
         };
@@ -793,81 +609,7 @@ int queue_data_message(detail::ws_state* s, uint8_t opcode,
     return wslay_event_queue_msg(s->ctx, &msg);
 }
 
-} // namespace
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_text(std::string_view payload) {
-    int rv = queue_data_message(state_.get(), WSLAY_TEXT_FRAME,
-                                payload.data(), payload.size());
-    if (rv != 0) throw ws_error(rv);
-    co_await pump_writes();
-}
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_binary(const void* data, size_t n) {
-    int rv = queue_data_message(state_.get(), WSLAY_BINARY_FRAME, data, n);
-    if (rv != 0) throw ws_error(rv);
-    co_await pump_writes();
-}
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_ping(std::string_view payload) {
-    wslay_event_msg msg = {
-        WSLAY_PING,
-        reinterpret_cast<const uint8_t*>(payload.data()),
-        payload.size()
-    };
-    int rv = wslay_event_queue_msg(state_->ctx, &msg);
-    if (rv != 0) throw ws_error(rv);
-    co_await pump_writes();
-}
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_pong(std::string_view payload) {
-    wslay_event_msg msg = {
-        WSLAY_PONG,
-        reinterpret_cast<const uint8_t*>(payload.data()),
-        payload.size()
-    };
-    int rv = wslay_event_queue_msg(state_->ctx, &msg);
-    if (rv != 0) throw ws_error(rv);
-    co_await pump_writes();
-}
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_close(uint16_t code,
-                                              std::string_view reason) {
-    int rv = wslay_event_queue_close(
-        state_->ctx, code,
-        reinterpret_cast<const uint8_t*>(reason.data()),
-        reason.size());
-    if (rv != 0 && rv != WSLAY_ERR_NO_MORE_MSG) {
-        throw ws_error(rv);
-    }
-    co_await pump_writes();
-}
-
-template <class Transport>
-task<> basic_ws_stream<Transport>::close() {
-    if (!state_) co_return;
-    if (!wslay_event_get_close_sent(state_->ctx)) {
-        co_await send_close(1000, "");
-    }
-    // Drain incoming traffic until peer sends close or transport EOFs.
-    while (wslay_event_get_read_enabled(state_->ctx)
-           && !wslay_event_get_close_received(state_->ctx)) {
-        bool ok = co_await pump_reads();
-        if (!ok) break;
-    }
-    co_await pump_writes();
-}
-
-
-// --- client handshake ------------------------------------------------------
-
-namespace {
-
-std::string make_random_key() {
+std::string make_random_key_impl() {
     uint8_t key[16];
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     for (size_t i = 0; i < 16; ++i) {
@@ -878,15 +620,219 @@ std::string make_random_key() {
 
 } // namespace
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::handshake() {
-    if (!state_ || !state_->is_client) {
-        throw ws_error(WSLAY_ERR_INVALID_ARGUMENT,
-                       "handshake() called on non-client ws_stream");
+
+// --- ws_stream (non-template) ----------------------------------------------
+
+ws_stream::ws_stream() = default;
+ws_stream::ws_stream(ws_stream&&) noexcept = default;
+ws_stream& ws_stream::operator=(ws_stream&&) noexcept = default;
+ws_stream::~ws_stream() = default;
+
+ws_stream ws_stream::make_client(std::string host, std::string path,
+                                 std::vector<std::string> subprotocols,
+                                 ws_options opts) {
+    ws_stream s;
+    s.state_ = std::make_unique<detail::ws_state>();
+    detail::ws_state_init(s.state_.get(), /*is_client=*/true);
+    s.client_host_ = std::move(host);
+    s.client_path_ = std::move(path);
+    s.client_subprotocols_ = std::move(subprotocols);
+    s.client_options_ = opts;
+    return s;
+}
+
+ws_stream ws_stream::make_server(std::string residual, ws_options opts) {
+    ws_stream s;
+    s.state_ = std::make_unique<detail::ws_state>();
+    detail::ws_state_init(s.state_.get(), /*is_client=*/false);
+    detail::ws_state_set_residual(s.state_.get(), residual);
+    if (!!(opts & ws_options::permessage_deflate)) {
+        detail::ws_state_enable_deflate(s.state_.get(), opts);
     }
+    return s;
+}
 
-    std::string key = make_random_key();
+bool ws_stream::is_open() const noexcept {
+    return state_ && detail::ws_state_is_open(state_.get());
+}
 
+bool ws_stream::permessage_deflate_negotiated() const noexcept {
+    return state_ && detail::ws_state_deflate_negotiated(state_.get());
+}
+
+
+// --- detail::ws_state_* helpers --------------------------------------------
+
+namespace detail {
+
+void ws_state_init(ws_state* s, bool is_client) {
+    s->is_client = is_client;
+    int rv = is_client
+        ? wslay_event_context_client_init(&s->ctx, &ws_event_callbacks, s)
+        : wslay_event_context_server_init(&s->ctx, &ws_event_callbacks, s);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+}
+
+void ws_state_set_residual(ws_state* s, std::string_view residual) {
+    s->recv_buf.append(residual);
+}
+
+void ws_state_enable_deflate(ws_state* s, ws_options takeover_flags) {
+    enable_permessage_deflate(s, takeover_flags);
+}
+
+bool ws_state_pump_writes_step(ws_state* s, std::string& out) {
+    out.clear();
+    if (!wslay_event_want_write(s->ctx)) {
+        // Even if want_write is false, there might be leftover bytes from
+        // the last wslay_event_send.
+        if (!s->send_buf.empty()) {
+            out.swap(s->send_buf);
+        }
+        return false;
+    }
+    int rv = wslay_event_send(s->ctx);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+    if (!s->send_buf.empty()) {
+        out.swap(s->send_buf);
+    }
+    return wslay_event_want_write(s->ctx) || !out.empty();
+}
+
+bool ws_state_drain_recv_buffer(ws_state* s) {
+    if (!wslay_event_get_read_enabled(s->ctx)) {
+        return false;
+    }
+    if (s->recv_buf.size() <= s->recv_pos) {
+        return false;
+    }
+    int rv = wslay_event_recv(s->ctx);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+    return true;
+}
+
+void ws_state_feed_recv(ws_state* s, const void* data, size_t n) {
+    s->recv_buf.append(static_cast<const char*>(data), n);
+    int rv = wslay_event_recv(s->ctx);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+}
+
+void ws_state_set_recv_eof(ws_state* s) {
+    s->recv_eof = true;
+    wslay_event_shutdown_read(s->ctx);
+}
+
+bool ws_state_pop_message(ws_state* s,
+                          std::variant<ws_message, ws_close>& out) {
+    if (s->msg_queue.empty()) {
+        return false;
+    }
+    out = std::move(s->msg_queue.front());
+    s->msg_queue.pop_front();
+    return true;
+}
+
+ws_close ws_state_make_close(ws_state* s) {
+    ws_close c;
+    c.code = wslay_event_get_close_received(s->ctx)
+        ? wslay_event_get_status_code_received(s->ctx)
+        : WSLAY_CODE_ABNORMAL_CLOSURE;
+    return c;
+}
+
+bool ws_state_read_done(ws_state* s) {
+    return !wslay_event_get_read_enabled(s->ctx) || s->recv_eof;
+}
+
+bool ws_state_close_received(ws_state* s) {
+    return wslay_event_get_close_received(s->ctx);
+}
+
+bool ws_state_close_sent(ws_state* s) {
+    return wslay_event_get_close_sent(s->ctx);
+}
+
+bool ws_state_is_open(ws_state* s) {
+    return wslay_event_get_read_enabled(s->ctx)
+        || wslay_event_get_write_enabled(s->ctx);
+}
+
+bool ws_state_deflate_negotiated(ws_state* s) {
+    return !!(s->options & ws_options::permessage_deflate);
+}
+
+void ws_state_queue_text(ws_state* s, std::string_view payload) {
+    int rv = queue_data_message(s, WSLAY_TEXT_FRAME,
+                                payload.data(), payload.size());
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+}
+
+void ws_state_queue_binary(ws_state* s, const void* data, size_t n) {
+    int rv = queue_data_message(s, WSLAY_BINARY_FRAME, data, n);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+}
+
+void ws_state_queue_ping(ws_state* s, std::string_view payload) {
+    wslay_event_msg msg = {
+        WSLAY_PING,
+        reinterpret_cast<const uint8_t*>(payload.data()),
+        payload.size()
+    };
+    int rv = wslay_event_queue_msg(s->ctx, &msg);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+}
+
+void ws_state_queue_pong(ws_state* s, std::string_view payload) {
+    wslay_event_msg msg = {
+        WSLAY_PONG,
+        reinterpret_cast<const uint8_t*>(payload.data()),
+        payload.size()
+    };
+    int rv = wslay_event_queue_msg(s->ctx, &msg);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
+}
+
+void ws_state_queue_close(ws_state* s, uint16_t code, std::string_view reason) {
+    int rv = wslay_event_queue_close(
+        s->ctx, code,
+        reinterpret_cast<const uint8_t*>(reason.data()),
+        reason.size());
+    // WSLAY_ERR_NO_MORE_MSG is benign here: a close has already been queued
+    // (perhaps by a handler), and queueing a second one is a no-op.
+    if (rv != 0 && rv != WSLAY_ERR_NO_MORE_MSG) {
+        throw ws_error(rv);
+    }
+}
+
+bool ws_state_is_client(ws_state* state) {
+    return state && state->is_client;
+}
+
+std::string ws_make_random_key() {
+    return make_random_key_impl();
+}
+
+std::string ws_build_client_request(std::string_view host,
+                                    std::string_view path,
+                                    std::string_view key,
+                                    const std::vector<std::string>& subprotocols,
+                                    ws_options client_opts) {
     std::string req = std::format(
         "GET {} HTTP/1.1\r\n"
         "Host: {}\r\n"
@@ -894,56 +840,42 @@ task<> basic_ws_stream<Transport>::handshake() {
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: {}\r\n"
         "Sec-WebSocket-Version: 13\r\n",
-        client_path_, client_host_, key);
-    if (!client_subprotocols_.empty()) {
+        path, host, key);
+    if (!subprotocols.empty()) {
         req += "Sec-WebSocket-Protocol: ";
-        for (size_t i = 0; i < client_subprotocols_.size(); ++i) {
+        for (size_t i = 0; i < subprotocols.size(); ++i) {
             if (i) req += ", ";
-            req += client_subprotocols_[i];
+            req += subprotocols[i];
         }
         req += "\r\n";
     }
 #if COTAMER_HAVE_ZLIB
-    if (client_offer_deflate_) {
-        // Offer with `client_max_window_bits` so a server that wants to
-        // restrict our window can do so by echoing a value.
+    if (!!(client_opts & ws_options::permessage_deflate)) {
         req += "Sec-WebSocket-Extensions: permessage-deflate; "
                "client_max_window_bits\r\n";
     }
+#else
+    (void) client_opts;
 #endif
     req += "\r\n";
+    return req;
+}
 
-    co_await detail::ws_xport_write(t_, req.data(), req.size());
-
-    // Parse the 101 response with http_parser. Today we only instantiate
-    // basic_ws_stream<fd>, so http_parser (which is fd-bound) suffices —
-    // wss:// (basic_ws_stream<tls_stream>) is a Phase 4 task and will
-    // require either specializing this method for fd or making http_parser
-    // transport-agnostic.
-    http_parser hp(t_, http_parser::client);
-    auto resp = co_await hp.receive();
-    if (!hp.ok()) {
-        throw ws_error(WSLAY_ERR_PROTO,
-                       std::string("ws handshake: parse error: ")
-                       + llhttp_errno_name(hp.error()));
-    }
-    if (resp.status_code() != 101) {
-        throw ws_error(WSLAY_ERR_PROTO,
-                       std::format("ws handshake: server returned {} {}",
-                                   resp.status_code(), resp.status_message()));
-    }
-
+void ws_validate_handshake_response(ws_state* state,
+                                    const http_message& resp,
+                                    std::string_view key,
+                                    ws_options client_opts) {
     bool saw_upgrade = false, saw_connection = false;
     std::string accept;
     std::string extensions;
     for (auto it = resp.header_begin(); it != resp.header_end(); ++it) {
-        if (it.name_eq_case("Upgrade")) {
-            saw_upgrade = ieq(it.value(), "websocket");
-        } else if (it.name_eq_case("Connection")) {
+        if (it.name_ieq("Upgrade")) {
+            saw_upgrade = strings::ieq(it.value(), "websocket");
+        } else if (it.name_ieq("Connection")) {
             saw_connection = header_contains_ci_token(it.value(), "upgrade");
-        } else if (it.name_eq_case("Sec-WebSocket-Accept")) {
+        } else if (it.name_ieq("Sec-WebSocket-Accept")) {
             accept.assign(it.value().data(), it.value().size());
-        } else if (it.name_eq_case("Sec-WebSocket-Extensions")) {
+        } else if (it.name_ieq("Sec-WebSocket-Extensions")) {
             extensions.assign(it.value().data(), it.value().size());
         }
     }
@@ -956,13 +888,12 @@ task<> basic_ws_stream<Transport>::handshake() {
         throw ws_error(WSLAY_ERR_PROTO,
                        "ws handshake: bad Sec-WebSocket-Accept");
     }
-
 #if COTAMER_HAVE_ZLIB
     if (!extensions.empty()) {
-        bool server_no_ctx = false, client_no_ctx = false, unknown = false;
-        if (parse_extension_header(extensions, server_no_ctx, client_no_ctx,
-                                   unknown)) {
-            if (!client_offer_deflate_) {
+        ws_options takeover = ws_options::none;
+        bool unknown = false;
+        if (parse_extension_header(extensions, takeover, unknown)) {
+            if (!(client_opts & ws_options::permessage_deflate)) {
                 throw ws_error(WSLAY_ERR_PROTO,
                                "ws handshake: server enabled an extension we "
                                "did not offer");
@@ -972,132 +903,65 @@ task<> basic_ws_stream<Transport>::handshake() {
                                "ws handshake: server selected unsupported "
                                "permessage-deflate parameters");
             }
-            // Client side: server's no-context-takeover affects our inbound
-            // (we inflate from server). Client's no-context-takeover affects
-            // our outbound (we deflate to server).
-            enable_permessage_deflate(state_.get(),
-                                      /*inbound_no_ctx=*/server_no_ctx,
-                                      /*outbound_no_ctx=*/client_no_ctx);
+            enable_permessage_deflate(state, takeover);
         }
     }
 #else
+    (void) state;
     (void) extensions;
+    (void) client_opts;
 #endif
-
-    // Stash any bytes that arrived alongside the 101 (a server might have
-    // piggybacked a frame on the same TCP segment) into wslay's recv buffer
-    // before we let it pull more from the transport.
-    std::string residual = std::move(hp.receive_buffer());
-    if (!residual.empty()) {
-        const auto* p = reinterpret_cast<const uint8_t*>(residual.data());
-        state_->recv_buf.insert(state_->recv_buf.end(),
-                                p, p + residual.size());
-    }
 }
 
-
-// --- explicit instantiations -----------------------------------------------
-
-template class basic_ws_stream<fd>;
-
-
-// --- server upgrade --------------------------------------------------------
-
-bool is_ws_upgrade_request(const http_message& req) {
-    if (req.method() != HTTP_GET) return false;
-    if (req.http_major() < 1 || (req.http_major() == 1 && req.http_minor() < 1)) {
-        return false;
-    }
-    auto upg = req.find_header("upgrade");
-    if (upg == req.header_end() || !ieq(upg.value(), "websocket")) return false;
-    auto conn = req.find_header("connection");
-    if (conn == req.header_end()
-        || !header_contains_ci_token(conn.value(), "upgrade")) return false;
-    auto key = req.find_header("sec-websocket-key");
-    if (key == req.header_end() || key.value().empty()) return false;
-    auto ver = req.find_header("sec-websocket-version");
-    if (ver == req.header_end() || ver.value() != "13") return false;
-    return true;
-}
-
-namespace {
-
-task<void> write_400(http_parser& hp, const std::string& reason) {
-    http_message res;
-    res.status_code(400)
-        .header("Connection", "close")
-        .header("Content-Type", "text/plain")
-        .body(reason + "\n");
-    hp.clear_should_keep_alive();
-    co_await hp.send_response(std::move(res));
-}
-
-} // namespace
-
-task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
-                           std::vector<std::string> subprotocols,
-                           bool accept_permessage_deflate) {
-    if (!is_ws_upgrade_request(req)) {
-        co_await write_400(hp, "Bad WebSocket upgrade request");
-        throw ws_error(WSLAY_ERR_PROTO, "bad ws upgrade request");
-    }
-
+std::string ws_build_server_response(const http_message& req,
+                                     const std::vector<std::string>& subprotocols,
+                                     ws_options server_opts,
+                                     ws_options& negotiated_out) {
     std::string key{req.find_header("sec-websocket-key").value()};
     std::string accept = ws_compute_accept(key);
 
-    // Pick a subprotocol if both sides support one.
+    // Pick a subprotocol if both sides support one. Subprotocol tokens are
+    // case-sensitive per RFC 6455.
     std::string chosen_subprotocol;
     if (!subprotocols.empty()) {
         auto offered = req.find_header("sec-websocket-protocol");
         if (offered != req.header_end()) {
-            std::string_view all = offered.value();
-            size_t i = 0;
-            while (i < all.size() && chosen_subprotocol.empty()) {
-                while (i < all.size() && (all[i] == ' ' || all[i] == ',')) ++i;
-                size_t j = i;
-                while (j < all.size() && all[j] != ',') ++j;
-                size_t end = j;
-                while (end > i && (all[end-1] == ' ' || all[end-1] == '\t')) --end;
-                std::string_view tok(all.data() + i, end - i);
+            for (auto v : strings::http_header_values(offered.value())) {
+                bool matched = false;
                 for (auto& sup : subprotocols) {
-                    if (tok == sup) {
+                    if (v.name() == sup) {
                         chosen_subprotocol = sup;
+                        matched = true;
                         break;
                     }
                 }
-                i = j + 1;
+                if (matched) {
+                    break;
+                }
             }
         }
     }
 
-    // Decide whether to negotiate permessage-deflate.
-    bool deflate_negotiated = false;
-    bool deflate_inbound_no_ctx = false;
-    bool deflate_outbound_no_ctx = false;
+    negotiated_out = ws_options::none;
 #if COTAMER_HAVE_ZLIB
-    if (accept_permessage_deflate) {
+    if (!!(server_opts & ws_options::permessage_deflate)) {
         auto offered = req.find_header("sec-websocket-extensions");
         if (offered != req.header_end()) {
-            bool server_no_ctx = false, client_no_ctx = false, unknown = false;
-            if (parse_extension_header(offered.value(),
-                                       server_no_ctx, client_no_ctx, unknown)
+            ws_options takeover = ws_options::none;
+            bool unknown = false;
+            if (parse_extension_header(offered.value(), takeover, unknown)
                 && !unknown) {
-                deflate_negotiated = true;
-                // Server side: client_no_context_takeover is about client's
-                // outbound — our inbound. server_no_context_takeover is about
-                // our outbound. We honor whatever the client asked for.
-                deflate_inbound_no_ctx = client_no_ctx;
-                deflate_outbound_no_ctx = server_no_ctx;
+                negotiated_out |= ws_options::permessage_deflate | takeover;
             }
         }
     }
 #else
-    (void) accept_permessage_deflate;
+    (void) server_opts;
 #endif
 
-    // Build and write the 101 response by hand. We can't use http_parser's
-    // send_response (which adds Content-Length etc. and assumes keep-alive
-    // semantics that don't apply to an upgrade).
+    // Build the 101 response by hand. http_parser's send_response would add
+    // Content-Length and assumes keep-alive semantics that don't apply to
+    // an upgrade.
     std::string res = std::format(
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
@@ -1109,24 +973,50 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
         res += chosen_subprotocol;
         res += "\r\n";
     }
-    if (deflate_negotiated) {
+    if (!!(negotiated_out & ws_options::permessage_deflate)) {
         res += "Sec-WebSocket-Extensions: permessage-deflate";
-        if (deflate_outbound_no_ctx) res += "; server_no_context_takeover";
-        if (deflate_inbound_no_ctx) res += "; client_no_context_takeover";
+        if (!!(negotiated_out & ws_options::server_no_context_takeover)) {
+            res += "; server_no_context_takeover";
+        }
+        if (!!(negotiated_out & ws_options::client_no_context_takeover)) {
+            res += "; client_no_context_takeover";
+        }
         res += "\r\n";
     }
     res += "\r\n";
+    return res;
+}
 
-    // Recover any bytes that arrived past the end of the upgrade headers
-    // (e.g. a frame piggybacked on the same TCP segment). They belong to
-    // the WebSocket protocol now.
-    fd cfd = hp.take_file();
-    co_await write(cfd, res.data(), res.size());
+} // namespace detail
 
-    co_return ws_stream::wrap_server(std::move(cfd), std::move(hp.receive_buffer()),
-                                     deflate_negotiated,
-                                     deflate_inbound_no_ctx,
-                                     deflate_outbound_no_ctx);
+
+// --- server upgrade --------------------------------------------------------
+
+bool is_ws_upgrade_request(const http_message& req) {
+    if (req.method() != HTTP_GET) {
+        return false;
+    }
+    if (req.http_major() < 1 || (req.http_major() == 1 && req.http_minor() < 1)) {
+        return false;
+    }
+    auto upg = req.find_header("upgrade");
+    if (upg == req.header_end() || !strings::ieq(upg.value(), "websocket")) {
+        return false;
+    }
+    auto conn = req.find_header("connection");
+    if (conn == req.header_end()
+        || !header_contains_ci_token(conn.value(), "upgrade")) {
+        return false;
+    }
+    auto key = req.find_header("sec-websocket-key");
+    if (key == req.header_end() || key.value().empty()) {
+        return false;
+    }
+    auto ver = req.find_header("sec-websocket-version");
+    if (ver == req.header_end() || ver.value() != "13") {
+        return false;
+    }
+    return true;
 }
 
 } // namespace cotamer

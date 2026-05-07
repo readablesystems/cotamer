@@ -35,17 +35,14 @@ cot::task<> run_server(uint16_t port,
                        std::function<cot::http_message(const cot::http_message&)> h)
                        -> cot::task<> {
             cot::http_parser hp(std::move(c), cot::http_parser::server);
-            while (true) {
+            do {
                 auto req = co_await hp.receive();
                 if (!hp.ok()) {
                     break;
                 }
                 auto resp = h(req);
                 co_await hp.send(std::move(resp));
-                if (!hp.should_keep_alive()) {
-                    break;
-                }
-            }
+            } while (hp.should_keep_alive());
         };
         conn(std::move(*cfd), handler).detach();
     }
