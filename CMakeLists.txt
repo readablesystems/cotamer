@@ -8,10 +8,10 @@ option(TSAN "Enable ThreadSanitizer" OFF)
 
 # Optional integrations. AUTO enables if the dependency is found, ON requires
 # it, OFF skips it.
-set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
-set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
+set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
+set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_NLOHMANN_JSON "AUTO" CACHE STRING "nlohmann::json integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_NLOHMANN_JSON PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_ZLIB "AUTO" CACHE STRING "zlib integration (AUTO/ON/OFF)")
@@ -207,18 +207,6 @@ if(COTAMER_HAVE_LLHTTP)
         ${LLHTTP_INCLUDE_DIR}
     )
     target_link_libraries(httpd PRIVATE
-        ${LLHTTP_LIBRARY}
-    )
-
-    add_executable(cot-test-http
-        test/cot-test-http.cc
-        $<TARGET_OBJECTS:Cotamer>
-        $<TARGET_OBJECTS:CotamerHttp>
-    )
-    target_include_directories(cot-test-http PRIVATE
-        ${LLHTTP_INCLUDE_DIR}
-    )
-    target_link_libraries(cot-test-http PRIVATE
         ${LLHTTP_LIBRARY}
     )
 endif()
