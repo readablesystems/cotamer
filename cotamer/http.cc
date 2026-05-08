@@ -623,7 +623,7 @@ task<> http_parser::send_response_chunk(std::string str) {
     iovec iov[3];
     iov[0] = iovec{ lenline.data(), lenline.length() };
     iov[1] = iovec{ str.data(), str.length() };
-    iov[2] = iovec{ (void*) "\r\n", 2 };
+    iov[2] = iovec{ const_cast<char*>("\r\n"), 2 };
     unique_lock guard(co_await m_[1].lock());
     co_await stream_->sendv(iov, 3, MSG_WAITALL);
 }
