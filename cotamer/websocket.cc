@@ -475,33 +475,10 @@ const wslay_event_callbacks ws_event_callbacks = {
 } // namespace
 
 
-// --- transport adapters ----------------------------------------------------
-
-namespace detail {
-
-// Read up to n bytes from a transport. Returns 0 at EOF.
-inline task<ioresult> ws_xport_read(fd& f, void* buf, size_t n) {
-    co_return co_await read_once(f, buf, n);
-}
-inline task<ioresult> ws_xport_write(fd& f, const void* buf, size_t n) {
-    co_return co_await write(f, buf, n);
-}
-
-} // namespace detail
-
-
 // --- basic_ws_stream -------------------------------------------------------
 
-template <class Transport>
-basic_ws_stream<Transport>::basic_ws_stream(basic_ws_stream&&) noexcept = default;
-template <class Transport>
-basic_ws_stream<Transport>& basic_ws_stream<Transport>::operator=(basic_ws_stream&&) noexcept = default;
-template <class Transport>
-basic_ws_stream<Transport>::~basic_ws_stream() = default;
-
-template <class Transport>
-basic_ws_stream<Transport>::basic_ws_stream(Transport t, bool is_client)
-    : t_(std::move(t)),
+ws_stream::ws_stream(std::unique_ptr<stream> strm, bool is_client)
+    : stream_(std::move(strm)),
       state_(std::make_unique<detail::ws_state>()) {
     state_->is_client = is_client;
     int rv = is_client
@@ -514,64 +491,68 @@ basic_ws_stream<Transport>::basic_ws_stream(Transport t, bool is_client)
     if (rv != 0) throw ws_error(rv);
 }
 
-template <class Transport>
-basic_ws_stream<Transport> basic_ws_stream<Transport>::wrap_client(
-    Transport t, std::string host, std::string path,
+ws_stream::ws_stream(ws_stream&&) noexcept = default;
+ws_stream& ws_stream::operator=(ws_stream&&) noexcept = default;
+ws_stream::~ws_stream() = default;
+
+
+ws_stream ws_stream::wrap_client(
+    std::unique_ptr<stream> strm, std::string host, std::string path,
     std::vector<std::string> subprotocols,
     bool offer_permessage_deflate)
 {
-    basic_ws_stream s(std::move(t), /*is_client=*/true);
-    s.client_host_ = std::move(host);
-    s.client_path_ = std::move(path);
-    s.client_subprotocols_ = std::move(subprotocols);
-    s.client_offer_deflate_ = offer_permessage_deflate;
-    return s;
+    ws_stream ws(std::move(strm), /*is_client=*/true);
+    ws.client_host_ = std::move(host);
+    ws.client_path_ = std::move(path);
+    ws.client_subprotocols_ = std::move(subprotocols);
+    ws.client_offer_deflate_ = offer_permessage_deflate;
+    return ws;
 }
 
-template <class Transport>
-basic_ws_stream<Transport> basic_ws_stream<Transport>::wrap_server(
-    Transport t, std::string residual,
+ws_stream ws_stream::wrap_server(
+    std::unique_ptr<stream> strm, std::string residual,
     bool permessage_deflate,
     bool inbound_no_context_takeover,
     bool outbound_no_context_takeover)
 {
-    basic_ws_stream s(std::move(t), /*is_client=*/false);
+    ws_stream ws(std::move(strm), /*is_client=*/false);
     if (!residual.empty()) {
         const auto* p = reinterpret_cast<const uint8_t*>(residual.data());
-        s.state_->recv_buf.assign(p, p + residual.size());
+        ws.state_->recv_buf.assign(p, p + residual.size());
     }
 #if COTAMER_HAVE_ZLIB
     if (permessage_deflate) {
-        s.state_->deflate_enabled = true;
-        s.state_->inbound_no_context_takeover = inbound_no_context_takeover;
-        s.state_->outbound_no_context_takeover = outbound_no_context_takeover;
-        s.state_->deflate_strm = std::make_unique<detail::deflate_compressor>();
-        s.state_->inflate_strm = std::make_unique<detail::inflate_decompressor>();
-        wslay_event_config_set_allowed_rsv_bits(s.state_->ctx, WSLAY_RSV1_BIT);
+        ws.state_->deflate_enabled = true;
+        ws.state_->inbound_no_context_takeover = inbound_no_context_takeover;
+        ws.state_->outbound_no_context_takeover = outbound_no_context_takeover;
+        ws.state_->deflate_strm = std::make_unique<detail::deflate_compressor>();
+        ws.state_->inflate_strm = std::make_unique<detail::inflate_decompressor>();
+        wslay_event_config_set_allowed_rsv_bits(ws.state_->ctx, WSLAY_RSV1_BIT);
     }
 #else
     (void) permessage_deflate;
     (void) inbound_no_context_takeover;
     (void) outbound_no_context_takeover;
 #endif
-    return s;
+    return ws;
 }
 
-template <class Transport>
-bool basic_ws_stream<Transport>::is_open() const noexcept {
-    if (!state_) return false;
+bool ws_stream::is_open() const noexcept {
+    if (!state_) {
+        return false;
+    }
     return wslay_event_get_read_enabled(state_->ctx)
         || wslay_event_get_write_enabled(state_->ctx);
 }
 
-template <class Transport>
-bool basic_ws_stream<Transport>::permessage_deflate_negotiated() const noexcept {
+bool ws_stream::permessage_deflate_negotiated() const noexcept {
     return state_ && state_->deflate_enabled;
 }
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::pump_writes() {
-    if (!state_) co_return;
+task<> ws_stream::pump_writes() {
+    if (!state_) {
+        co_return;
+    }
     while (wslay_event_want_write(state_->ctx)) {
         int rv = wslay_event_send(state_->ctx);
         if (rv != 0) {
@@ -582,17 +563,18 @@ task<> basic_ws_stream<Transport>::pump_writes() {
         }
         std::vector<uint8_t> tmp;
         tmp.swap(state_->send_buf);
-        co_await detail::ws_xport_write(t_, tmp.data(), tmp.size());
+        iovec iov{ tmp.data(), tmp.size() };
+        co_await stream_->sendv(&iov, 1, MSG_WAITALL);
     }
     if (!state_->send_buf.empty()) {
         std::vector<uint8_t> tmp;
         tmp.swap(state_->send_buf);
-        co_await detail::ws_xport_write(t_, tmp.data(), tmp.size());
+        iovec iov{ tmp.data(), tmp.size() };
+        co_await stream_->sendv(&iov, 1, MSG_WAITALL);
     }
 }
 
-template <class Transport>
-task<bool> basic_ws_stream<Transport>::pump_reads() {
+task<bool> ws_stream::pump_reads() {
     if (!state_ || !wslay_event_get_read_enabled(state_->ctx)) {
         co_return false;
     }
@@ -609,7 +591,7 @@ task<bool> basic_ws_stream<Transport>::pump_reads() {
     }
     constexpr size_t bufsz = 8192;
     uint8_t buf[bufsz];
-    auto n = co_await detail::ws_xport_read(t_, buf, bufsz);
+    auto n = co_await stream_->recv(buf, bufsz, 0);
     if (!n || *n == 0) {
         state_->recv_eof = true;
         wslay_event_shutdown_read(state_->ctx);
@@ -623,9 +605,7 @@ task<bool> basic_ws_stream<Transport>::pump_reads() {
     co_return true;
 }
 
-template <class Transport>
-task<typename basic_ws_stream<Transport>::receive_result>
-basic_ws_stream<Transport>::receive() {
+task<ws_stream::receive_result> ws_stream::receive() {
     while (true) {
         co_await pump_writes();
 
@@ -795,23 +775,20 @@ int queue_data_message(detail::ws_state* s, uint8_t opcode,
 
 } // namespace
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_text(std::string_view payload) {
+task<> ws_stream::send_text(std::string_view payload) {
     int rv = queue_data_message(state_.get(), WSLAY_TEXT_FRAME,
                                 payload.data(), payload.size());
     if (rv != 0) throw ws_error(rv);
     co_await pump_writes();
 }
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_binary(const void* data, size_t n) {
+task<> ws_stream::send_binary(const void* data, size_t n) {
     int rv = queue_data_message(state_.get(), WSLAY_BINARY_FRAME, data, n);
     if (rv != 0) throw ws_error(rv);
     co_await pump_writes();
 }
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_ping(std::string_view payload) {
+task<> ws_stream::send_ping(std::string_view payload) {
     wslay_event_msg msg = {
         WSLAY_PING,
         reinterpret_cast<const uint8_t*>(payload.data()),
@@ -822,8 +799,7 @@ task<> basic_ws_stream<Transport>::send_ping(std::string_view payload) {
     co_await pump_writes();
 }
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_pong(std::string_view payload) {
+task<> ws_stream::send_pong(std::string_view payload) {
     wslay_event_msg msg = {
         WSLAY_PONG,
         reinterpret_cast<const uint8_t*>(payload.data()),
@@ -834,8 +810,7 @@ task<> basic_ws_stream<Transport>::send_pong(std::string_view payload) {
     co_await pump_writes();
 }
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::send_close(uint16_t code,
+task<> ws_stream::send_close(uint16_t code,
                                               std::string_view reason) {
     int rv = wslay_event_queue_close(
         state_->ctx, code,
@@ -847,8 +822,7 @@ task<> basic_ws_stream<Transport>::send_close(uint16_t code,
     co_await pump_writes();
 }
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::close() {
+task<> ws_stream::close() {
     if (!state_) co_return;
     if (!wslay_event_get_close_sent(state_->ctx)) {
         co_await send_close(1000, "");
@@ -878,8 +852,7 @@ std::string make_random_key() {
 
 } // namespace
 
-template <class Transport>
-task<> basic_ws_stream<Transport>::handshake() {
+task<> ws_stream::handshake() {
     if (!state_ || !state_->is_client) {
         throw ws_error(WSLAY_ERR_INVALID_ARGUMENT,
                        "handshake() called on non-client ws_stream");
@@ -913,14 +886,15 @@ task<> basic_ws_stream<Transport>::handshake() {
 #endif
     req += "\r\n";
 
-    co_await detail::ws_xport_write(t_, req.data(), req.size());
+    iovec iov{ req.data(), req.size() };
+    co_await stream_->sendv(&iov, 1, MSG_WAITALL);
 
     // Parse the 101 response with http_parser. Today we only instantiate
     // basic_ws_stream<fd>, so http_parser (which is fd-bound) suffices —
     // wss:// (basic_ws_stream<tls_stream>) is a Phase 4 task and will
     // require either specializing this method for fd or making http_parser
     // transport-agnostic.
-    http_parser hp(t_, http_parser::client);
+    http_parser hp(std::move(stream_), http_parser::client);
     auto resp = co_await hp.receive();
     if (!hp.ok()) {
         throw ws_error(WSLAY_ERR_PROTO,
@@ -987,6 +961,7 @@ task<> basic_ws_stream<Transport>::handshake() {
     // Stash any bytes that arrived alongside the 101 (a server might have
     // piggybacked a frame on the same TCP segment) into wslay's recv buffer
     // before we let it pull more from the transport.
+    stream_ = hp.take_stream();
     std::string residual = std::move(hp.receive_buffer());
     if (!residual.empty()) {
         const auto* p = reinterpret_cast<const uint8_t*>(residual.data());
@@ -994,11 +969,6 @@ task<> basic_ws_stream<Transport>::handshake() {
                                 p, p + residual.size());
     }
 }
-
-
-// --- explicit instantiations -----------------------------------------------
-
-template class basic_ws_stream<fd>;
 
 
 // --- server upgrade --------------------------------------------------------
@@ -1120,10 +1090,10 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
     // Recover any bytes that arrived past the end of the upgrade headers
     // (e.g. a frame piggybacked on the same TCP segment). They belong to
     // the WebSocket protocol now.
-    fd cfd = hp.take_file();
-    co_await write(cfd, res.data(), res.size());
+    auto strm = hp.take_stream();
+    co_await strm->send(res.data(), res.size(), MSG_WAITALL);
 
-    co_return ws_stream::wrap_server(std::move(cfd), std::move(hp.receive_buffer()),
+    co_return ws_stream::wrap_server(std::move(strm), std::move(hp.receive_buffer()),
                                      deflate_negotiated,
                                      deflate_inbound_no_ctx,
                                      deflate_outbound_no_ctx);

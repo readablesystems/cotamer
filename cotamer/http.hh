@@ -7,9 +7,6 @@
 #include <memory>
 #include <cstring>
 #include <ctime>
-#if COTAMER_HAVE_NLOHMANN_JSON
-# include <nlohmann/json_fwd.hpp>
-#endif
 namespace cotamer {
 class http_parser;
 
@@ -159,9 +156,8 @@ public:
 
     inline http_message& body(std::string body);
     inline http_message& append_body(const std::string& x);
-#if COTAMER_HAVE_NLOHMANN_JSON
-    http_message& body(const nlohmann::json& j);
-#endif
+    template <detail::nlohmann_basic_json_type Json>
+    http_message& body(const Json& j);
 
     static const char* default_status_message(unsigned code);
 
@@ -212,9 +208,11 @@ private:
 class http_parser {
 public:
     enum parser_type { client, server };
+    http_parser(std::unique_ptr<stream> stream,
+                parser_type direction = server,
+                std::string host = std::string());
     http_parser(fd f, parser_type direction = server,
                 std::string host = std::string());
-    http_parser(fd f, enum llhttp_type receive_type);
 
     inline bool ok() const;
     inline constexpr llhttp_errno error() const;
@@ -243,10 +241,8 @@ public:
     inline const std::string& receive_buffer() const;
     inline std::string& receive_buffer();
 
-    // Underlying fd
-    inline const fd& file() const;
-    // Release ownership of the underlying fd (e.g., for protocol upgrades)
-    inline fd take_file();
+    // Take underlying stream (for upgrade)
+    std::unique_ptr<stream> take_stream();
 
     static llhttp_method parse_method(std::string_view);
 
@@ -254,7 +250,7 @@ private:
     static constexpr size_t bufsize = 8192;
 
     ::llhttp_t hp_;
-    fd f_;
+    std::unique_ptr<stream> stream_;
     mutex m_[2];
     std::string receive_buffer_;
     std::string host_;
@@ -533,6 +529,16 @@ inline http_message& http_message::append_body(const std::string& x) {
     return *this;
 }
 
+template <detail::nlohmann_basic_json_type Json>
+http_message& http_message::body(const Json& j) {
+    if (!has_header("Content-Type")) {
+        add_header("Content-Type", "application/json");
+    }
+    body_ = j.dump();
+    has_body_ = 1;
+    return *this;
+}
+
 inline http_message::info_type& http_message::info(unsigned f) const {
     if (!info_ || (info_->flags & f) != f) {
         make_info(f);
@@ -594,14 +600,6 @@ inline task<http_message> http_parser::receive() {
 
 inline void http_parser::clear_should_keep_alive() {
     hp_.flags = (hp_.flags & ~F_CONNECTION_KEEP_ALIVE) | F_CONNECTION_CLOSE;
-}
-
-inline const fd& http_parser::file() const {
-    return f_;
-}
-
-inline fd http_parser::take_file() {
-    return std::move(f_);
 }
 
 inline const std::string& http_parser::receive_buffer() const {

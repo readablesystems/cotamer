@@ -354,12 +354,16 @@ task<> tls_stream::handshake() {
     }
 }
 
-task<size_t> tls_stream::read(void* buf, size_t n) {
-    while (true) {
-        int r = mbedtls_ssl_read(&impl_->ssl,
-                                 static_cast<unsigned char*>(buf), n);
+task<ioresult> tls_stream::recv(void* buf, size_t count, int flags) {
+    unsigned char* p = static_cast<unsigned char*>(buf);
+    size_t nr = 0;
+    while (nr != count) {
+        int r = mbedtls_ssl_read(&impl_->ssl, p + nr, count - nr);
         if (r >= 0) {
-            co_return static_cast<size_t>(r);
+            nr += r;
+            if (r == 0 || !(flags & MSG_WAITALL)) {
+                break;
+            }
         } else if (r == MBEDTLS_ERR_SSL_WANT_READ) {
             co_await readable(f_);
         } else if (r == MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -370,24 +374,37 @@ task<size_t> tls_stream::read(void* buf, size_t n) {
             throw tls_error(r);
         }
     }
+    co_return nr;
 }
 
-task<size_t> tls_stream::write(const void* buf, size_t n) {
-    const unsigned char* p = static_cast<const unsigned char*>(buf);
-    size_t written = 0;
-    while (written < n) {
-        int r = mbedtls_ssl_write(&impl_->ssl, p + written, n - written);
+task<ioresult> tls_stream::sendv(const iovec* iov, size_t iovcnt, int flags) {
+    size_t nw = 0, iovnw = 0;
+    while (iovcnt > 0) {
+        if (iov->iov_len <= iovnw) {
+            ++iov;
+            --iovcnt;
+            iovnw = 0;
+            continue;
+        }
+        int r = mbedtls_ssl_write(&impl_->ssl, static_cast<unsigned char*>(iov->iov_base) + iovnw, iov->iov_len - iovnw);
         if (r > 0) {
-            written += static_cast<size_t>(r);
+            nw += r;
+            iovnw += r;
         } else if (r == MBEDTLS_ERR_SSL_WANT_READ) {
+            if (!(flags & MSG_WAITALL)) {
+                break;
+            }
             co_await readable(f_);
         } else if (r == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (!(flags & MSG_WAITALL)) {
+                break;
+            }
             co_await writable(f_);
         } else {
             throw tls_error(r);
         }
     }
-    co_return written;
+    co_return nw;
 }
 
 task<> tls_stream::shutdown() {

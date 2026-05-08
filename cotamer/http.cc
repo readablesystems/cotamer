@@ -347,15 +347,16 @@ llhttp_method http_parser::parse_method(std::string_view s) {
 }
 
 
-http_parser::http_parser(fd f, parser_type direction, std::string host)
-    : f_(std::move(f)), host_(std::move(host)) {
+http_parser::http_parser(std::unique_ptr<stream> stream, parser_type direction, std::string host)
+    : stream_(std::move(stream)), host_(std::move(host)) {
     auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
     llhttp_init(&hp_, hp_type, &settings);
 }
 
-http_parser::http_parser(fd f, enum llhttp_type receive_type)
-    : f_(std::move(f)) {
-    llhttp_init(&hp_, receive_type, &settings);
+http_parser::http_parser(fd f, parser_type direction, std::string host)
+    : stream_(make_stream(std::move(f))), host_(std::move(host)) {
+    auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
+    llhttp_init(&hp_, hp_type, &settings);
 }
 
 void http_parser::clear() {
@@ -485,7 +486,7 @@ task<http_message> http_parser::receive(ticket_type ticket) {
         size_t nr;
         if (receive_buffer_.empty()) {
             buf = stackbuf;
-            auto nx = co_await recv(f_, stackbuf, sizeof(stackbuf));
+            auto nx = co_await stream_->recv(stackbuf, sizeof(stackbuf), 0);
             if (!nx || *nx == 0) {
                 break;
             }
@@ -558,7 +559,7 @@ task<http_parser::ticket_type> http_parser::send_request(http_message m) {
     unique_lock guard(co_await m_[1].lock());
     auto ticket = m_[0].lock();
 
-    co_await sendv_all(f_, iov, iovcnt);
+    co_await stream_->sendv(iov, iovcnt, MSG_WAITALL);
     co_return std::move(ticket);
 }
 
@@ -605,7 +606,7 @@ task<> http_parser::send_response(http_message m) {
     }
 
     unique_lock guard(co_await m_[1].lock());
-    co_await sendv_all(f_, iov, iovcnt);
+    co_await stream_->sendv(iov, iovcnt, MSG_WAITALL);
 }
 
 task<> http_parser::send(http_message m) {
@@ -624,23 +625,19 @@ task<> http_parser::send_response_chunk(std::string str) {
     iov[1] = iovec{ str.data(), str.length() };
     iov[2] = iovec{ (void*) "\r\n", 2 };
     unique_lock guard(co_await m_[1].lock());
-    co_await sendv_all(f_, iov, 3);
+    co_await stream_->sendv(iov, 3, MSG_WAITALL);
 }
 
 task<> http_parser::send_response_end_chunk() {
     unique_lock guard(co_await m_[1].lock());
-    co_await send_all(f_, "0\r\n\r\n", 5);
+    iovec iov{ const_cast<char*>("0\r\n\r\n"), 5 };
+    co_await stream_->sendv(&iov, 1, MSG_WAITALL);
 }
 
-#if COTAMER_HAVE_NLOHMANN_JSON
-http_message& http_message::body(const nlohmann::json& j) {
-    if (!has_header("Content-Type")) {
-        add_header("Content-Type", "application/json");
-    }
-    body_ = j.dump();
-    has_body_ = 1;
-    return *this;
+std::unique_ptr<stream> http_parser::take_stream() {
+    std::unique_ptr<stream> x = std::make_unique<empty_stream>();
+    x.swap(stream_);
+    return x;
 }
-#endif
 
 } // namespace cotamer

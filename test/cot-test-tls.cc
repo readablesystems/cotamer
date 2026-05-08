@@ -58,10 +58,10 @@ cot::task<> test_handshake_and_io() {
         auto s = co_await cot::tls_accept(lfd, sctx);
 
         char buf[64] = {};
-        size_t n = co_await s.read(buf, sizeof(buf));
-        assert(n > 0);
-        assert(std::string(buf, n) == "ping");
-        co_await s.write("pong", 4);
+        auto n = co_await s.recv(buf, sizeof(buf), 0);
+        assert(n && *n > 0);
+        assert(std::string(buf, *n) == "ping");
+        co_await s.send("pong", 4, MSG_WAITALL);
         co_await s.shutdown();
     };
     server().detach();
@@ -72,11 +72,11 @@ cot::task<> test_handshake_and_io() {
     cctx.add_ca_file(test_cert_path);  // trust the self-signed cert
 
     auto s = co_await cot::tls_connect(addr, "localhost", cctx);
-    co_await s.write("ping", 4);
+    co_await s.send("ping", 4, MSG_WAITALL);
     char buf[64] = {};
-    size_t n = co_await s.read(buf, sizeof(buf));
-    assert(n == 4);
-    assert(std::string(buf, n) == "pong");
+    auto n = co_await s.recv(buf, sizeof(buf), 0);
+    assert(n && *n == 4);
+    assert(std::string(buf, *n) == "pong");
     std::cerr << "handshake_and_io: ok\n";
 }
 

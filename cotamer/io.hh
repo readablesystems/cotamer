@@ -191,6 +191,17 @@ inline task<ioresult> send(fd f, const void* buf, size_t count, int flags) {
 }
 
 
+// Send a message defined by `iov`. Suspends on EAGAIN. Returns bytes written
+// or error code.
+
+inline task<ioresult> sendv(fd f, const iovec* iov, size_t iovcnt, int flags) {
+    struct msghdr mh{};
+    mh.msg_iov = const_cast<iovec*>(iov);
+    mh.msg_iovlen = iovcnt;
+    co_return co_await sendmsg(std::move(f), &mh, flags);
+}
+
+
 // Send a message of `count` bytes, suspending as needed. Returns bytes written
 // or error code.
 
@@ -203,10 +214,7 @@ inline task<ioresult> send_all(fd f, const void* buf, size_t count, int flags) {
 // or error code.
 
 inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags) {
-    struct msghdr mh{};
-    mh.msg_iov = const_cast<iovec*>(iov);
-    mh.msg_iovlen = iovcnt;
-    co_return co_await sendmsg(std::move(f), &mh, flags | MSG_WAITALL);
+    return sendv(std::move(f), iov, iovcnt, flags | MSG_WAITALL);
 }
 
 
@@ -260,10 +268,6 @@ inline task<ioresult> send_once(fd f, const void* buf, size_t count) {
     return send(std::move(f), buf, count);
 }
 
-inline task<ioresult> sendv(fd f, const iovec* iov, size_t iovcnt) {
-    return sendv_all(std::move(f), iov, iovcnt);
-}
-
 
 // Connects to an address. Suspends until connected. Throws on error.
 
@@ -315,6 +319,34 @@ inline task<fd> tcp_accept(fd listen_fd) {
     int flag = 1;
     setsockopt(f.fileno(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     co_return std::move(f);
+}
+
+
+// Stream helpers
+
+inline event stream::readable() {
+    return file_event(fdevent::read);
+}
+
+inline event stream::writable() {
+    return file_event(fdevent::read);
+}
+
+inline task<ioresult> stream::send(const void* buf, size_t count, int flags) {
+    iovec iov{ const_cast<void*>(buf), count };
+    co_return co_await sendv(&iov, 1, flags);
+}
+
+inline event file_stream::file_event(fdevent mask) {
+    return cotamer::file_event(f_, mask);
+}
+
+inline task<ioresult> file_stream::recv(void* buf, size_t count, int flags) {
+    return cotamer::recv(f_, buf, count, flags);
+}
+
+inline task<ioresult> file_stream::sendv(const iovec* iov, size_t iovcnt, int flags) {
+    return cotamer::sendv(f_, iov, iovcnt, flags);
 }
 
 

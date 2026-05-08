@@ -384,13 +384,13 @@ task<ioresult> recvmsg(fd f, msghdr* msg, int flags);
 task<ioresult> sendmsg(fd f, const msghdr* msg, int flags);
 inline task<ioresult> recv(fd f, void* buf, size_t count, int flags = 0);
 inline task<ioresult> send(fd f, const void* buf, size_t count, int flags = 0);
+inline task<ioresult> sendv(fd f, const void* buf, size_t count, int flags = 0);
 inline task<ioresult> send_all(fd f, const void* buf, size_t count, int flags = 0);
 inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags = 0);
 inline task<ioresult> recvfrom(fd f, void* buf, size_t count, sockaddr* addr, socklen_t* addrlen, int flags = 0);
 inline task<ioresult> sendto(fd f, const void* buf, size_t count, const sockaddr* addr, socklen_t addrlen, int flags = 0);
 [[deprecated("Use cot::recv")]] inline task<ioresult> recv_once(fd f, void* buf, size_t count);
 [[deprecated("Use cot::send")]] inline task<ioresult> send_once(fd f, const void* buf, size_t count);
-[[deprecated("Use cot::sendv_all")]] inline task<ioresult> sendv(fd f, const iovec* iov, size_t iovcnt);
 
 inline task<> connect(fd f, const struct sockaddr* addr, socklen_t len);
 inline task<fd> accept(fd listen_fd);
@@ -402,6 +402,47 @@ inline task<fd> tcp_accept(fd listen_fd);
 task<fd> udp_listen(std::string address);
 task<fd> udp_connect(std::string address);
 
+
+// Streams
+
+class stream {
+public:
+    virtual ~stream() = default;
+
+    virtual event file_event(fdevent) = 0;
+    inline event readable();
+    inline event writable();
+
+    virtual task<ioresult> recv(void* buf, size_t count, int flags) = 0;
+    inline task<ioresult> send(const void* buf, size_t count, int flags);
+    virtual task<ioresult> sendv(const iovec* iov, size_t iovcnt, int flags) = 0;
+};
+
+class empty_stream final : public stream {
+public:
+    event file_event(fdevent);
+    task<ioresult> recv(void* buf, size_t count, int flags);
+    task<ioresult> sendv(const iovec* iov, size_t iovcnt, int flags);
+};
+
+class file_stream final : public stream {
+public:
+    file_stream(fd f) : f_(std::move(f)) { }
+
+    inline event file_event(fdevent);
+    inline task<ioresult> recv(void* buf, size_t count, int flags);
+    inline task<ioresult> sendv(const iovec* iov, size_t iovcnt, int flags);
+
+private:
+    fd f_;
+};
+
+inline std::unique_ptr<stream> make_stream(fd f) {
+    return std::make_unique<file_stream>(f);
+}
+
+
+// Mutual exclusion
 
 // mutex, mutex_event, unique_lock, shared_lock
 //    Event-driven mutual exclusion for coroutines. `mutex` provides exclusive
@@ -554,7 +595,7 @@ private:
 
 
 
-// Error codes and exception type.
+// Error codes and exception type
 
 enum class cotamer_errc {
     cross_driver_await = 1,
@@ -572,7 +613,7 @@ private:
 };
 
 
-// Statistics.
+// Statistics
 
 #if COTAMER_STATS
 struct statistics {
@@ -589,7 +630,7 @@ extern statistics stats;
 inline detail::describe_task_awaiter describe(const std::string&);
 
 
-// String helpers.
+// String helpers
 
 namespace strings {
 // Are the first `count` characters of `a` and `b` equal, ignoring ASCII case?
@@ -600,7 +641,7 @@ inline bool ieq(std::string_view a, std::string_view b) noexcept;
 }
 
 
-// Metaprogramming.
+// Metaprogramming
 
 template <typename T> struct is_task : public std::false_type { };
 template <typename T> struct is_task<task<T>> : public std::true_type { };

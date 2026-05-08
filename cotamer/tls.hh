@@ -71,7 +71,7 @@ private:
     std::unique_ptr<impl> impl_;
 };
 
-class tls_stream {
+class tls_stream final {
 public:
     tls_stream() = default;
     tls_stream(tls_stream&&) noexcept;
@@ -92,8 +92,12 @@ public:
     static tls_stream wrap_server(fd f, const tls_context& ctx);
 
     task<> handshake();
-    task<size_t> read(void* buf, size_t n);
-    task<size_t> write(const void* buf, size_t n);
+    task<ioresult> recv(void* buf, size_t count, int flags);
+    task<ioresult> sendv(const iovec* iov, size_t iovcnt, int flags);
+    task<ioresult> send(const void* buf, size_t count, int flags) {
+        iovec iov{ const_cast<void*>(buf), count };
+        co_return co_await sendv(&iov, 1, flags);
+    }
     task<> shutdown();                                // sends close_notify
 
     const fd& underlying() const noexcept { return f_; }

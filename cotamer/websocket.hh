@@ -70,16 +70,15 @@ private:
 namespace detail { struct ws_state; }
 
 
-template <class Transport>
-class basic_ws_stream {
+class ws_stream {
 public:
     using receive_result = std::variant<ws_message, ws_close>;
 
-    basic_ws_stream(basic_ws_stream&&) noexcept;
-    basic_ws_stream& operator=(basic_ws_stream&&) noexcept;
-    basic_ws_stream(const basic_ws_stream&) = delete;
-    basic_ws_stream& operator=(const basic_ws_stream&) = delete;
-    ~basic_ws_stream();
+    ws_stream(ws_stream&&) noexcept;
+    ws_stream& operator=(ws_stream&&) noexcept;
+    ws_stream(const ws_stream&) = delete;
+    ws_stream& operator=(const ws_stream&) = delete;
+    ~ws_stream();
 
     explicit operator bool() const noexcept { return state_ != nullptr; }
 
@@ -90,11 +89,15 @@ public:
     // advertises the permessage-deflate extension (RFC 7692) in the upgrade
     // request. When the server accepts, both sides transparently compress
     // data frames; otherwise the connection runs uncompressed.
-    static basic_ws_stream wrap_client(Transport t,
-                                       std::string host,
-                                       std::string path,
-                                       std::vector<std::string> subprotocols = {},
-                                       bool offer_permessage_deflate = true);
+    static ws_stream wrap_client(std::unique_ptr<stream> strm,
+                                 std::string host,
+                                 std::string path,
+                                 std::vector<std::string> subprotocols = {},
+                                 bool offer_permessage_deflate = true);
+    template <typename S>
+    static ws_stream wrap_client(S strm, std::string host, std::string path, std::vector<std::string> subprotocols = {}, bool offer_permessage_deflate = true) {
+        return wrap_client(make_stream(std::move(strm)), std::move(host), std::move(path), std::move(subprotocols), offer_permessage_deflate);
+    }
 
     // Wrap a transport that is already past the HTTP/101 handshake (caller
     // performed/validated the handshake) in a server-side ws_stream.
@@ -107,11 +110,15 @@ public:
     // permessage-deflate. The optional `*_no_context_takeover` flags indicate
     // whether each side resets its compression context after every message
     // (per the parameters echoed in the 101 response).
-    static basic_ws_stream wrap_server(Transport t,
-                                       std::string residual = {},
-                                       bool permessage_deflate = false,
-                                       bool inbound_no_context_takeover = false,
-                                       bool outbound_no_context_takeover = false);
+    static ws_stream wrap_server(std::unique_ptr<stream> strm,
+                                 std::string residual = {},
+                                 bool permessage_deflate = false,
+                                 bool inbound_no_context_takeover = false,
+                                 bool outbound_no_context_takeover = false);
+    template <typename S>
+    static ws_stream wrap_server(S strm, std::string residual = {}, bool permessage_deflate = false, bool inbound_no_context_takeover = false, bool outbound_no_context_takeover = false) {
+        return wrap_server(make_stream(std::move(strm)), std::move(residual), permessage_deflate, inbound_no_context_takeover, outbound_no_context_takeover);
+    }
 
     // Client-side handshake: sends the upgrade request, parses the 101
     // response, validates Sec-WebSocket-Accept. Throws on failure.
@@ -144,13 +151,10 @@ public:
     // connection.
     bool permessage_deflate_negotiated() const noexcept;
 
-    Transport& transport() noexcept { return t_; }
-    const Transport& transport() const noexcept { return t_; }
-
 private:
-    basic_ws_stream(Transport t, bool is_client);
+    ws_stream(std::unique_ptr<stream> strm, bool is_client);
 
-    Transport t_;
+    std::unique_ptr<stream> stream_;
     std::unique_ptr<detail::ws_state> state_;
     std::string client_host_;
     std::string client_path_;
@@ -160,12 +164,6 @@ private:
     task<> pump_writes();
     task<bool> pump_reads();   // returns false on EOF
 };
-
-
-using ws_stream = basic_ws_stream<fd>;
-
-// `wss_stream` (basic_ws_stream<tls_stream>) is planned for a later phase;
-// it requires linking both `CotamerTls` and `CotamerWebSocket` together.
 
 
 // Returns true iff `req` looks like a valid WebSocket upgrade request:

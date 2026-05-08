@@ -814,4 +814,19 @@ task<ioresult> recvmsg(fd f, msghdr* mh, int flags) {
     co_return nr;
 }
 
+
+// Stream definitions
+
+event empty_stream::file_event(fdevent) {
+    return event{};
+}
+
+task<ioresult> empty_stream::recv(void*, size_t, int) {
+    co_return 0;
+}
+
+task<ioresult> empty_stream::sendv(const iovec*, size_t, int) {
+    co_return std::unexpected(std::error_code(EPIPE, std::generic_category()));
+}
+
 }

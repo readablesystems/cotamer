@@ -2358,4 +2358,14 @@ inline bool ieq(std::string_view a, std::string_view b) noexcept {
 
 }
 
+
+// JSON helpers
+
+namespace detail {
+template <typename T>
+concept nlohmann_basic_json_type = requires {
+    typename T::template json_serializer<int>;
+};
+}
+
 }
