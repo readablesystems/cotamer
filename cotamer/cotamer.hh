@@ -638,6 +638,9 @@ inline bool ieq(const char* a, const char* b, size_t count) noexcept;
 
 // Are `a` and `b` equal, ignoring ASCII case?
 inline bool ieq(std::string_view a, std::string_view b) noexcept;
+
+// Trim horizontal whitespace (SP/TAB) from `s`
+inline std::string_view trim_hws(std::string_view s) noexcept;
 }
 
 

@@ -375,6 +375,91 @@ cot::task<> test_search_param() {
 }
 
 
+// Header values returned by http_parser should be OWS-trimmed (RFC 9110
+// §5.5: leading/trailing SP and HTAB are not part of the field value).
+// Internal whitespace must be preserved; empty values stay empty.
+cot::task<> test_header_value_ows() {
+    uint16_t port = unique_port();
+    auto addr = "127.0.0.1:" + std::to_string(port);
+
+    cot::event listener_ready;
+    cot::event server_done;
+
+    auto server = [&]() -> cot::task<> {
+        auto lfd = co_await cot::tcp_listen(addr);
+        listener_ready.trigger();
+        auto cfd = co_await cot::tcp_accept(lfd);
+        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
+
+        auto req = co_await hp.receive();
+        assert(hp.ok());
+
+        auto val = [&](const char* name) {
+            auto it = req.find_header(name);
+            assert(it != req.header_end());
+            return std::string(it.value());
+        };
+
+        assert(val("h-leading") == "value");
+        assert(val("h-trailing") == "value");
+        assert(val("h-both") == "value");
+        assert(val("h-tabs") == "value");
+        assert(val("h-mixed") == "value");
+        // Internal whitespace must be preserved verbatim.
+        assert(val("h-internal") == "foo bar  baz");
+        // Empty / OWS-only values normalize to empty.
+        assert(val("h-empty") == "");
+        assert(val("h-ows-only") == "");
+
+        server_done.trigger();
+    };
+    server().detach();
+
+    auto cfd = co_await connect_pair(addr, listener_ready);
+    std::string raw =
+        "GET / HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "H-Leading:    value\r\n"
+        "H-Trailing: value    \r\n"
+        "H-Both:    value    \r\n"
+        "H-Tabs:\t\tvalue\t\t\r\n"
+        "H-Mixed: \t value \t \r\n"
+        "H-Internal: foo bar  baz\r\n"
+        "H-Empty:\r\n"
+        "H-OWS-Only:    \r\n"
+        "\r\n";
+    co_await cot::write(cfd, raw.data(), raw.size());
+
+    co_await cot::attempt(cot::task<>{server_done}, cot::after(500ms));
+    std::cerr << "header_value_ows: ok\n";
+}
+
+
+// http_message::header(key, value) should also trim OWS from `value`.
+cot::task<> test_header_setter_ows() {
+    cot::http_message m;
+    m.header("X-Plain", "value")
+     .header("X-Spaced", "   value   ")
+     .header("X-Tabs", "\tvalue\t")
+     .header("X-Empty", "")
+     .header("X-OWS-Only", "   \t  ");
+
+    auto get = [&](const char* name) {
+        auto it = m.find_header(name);
+        assert(it != m.header_end());
+        return std::string(it.value());
+    };
+    assert(get("X-Plain") == "value");
+    assert(get("X-Spaced") == "value");
+    assert(get("X-Tabs") == "value");
+    assert(get("X-Empty") == "");
+    assert(get("X-OWS-Only") == "");
+
+    std::cerr << "header_setter_ows: ok\n";
+    co_return;
+}
+
+
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
 
@@ -400,6 +485,8 @@ int main(int argc, char* argv[]) {
     run("upgrade_residual", test_upgrade_residual);
     run("method_string_ctor", test_method_string_ctor);
     run("search_param", test_search_param);
+    run("header_value_ows", test_header_value_ows);
+    run("header_setter_ows", test_header_setter_ows);
 
     if (ran == 0) {
         std::cerr << "No matching tests\n";

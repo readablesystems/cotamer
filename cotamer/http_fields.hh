@@ -11,23 +11,11 @@
 //    `Upgrade`, `Accept`, `Cache-Control`, `Sec-WebSocket-Extensions`.
 //
 //    Living in `cotamer::http::`, so callers can drop the `http_` prefix:
-//        for (auto t : http::comma_list(req.find_header("connection").value())) {
+//        for (auto t : http::field_value_list(req.find_header("connection").value())) {
 //            if (strings::ieq(t, "upgrade")) ...
 //        }
 
 namespace cotamer::http {
-
-// Trim ASCII OWS (SP / HTAB, RFC 9110 §5.6.3) from both ends of `s`.
-constexpr std::string_view trim_ows(std::string_view s) noexcept {
-    while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) {
-        s.remove_prefix(1);
-    }
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) {
-        s.remove_suffix(1);
-    }
-    return s;
-}
-
 
 // View over a comma-separated header value (RFC 9110 §5.6.1, `#rule`).
 // Each iterator dereference yields one entry as a string_view with
@@ -35,7 +23,7 @@ constexpr std::string_view trim_ows(std::string_view s) noexcept {
 // skipped per the standard's `1#element` semantics.
 //
 // The view is non-owning — the underlying header string must outlive it.
-class comma_list {
+class field_value_list {
 public:
     class iterator {
     public:
@@ -71,7 +59,7 @@ public:
                 size_t comma = header_.find(',', pos_);
                 size_t end = (comma == std::string_view::npos
                               ? header_.size() : comma);
-                std::string_view entry = trim_ows(
+                std::string_view entry = strings::trim_hws(
                     header_.substr(pos_, end - pos_));
                 next_pos_ = (comma == std::string_view::npos
                              ? header_.size() : comma + 1);
@@ -91,7 +79,7 @@ public:
         std::string_view current_;
     };
 
-    explicit comma_list(std::string_view header) noexcept : header_(header) {}
+    explicit field_value_list(std::string_view header) noexcept : header_(header) {}
 
     iterator begin() const noexcept { return iterator(header_, 0); }
     iterator end() const noexcept { return iterator(header_, header_.size()); }
@@ -169,7 +157,7 @@ public:
                 size_t semi = find_semi(pos_);
                 size_t end = (semi == std::string_view::npos
                               ? src_.size() : semi);
-                std::string_view seg = trim_ows(
+                std::string_view seg = strings::trim_hws(
                     src_.substr(pos_, end - pos_));
                 next_pos_ = (semi == std::string_view::npos
                              ? src_.size() : semi + 1);
@@ -228,11 +216,11 @@ public:
                 }
             }
             if (eq == std::string_view::npos) {
-                current_ = parameter{trim_ows(seg), {}, false};
+                current_ = parameter{strings::trim_hws(seg), {}, false};
                 return;
             }
-            std::string_view name = trim_ows(seg.substr(0, eq));
-            std::string_view value = trim_ows(seg.substr(eq + 1));
+            std::string_view name = strings::trim_hws(seg.substr(0, eq));
+            std::string_view value = strings::trim_hws(seg.substr(eq + 1));
             bool quoted = false;
             if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
                 value.remove_prefix(1);
@@ -263,8 +251,8 @@ private:
 // Convenient for `Sec-WebSocket-Extensions`, `Content-Type`,
 // `Cache-Control` directives, etc.
 //
-// Build directly from a `comma_list` entry:
-//     for (auto entry : http::comma_list(header)) {
+// Build directly from a `field_value_list` entry:
+//     for (auto entry : http::field_value_list(header)) {
 //         http::parameterized pv(entry);
 //         if (strings::ieq(pv.name(), "permessage-deflate")) {
 //             for (auto p : pv.params()) { ... }
@@ -275,9 +263,9 @@ public:
     explicit parameterized(std::string_view entry) noexcept {
         size_t semi = entry.find(';');  // top-level `;` (no quoting in tokens)
         if (semi == std::string_view::npos) {
-            name_ = trim_ows(entry);
+            name_ = strings::trim_hws(entry);
         } else {
-            name_ = trim_ows(entry.substr(0, semi));
+            name_ = strings::trim_hws(entry.substr(0, semi));
             params_src_ = entry.substr(semi + 1);
         }
     }

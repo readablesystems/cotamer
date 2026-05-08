@@ -185,16 +185,16 @@ void http_message::do_clear() {
     }
 }
 
-void http_message::add_header(std::string key, std::string value) {
+void http_message::add_header(std::string_view key, std::string_view value) {
     if (headers_.empty()) {
         headers_.reserve(2048);
     }
     size_t name1 = headers_.length(), name2 = name1 + key.length();
     headers_ += key;
     headers_.append(": ", 2);
-    headers_ += value;
+    headers_ += strings::trim_hws(value);
     headers_.append("\r\n", 2);
-    hpairs_.emplace_back(name1, name2, name2 + 2, name2 + 2 + value.length());
+    hpairs_.emplace_back(name1, name2, name2 + 2, headers_.length() - 2);
 }
 
 void http_message::make_info(unsigned fl) const {
@@ -436,7 +436,13 @@ int http_parser::on_header_value(::llhttp_t* hp, const char* s, size_t len) {
 int http_parser::on_header_value_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     if (md->state == state_header_value) {
-        md->hm.hpairs_.emplace_back(md->name1, md->name2, md->value1, md->hm.headers_.length());
+        // strip trailing OWS (llhttp stripped leading OWS)
+        const char* s = md->hm.headers_.data();
+        size_t v2 = md->hm.headers_.length();
+        while (v2 > md->value1 && (s[v2 - 1] == ' ' || s[v2 - 1] == '\t')) {
+            --v2;
+        }
+        md->hm.hpairs_.emplace_back(md->name1, md->name2, md->value1, v2);
     }
     md->hm.headers_.append("\r\n", 2);
     md->state = state_unknown;

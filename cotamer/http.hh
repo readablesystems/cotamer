@@ -138,8 +138,8 @@ public:
 
     // Modify message
     inline http_message& clear();
-    void add_header(std::string key, std::string value);
-    inline void add_header(std::string key, size_t value);
+    void add_header(std::string_view key, std::string_view value);
+    inline void add_header(std::string_view key, size_t value);
 
     inline http_message& http_major(unsigned v);
     inline http_message& http_minor(unsigned v);
@@ -150,12 +150,12 @@ public:
     inline http_message& method(std::string_view method);
     inline http_message& method_name(std::string_view method);
     inline http_message& url(std::string url);
-    inline http_message& header(std::string key, std::string value);
-    inline http_message& header(std::string key, size_t value);
-    inline http_message& date_header(std::string key, time_t value);
+    inline http_message& header(std::string_view key, std::string_view value);
+    inline http_message& header(std::string_view key, size_t value);
+    inline http_message& date_header(std::string_view key, time_t value);
 
     inline http_message& body(std::string body);
-    inline http_message& append_body(const std::string& x);
+    inline http_message& append_body(std::string_view str);
     template <detail::nlohmann_basic_json_type Json>
     http_message& body(const Json& j);
 
@@ -495,25 +495,25 @@ inline http_message& http_message::url(std::string url) {
     return *this;
 }
 
-inline void http_message::add_header(std::string key, size_t value) {
-    add_header(std::move(key), std::to_string(value));
+inline void http_message::add_header(std::string_view key, size_t value) {
+    add_header(key, std::to_string(value));
 }
 
-inline http_message& http_message::header(std::string key, std::string value) {
-    add_header(std::move(key), std::move(value));
+inline http_message& http_message::header(std::string_view key, std::string_view value) {
+    add_header(key, value);
     return *this;
 }
 
-inline http_message& http_message::header(std::string key, size_t value) {
-    add_header(std::move(key), value);
+inline http_message& http_message::header(std::string_view key, size_t value) {
+    add_header(key, value);
     return *this;
 }
 
-inline http_message& http_message::date_header(std::string key, time_t value) {
+inline http_message& http_message::date_header(std::string_view key, time_t value) {
     char buf[128];
     // XXX current locale
     strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&value));
-    add_header(std::move(key), std::string(buf));
+    add_header(key, std::string(buf));
     return *this;
 }
 
@@ -523,8 +523,8 @@ inline http_message& http_message::body(std::string body) {
     return *this;
 }
 
-inline http_message& http_message::append_body(const std::string& x) {
-    body_ += x;
+inline http_message& http_message::append_body(std::string_view str) {
+    body_ += str;
     has_body_ = 1;
     return *this;
 }
