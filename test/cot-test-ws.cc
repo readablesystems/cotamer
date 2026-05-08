@@ -66,8 +66,8 @@ cot::task<> run_server(std::string addr, cot::event done) {
     done.trigger();
 }
 
-// Echo server with a configurable accept_permessage_deflate.
-cot::task<> server_one_deflate(cot::fd cfd, bool accept_deflate) {
+// Echo server with configurable accept_options.
+cot::task<> server_one_deflate(cot::fd cfd, cot::ws_connection_options accept_opts) {
     try {
         cot::http_parser hp(std::move(cfd), cot::http_parser::server);
         auto req = co_await hp.receive();
@@ -76,7 +76,7 @@ cot::task<> server_one_deflate(cot::fd cfd, bool accept_deflate) {
         }
         try {
             auto ws = co_await cot::ws_upgrade(std::move(hp), req, {},
-                                               accept_deflate);
+                                               accept_opts);
             while (true) {
                 auto m = co_await ws.receive();
                 if (std::holds_alternative<cot::ws_close>(m)) {
@@ -254,7 +254,8 @@ cot::task<> test_deflate_round_trip() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        co_await server_one_deflate(std::move(cfd),
+                                    cot::ws_connection_options::permessage_deflate);
         server_done.trigger();
     };
     server().detach();
@@ -292,7 +293,8 @@ cot::task<> test_deflate_client_off() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        co_await server_one_deflate(std::move(cfd),
+                                    cot::ws_connection_options::permessage_deflate);
         server_done.trigger();
     };
     server().detach();
@@ -324,7 +326,8 @@ cot::task<> test_deflate_server_off() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/false);
+        co_await server_one_deflate(std::move(cfd),
+                                    cot::ws_connection_options::none);
         server_done.trigger();
     };
     server().detach();
@@ -358,7 +361,8 @@ cot::task<> test_deflate_multi_message() {
     auto server = [&]() -> cot::task<> {
         auto lfd = co_await cot::tcp_listen(addr);
         auto cfd = co_await cot::tcp_accept(lfd);
-        co_await server_one_deflate(std::move(cfd), /*accept=*/true);
+        co_await server_one_deflate(std::move(cfd),
+                                    cot::ws_connection_options::permessage_deflate);
         server_done.trigger();
     };
     server().detach();

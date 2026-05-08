@@ -100,7 +100,6 @@ public:
     }
     task<> shutdown();                                // sends close_notify
 
-    const fd& underlying() const noexcept { return f_; }
     std::string_view alpn() const noexcept;           // negotiated protocol, or empty
 
     explicit operator bool() const noexcept { return impl_ != nullptr; }
