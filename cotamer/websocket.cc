@@ -913,13 +913,13 @@ task<> ws_stream::handshake() {
     std::string accept;
     std::string extensions;
     for (auto it = resp.header_begin(); it != resp.header_end(); ++it) {
-        if (it.name_eq_case("Upgrade")) {
+        if (it.name_ieq("Upgrade")) {
             saw_upgrade = strings::ieq(it.value(), "websocket");
-        } else if (it.name_eq_case("Connection")) {
+        } else if (it.name_ieq("Connection")) {
             saw_connection = header_contains_ci_token(it.value(), "upgrade");
-        } else if (it.name_eq_case("Sec-WebSocket-Accept")) {
+        } else if (it.name_ieq("Sec-WebSocket-Accept")) {
             accept.assign(it.value().data(), it.value().size());
-        } else if (it.name_eq_case("Sec-WebSocket-Extensions")) {
+        } else if (it.name_ieq("Sec-WebSocket-Extensions")) {
             extensions.assign(it.value().data(), it.value().size());
         }
     }

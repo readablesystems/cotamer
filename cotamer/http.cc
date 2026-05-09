@@ -145,7 +145,7 @@ const char* http_message::default_status_message(unsigned code) {
 
 http_message::header_iterator http_message::find_header(std::string_view name) const {
     auto it = header_begin(), end = header_end();
-    while (it != end && !it.name_eq_case(name)) {
+    while (it != end && !it.name_ieq(name)) {
         ++it;
     }
     return it;
@@ -156,7 +156,7 @@ std::string http_message::header(std::string_view name) const {
     bool any = false;
     auto it = header_begin(), end = header_end();
     while (it != end) {
-        if (it.name_eq_case(name)) {
+        if (it.name_ieq(name)) {
             if (any) {
                 result += ", ";
                 result += it.value();

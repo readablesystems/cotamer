@@ -53,7 +53,7 @@ public:
     constexpr bool name_eq(std::string_view str) const noexcept {
         return pair_->name(base_) == str;
     }
-    constexpr bool name_eq_case(std::string_view str) const noexcept {
+    constexpr bool name_ieq(std::string_view str) const noexcept {
         return strings::ieq(pair_->name(base_), str);
     }
 

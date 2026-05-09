@@ -106,7 +106,7 @@ struct parameter {
     std::string_view value;      // empty if no `=` was present
     bool quoted = false;         // value came from a quoted-string
 
-    bool name_eq_ci(std::string_view s) const noexcept {
+    bool name_ieq(std::string_view s) const noexcept {
         return strings::ieq(name, s);
     }
 };
@@ -273,7 +273,7 @@ public:
     std::string_view name() const noexcept { return name_; }
     parameters params() const noexcept { return parameters(params_src_); }
 
-    bool name_eq_ci(std::string_view s) const noexcept {
+    bool name_ieq(std::string_view s) const noexcept {
         return strings::ieq(name_, s);
     }
 
