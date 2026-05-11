@@ -1,5 +1,6 @@
 #include "cotamer/cotamer.hh"
 #include "cotamer/http.hh"
+#include "cotamer/http_fields.hh"
 
 #include <cassert>
 #include <cstdlib>
@@ -460,6 +461,228 @@ cot::task<> test_header_setter_ows() {
 }
 
 
+// Tests for cotamer::strings::http_value_list — comma-separated list
+// values (RFC 9110 §5.6.1 `#rule`).
+cot::task<> test_http_value_list() {
+    using cot::strings::http_value_list;
+
+    // Basic three items, no extra whitespace.
+    {
+        http_value_list lst("a, b, c");
+        auto it = lst.begin(), end = lst.end();
+        assert(it != end); assert(*it == "a"); ++it;
+        assert(it != end); assert(*it == "b"); ++it;
+        assert(it != end); assert(*it == "c"); ++it;
+        assert(it == end);
+    }
+
+    // Surrounding OWS (SP/HTAB) is trimmed from each entry.
+    {
+        http_value_list lst("  a  ,\t b\t ,  c");
+        auto it = lst.begin(), end = lst.end();
+        assert(*it == "a"); ++it;
+        assert(*it == "b"); ++it;
+        assert(*it == "c"); ++it;
+        assert(it == end);
+    }
+
+    // Empty entries (`,,` / leading or trailing `,`) are skipped per
+    // `1#element` semantics.
+    {
+        http_value_list lst(",, a, , , b ,,");
+        auto it = lst.begin(), end = lst.end();
+        assert(*it == "a"); ++it;
+        assert(*it == "b"); ++it;
+        assert(it == end);
+    }
+
+    // Quoted-strings shield embedded commas from the splitter.
+    {
+        http_value_list lst("a, \"b, c\", d");
+        auto it = lst.begin(), end = lst.end();
+        assert(*it == "a"); ++it;
+        assert(*it == "\"b, c\""); ++it;
+        assert(*it == "d"); ++it;
+        assert(it == end);
+    }
+
+    // Backslash-escapes inside a quoted-string don't terminate the quote.
+    {
+        http_value_list lst("\"a\\\"b\", x");
+        auto it = lst.begin(), end = lst.end();
+        assert(*it == "\"a\\\"b\""); ++it;
+        assert(*it == "x"); ++it;
+        assert(it == end);
+    }
+
+    // Empty / OWS-only inputs yield no entries.
+    {
+        http_value_list empty("");
+        assert(empty.begin() == empty.end());
+        http_value_list blanks("   ,  , \t,");
+        assert(blanks.begin() == blanks.end());
+    }
+
+    // contains_ci is case-insensitive and respects token boundaries.
+    {
+        http_value_list lst("Upgrade, keep-alive");
+        assert(lst.contains_ci("upgrade"));
+        assert(lst.contains_ci("UPGRADE"));
+        assert(lst.contains_ci("Keep-Alive"));
+        assert(!lst.contains_ci("close"));
+        assert(!lst.contains_ci("up"));     // not a prefix match
+    }
+
+    std::cerr << "http_value_list: ok\n";
+    co_return;
+}
+
+
+// Tests for cotamer::strings::http_parameter_list — semicolon-separated
+// `name[=value]` parameter lists (RFC 9110 §5.6.6).
+cot::task<> test_http_parameter_list() {
+    using cot::strings::http_parameter_list;
+
+    // Basic `name=value` pairs.
+    {
+        std::string src = "foo=bar; baz=qux";
+        http_parameter_list lst(src);
+        auto it = lst.begin(), end = lst.end();
+        assert(it != end);
+        assert(it.name() == "foo");
+        assert(it.raw_value() == "bar");
+        assert(it.span() == "foo=bar");
+        ++it;
+        assert(it != end);
+        assert(it.name() == "baz");
+        assert(it.raw_value() == "qux");
+        ++it;
+        assert(it == end);
+    }
+
+    // Standalone parameters (no `=`): name() is empty, raw_value() holds
+    // the whole token.
+    {
+        std::string src = "permessage-deflate; client_no_context_takeover";
+        http_parameter_list lst(src);
+        auto it = lst.begin(), end = lst.end();
+        assert(it != end);
+        assert(it.name() == "permessage-deflate");
+        ++it;
+        assert(it != end);
+        assert(it.name() == "client_no_context_takeover");
+        ++it;
+        assert(it == end);
+    }
+
+    // Mixed standalone + name=value (the permessage-deflate shape).
+    {
+        std::string src = "permessage-deflate; client_max_window_bits=15";
+        http_parameter_list lst(src);
+        auto it = lst.begin();
+        assert(it.name() == "permessage-deflate");
+        ++it;
+        assert(it.name() == "client_max_window_bits");
+        assert(it.raw_value() == "15");
+        ++it;
+        assert(it == lst.end());
+    }
+
+    // `;` inside a quoted-string doesn't split.
+    {
+        std::string src = "title=\"hello; world\"; charset=utf-8";
+        http_parameter_list lst(src);
+        auto it = lst.begin();
+        assert(it.name() == "title");
+        assert(it.raw_value() == "\"hello; world\"");
+        assert(it.value() == "hello; world");      // unquoted
+        ++it;
+        assert(it.name() == "charset");
+        assert(it.raw_value() == "utf-8");
+        assert(it.value() == "utf-8");
+        ++it;
+        assert(it == lst.end());
+    }
+
+    // Trailing OWS is trimmed; empty/OWS-only segments are skipped.
+    {
+        std::string src = ";; foo=bar  ;  ;baz=qux ;";
+        http_parameter_list lst(src);
+        auto it = lst.begin();
+        assert(it.name() == "foo");
+        assert(it.raw_value() == "bar");
+        ++it;
+        assert(it.name() == "baz");
+        assert(it.raw_value() == "qux");
+        ++it;
+        assert(it == lst.end());
+    }
+
+    // Whitespace around `=` defeats the name/value split (strict RFC).
+    {
+        std::string src = "foo = bar";
+        http_parameter_list lst(src);
+        auto it = lst.begin();
+        assert(it.name() == "foo = bar");        // no name recognized
+        ++it;
+        assert(it == lst.end());
+    }
+
+    // unquote(): strips surrounding quotes and decodes backslash escapes.
+    {
+        assert(http_parameter_list::unquote("plain") == "plain");
+        assert(http_parameter_list::unquote("\"hello\"") == "hello");
+        assert(http_parameter_list::unquote("\"a\\\"b\"") == "a\"b");
+        assert(http_parameter_list::unquote("\"\"") == "");
+        assert(http_parameter_list::unquote("") == "");
+    }
+
+    // Empty input.
+    {
+        http_parameter_list empty("");
+        assert(empty.begin() == empty.end());
+    }
+
+    // Composition: Sec-WebSocket-Extensions-style header with two
+    // offerings, each a parameterized token.
+    {
+        std::string hdr =
+            "permessage-deflate; client_no_context_takeover, x-foo; opt=1";
+        cot::strings::http_value_list outer(hdr);
+
+        auto oit = outer.begin();
+        assert(oit != outer.end());
+        std::string first(*oit);
+        assert(first == "permessage-deflate; client_no_context_takeover");
+        ++oit;
+        std::string second(*oit);
+        assert(second == "x-foo; opt=1");
+        ++oit;
+        assert(oit == outer.end());
+
+        http_parameter_list p0(first);
+        auto pit = p0.begin();
+        assert(pit.raw_value() == "permessage-deflate");
+        ++pit;
+        assert(pit.raw_value() == "client_no_context_takeover");
+        ++pit;
+        assert(pit == p0.end());
+
+        http_parameter_list p1(second);
+        pit = p1.begin();
+        assert(pit.raw_value() == "x-foo");
+        ++pit;
+        assert(pit.name() == "opt");
+        assert(pit.raw_value() == "1");
+        ++pit;
+        assert(pit == p1.end());
+    }
+
+    std::cerr << "http_parameter_list: ok\n";
+    co_return;
+}
+
+
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
 
@@ -487,6 +710,8 @@ int main(int argc, char* argv[]) {
     run("search_param", test_search_param);
     run("header_value_ows", test_header_value_ows);
     run("header_setter_ows", test_header_setter_ows);
+    run("http_value_list", test_http_value_list);
+    run("http_parameter_list", test_http_parameter_list);
 
     if (ran == 0) {
         std::cerr << "No matching tests\n";
