@@ -523,14 +523,14 @@ cot::task<> test_http_value_list() {
         assert(blanks.begin() == blanks.end());
     }
 
-    // contains_ci is case-insensitive and respects token boundaries.
+    // icontains is case-insensitive and respects token boundaries.
     {
         http_value_list lst("Upgrade, keep-alive");
-        assert(lst.contains_ci("upgrade"));
-        assert(lst.contains_ci("UPGRADE"));
-        assert(lst.contains_ci("Keep-Alive"));
-        assert(!lst.contains_ci("close"));
-        assert(!lst.contains_ci("up"));     // not a prefix match
+        assert(lst.icontains("upgrade"));
+        assert(lst.icontains("UPGRADE"));
+        assert(lst.icontains("Keep-Alive"));
+        assert(!lst.icontains("close"));
+        assert(!lst.icontains("up"));     // not a prefix match
     }
 
     std::cerr << "http_value_list: ok\n";
@@ -630,16 +630,22 @@ cot::task<> test_http_parameter_list() {
 
     // unquote(): strips surrounding quotes and decodes backslash escapes.
     {
-        assert(http_parameter_list::unquote("plain") == "plain");
-        assert(http_parameter_list::unquote("\"hello\"") == "hello");
-        assert(http_parameter_list::unquote("\"a\\\"b\"") == "a\"b");
-        assert(http_parameter_list::unquote("\"\"") == "");
-        assert(http_parameter_list::unquote("") == "");
+        assert(cot::strings::http_unquote("plain") == "plain");
+        assert(cot::strings::http_unquote("\"hello\"") == "hello");
+        assert(cot::strings::http_unquote("\"a\\\"b\"") == "a\"b");
+        assert(cot::strings::http_unquote("\"\"") == "");
+        assert(cot::strings::http_unquote("") == "");
     }
 
     // Empty input.
     {
         http_parameter_list empty("");
+        assert(empty.begin() == empty.end());
+    }
+
+    // Complex empty input.
+    {
+        http_parameter_list empty(" ; ;;;;; ; ;; ;;; ;;;");
         assert(empty.begin() == empty.end());
     }
 

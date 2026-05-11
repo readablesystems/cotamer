@@ -137,6 +137,9 @@ public:
     inline const std::string& body() const;
 
     // Modify message
+    // Message modifications invalidate all iterators (find_header(),
+    // header_begin()/end(), search_param_begin()/end()) and returned
+    // string_views (header(), path(), search(), hash(), search_param()).
     inline http_message& clear();
     void add_header(std::string_view key, std::string_view value);
     inline void add_header(std::string_view key, size_t value);

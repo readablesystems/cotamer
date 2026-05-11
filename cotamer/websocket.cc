@@ -1,5 +1,6 @@
 // -*- mode: c++ -*-
 #include "cotamer/websocket.hh"
+#include "cotamer/http_fields.hh"
 #include "cotamer/io.hh"
 
 #include <wslay/wslay.h>
@@ -164,7 +165,9 @@ std::string base64_encode(const void* data, size_t n) {
     }
     if (i < n) {
         uint32_t v = uint32_t(p[i]) << 16;
-        if (i + 1 < n) v |= uint32_t(p[i+1]) << 8;
+        if (i + 1 < n) {
+            v |= uint32_t(p[i+1]) << 8;
+        }
         out.push_back(b64_chars[(v >> 18) & 0x3f]);
         out.push_back(b64_chars[(v >> 12) & 0x3f]);
         if (i + 1 < n) {
@@ -192,29 +195,6 @@ std::string ws_compute_accept(std::string_view key) {
     return base64_encode(digest, 20);
 }
 
-
-// --- header utilities ------------------------------------------------------
-
-bool header_contains_ci_token(std::string_view value, std::string_view token) {
-    auto match = [&](size_t pos) {
-        if (pos + token.size() > value.size()) return false;
-        for (size_t i = 0; i < token.size(); ++i) {
-            char a = value[pos + i], b = token[i];
-            if (a >= 'A' && a <= 'Z') a = a + 32;
-            if (b >= 'A' && b <= 'Z') b = b + 32;
-            if (a != b) return false;
-        }
-        char before = pos == 0 ? ',' : value[pos - 1];
-        char after = pos + token.size() == value.size()
-                     ? ',' : value[pos + token.size()];
-        auto sep = [](char c) { return c == ',' || c == ' ' || c == '\t'; };
-        return sep(before) && sep(after);
-    };
-    for (size_t i = 0; i + token.size() <= value.size(); ++i) {
-        if (match(i)) return true;
-    }
-    return false;
-}
 
 } // namespace
 
@@ -498,7 +478,9 @@ ws_stream::ws_stream(std::unique_ptr<stream> strm, bool is_client)
         : wslay_event_context_server_init(&state_->ctx,
                                           &ws_event_callbacks,
                                           state_.get());
-    if (rv != 0) throw ws_error(rv);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
 }
 
 ws_stream::ws_stream(ws_stream&&) noexcept = default;
@@ -671,82 +653,46 @@ void parse_extension_header(std::string_view header,
                             ws_connection_options& opts) {
     // The header may list several offers separated by commas. We only care
     // about the first permessage-deflate occurrence.
-    size_t i = 0;
-    while (i < header.size()) {
-        // Skip leading whitespace.
-        while (i < header.size() && (header[i] == ' ' || header[i] == '\t')) ++i;
-        size_t end = header.find(',', i);
-        std::string_view ext = header.substr(
-            i, (end == std::string_view::npos ? header.size() : end) - i);
-        // Strip trailing whitespace.
-        while (!ext.empty() && (ext.back() == ' ' || ext.back() == '\t')) {
-            ext.remove_suffix(1);
+    for (auto ext : strings::http_value_list(header)) {
+        strings::http_parameter_list params(ext);
+        auto it = params.begin(), end = params.end();
+        if (it == end || it.has_value()) {
+            // Empty entry, or entry that begins with `name=value` rather
+            // than a bare extension token — neither is a permessage-deflate
+            // offering.
+            continue;
         }
-        // Split on ';'.
-        size_t semi = ext.find(';');
-        std::string_view name = ext.substr(0, semi);
-        // Trim whitespace.
-        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) {
-            name.remove_prefix(1);
+        if (!it.name_ci("permessage-deflate")) {
+            continue;
         }
-        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
-            name.remove_suffix(1);
-        }
-        if (strings::ieq(name, "permessage-deflate")) {
-            opts |= ws_connection_options::permessage_deflate;
-            // Walk the parameters.
-            size_t p = (semi == std::string_view::npos ? ext.size() : semi + 1);
-            while (p < ext.size()) {
-                while (p < ext.size() && (ext[p] == ' ' || ext[p] == '\t' || ext[p] == ';')) ++p;
-                size_t pend = p;
-                while (pend < ext.size() && ext[pend] != ';') ++pend;
-                std::string_view param = ext.substr(p, pend - p);
-                while (!param.empty()
-                       && (param.back() == ' ' || param.back() == '\t')) {
-                    param.remove_suffix(1);
-                }
-                // param is "name" or "name=value"; ignore values for the
-                // *_no_context_takeover parameters (they're standalone).
-                size_t eq = param.find('=');
-                std::string_view pname = param.substr(0, eq);
-                while (!pname.empty()
-                       && (pname.back() == ' ' || pname.back() == '\t')) {
-                    pname.remove_suffix(1);
-                }
-                if (strings::ieq(pname, "server_no_context_takeover")) {
+
+        opts |= ws_connection_options::permessage_deflate;
+        for (++it; it != end; ++it) {
+            if (!it.has_value()) {
+                // Standalone parameter (no `=`).
+                if (it.name_ci("server_no_context_takeover")) {
                     opts |= ws_connection_options::server_no_context_takeover;
-                } else if (strings::ieq(pname, "client_no_context_takeover")) {
+                } else if (it.name_ci("client_no_context_takeover")) {
                     opts |= ws_connection_options::client_no_context_takeover;
-                } else if (strings::ieq(pname, "server_max_window_bits")
-                           || strings::ieq(pname, "client_max_window_bits")) {
-                    // We always use 15-bit windows. The standalone form (no
-                    // value) is informational only; with a value, the peer
-                    // is restricting the window size — we don't honor that
-                    // and would need to negotiate a smaller value. For now
-                    // accept the parameter (we still send 15-bit) but mark
-                    // it as unknown if the value is something other than 15.
-                    if (eq != std::string_view::npos) {
-                        std::string_view pval = param.substr(eq + 1);
-                        while (!pval.empty()
-                               && (pval.front() == ' ' || pval.front() == '\t')) {
-                            pval.remove_prefix(1);
-                        }
-                        while (!pval.empty()
-                               && (pval.back() == ' ' || pval.back() == '\t')) {
-                            pval.remove_suffix(1);
-                        }
-                        if (pval != "15") {
-                            opts |= ws_connection_options::unknown_option;
-                        }
-                    }
-                } else if (!pname.empty()) {
+                } else if (it.name_ci("server_max_window_bits")
+                           || it.name_ci("client_max_window_bits")) {
+                    // Standalone form is informational; we use 15-bit
+                    // windows.
+                } else {
                     opts |= ws_connection_options::unknown_option;
                 }
-                p = pend + 1;
+            } else if (it.name_ci("server_max_window_bits")
+                       || it.name_ci("client_max_window_bits")) {
+                // We always send 15-bit windows. Anything else is an
+                // unsatisfiable constraint.
+                if (it.raw_value() != "15") {
+                    opts |= ws_connection_options::unknown_option;
+                }
+            } else {
+                opts |= ws_connection_options::unknown_option;
             }
-            return;
         }
-        i = (end == std::string_view::npos ? header.size() : end + 1);
+        return;
     }
 }
 
@@ -780,13 +726,17 @@ int queue_data_message(detail::ws_state* s, uint8_t opcode,
 task<> ws_stream::send_text(std::string_view payload) {
     int rv = queue_data_message(state_.get(), WSLAY_TEXT_FRAME,
                                 payload.data(), payload.size());
-    if (rv != 0) throw ws_error(rv);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
     co_await pump_writes();
 }
 
 task<> ws_stream::send_binary(const void* data, size_t n) {
     int rv = queue_data_message(state_.get(), WSLAY_BINARY_FRAME, data, n);
-    if (rv != 0) throw ws_error(rv);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
     co_await pump_writes();
 }
 
@@ -797,7 +747,9 @@ task<> ws_stream::send_ping(std::string_view payload) {
         payload.size()
     };
     int rv = wslay_event_queue_msg(state_->ctx, &msg);
-    if (rv != 0) throw ws_error(rv);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
     co_await pump_writes();
 }
 
@@ -808,12 +760,13 @@ task<> ws_stream::send_pong(std::string_view payload) {
         payload.size()
     };
     int rv = wslay_event_queue_msg(state_->ctx, &msg);
-    if (rv != 0) throw ws_error(rv);
+    if (rv != 0) {
+        throw ws_error(rv);
+    }
     co_await pump_writes();
 }
 
-task<> ws_stream::send_close(uint16_t code,
-                                              std::string_view reason) {
+task<> ws_stream::send_close(uint16_t code, std::string_view reason) {
     int rv = wslay_event_queue_close(
         state_->ctx, code,
         reinterpret_cast<const uint8_t*>(reason.data()),
@@ -825,7 +778,9 @@ task<> ws_stream::send_close(uint16_t code,
 }
 
 task<> ws_stream::close() {
-    if (!state_) co_return;
+    if (!state_) {
+        co_return;
+    }
     if (!wslay_event_get_close_sent(state_->ctx)) {
         co_await send_close(1000, "");
     }
@@ -833,7 +788,9 @@ task<> ws_stream::close() {
     while (wslay_event_get_read_enabled(state_->ctx)
            && !wslay_event_get_close_received(state_->ctx)) {
         bool ok = co_await pump_reads();
-        if (!ok) break;
+        if (!ok) {
+            break;
+        }
     }
     co_await pump_writes();
 }
@@ -873,7 +830,9 @@ task<> ws_stream::handshake() {
     if (!client_subprotocols_.empty()) {
         req += "Sec-WebSocket-Protocol: ";
         for (size_t i = 0; i < client_subprotocols_.size(); ++i) {
-            if (i) req += ", ";
+            if (i != 0) {
+                req += ", ";
+            }
             req += client_subprotocols_[i];
         }
         req += "\r\n";
@@ -909,18 +868,32 @@ task<> ws_stream::handshake() {
                                    resp.status_code(), resp.status_message()));
     }
 
+    // Header iteration yields one element per header line; the same field
+    // name can recur. Combine multi-instance fields per RFC 9110 §5.3:
+    // list-valued fields concatenate with `,`, single-valued must appear
+    // at most once.
     bool saw_upgrade = false, saw_connection = false;
     std::string accept;
     std::string extensions;
     for (auto it = resp.header_begin(); it != resp.header_end(); ++it) {
         if (it.name_ieq("Upgrade")) {
-            saw_upgrade = strings::ieq(it.value(), "websocket");
+            saw_upgrade = saw_upgrade
+                || strings::http_value_list(it.value())
+                       .icontains("websocket");
         } else if (it.name_ieq("Connection")) {
-            saw_connection = header_contains_ci_token(it.value(), "upgrade");
+            saw_connection = saw_connection
+                || strings::http_value_list(it.value())
+                       .icontains("upgrade");
         } else if (it.name_ieq("Sec-WebSocket-Accept")) {
-            accept.assign(it.value().data(), it.value().size());
+            // Must appear exactly once per RFC 6455 §4.1.
+            if (accept.empty()) {
+                accept.assign(it.value().data(), it.value().size());
+            }
         } else if (it.name_ieq("Sec-WebSocket-Extensions")) {
-            extensions.assign(it.value().data(), it.value().size());
+            if (!extensions.empty()) {
+                extensions += ", ";
+            }
+            extensions.append(it.value().data(), it.value().size());
         }
     }
     if (!saw_upgrade || !saw_connection) {
@@ -971,19 +944,32 @@ task<> ws_stream::handshake() {
 // --- server upgrade --------------------------------------------------------
 
 bool is_ws_upgrade_request(const http_message& req) {
-    if (req.method() != HTTP_GET) return false;
-    if (req.http_major() < 1 || (req.http_major() == 1 && req.http_minor() < 1)) {
+    if (req.method() != HTTP_GET) {
+        return false;
+    }
+    if (req.http_major() < 1
+        || (req.http_major() == 1 && req.http_minor() < 1)) {
         return false;
     }
     auto upg = req.find_header("upgrade");
-    if (upg == req.header_end() || !strings::ieq(upg.value(), "websocket")) return false;
+    if (upg == req.header_end()
+        || !strings::ieq(upg.value(), "websocket")) {
+        return false;
+    }
     auto conn = req.find_header("connection");
     if (conn == req.header_end()
-        || !header_contains_ci_token(conn.value(), "upgrade")) return false;
+        || !strings::http_value_list(std::string{conn.value()})
+                .icontains("upgrade")) {
+        return false;
+    }
     auto key = req.find_header("sec-websocket-key");
-    if (key == req.header_end() || key.value().empty()) return false;
+    if (key == req.header_end() || key.value().empty()) {
+        return false;
+    }
     auto ver = req.find_header("sec-websocket-version");
-    if (ver == req.header_end() || ver.value() != "13") return false;
+    if (ver == req.header_end() || ver.value() != "13") {
+        return false;
+    }
     return true;
 }
 
@@ -1017,22 +1003,16 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
     if (!subprotocols.empty()) {
         auto offered = req.find_header("sec-websocket-protocol");
         if (offered != req.header_end()) {
-            std::string_view all = offered.value();
-            size_t i = 0;
-            while (i < all.size() && chosen_subprotocol.empty()) {
-                while (i < all.size() && (all[i] == ' ' || all[i] == ',')) ++i;
-                size_t j = i;
-                while (j < all.size() && all[j] != ',') ++j;
-                size_t end = j;
-                while (end > i && (all[end-1] == ' ' || all[end-1] == '\t')) --end;
-                std::string_view tok(all.data() + i, end - i);
+            for (auto tok : strings::http_value_list(std::string{offered.value()})) {
                 for (auto& sup : subprotocols) {
                     if (tok == sup) {
                         chosen_subprotocol = sup;
                         break;
                     }
                 }
-                i = j + 1;
+                if (!chosen_subprotocol.empty()) {
+                    break;
+                }
             }
         }
     }

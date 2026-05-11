@@ -750,7 +750,7 @@ auto http_parameter_list::iterator::operator++() noexcept -> iterator& {
     rest_.remove_prefix(s - rest_.data());
     span_ = std::string_view{first, last_nws};
     if (last_name > first
-        && last_nws - last_name > 1
+        && s - last_name > 1
         && *last_name == '='
         && last_name[1] != ' '
         && last_name[1] != '\t') {
@@ -761,7 +761,7 @@ auto http_parameter_list::iterator::operator++() noexcept -> iterator& {
     return *this;
 }
 
-std::string http_parameter_list::unquote(std::string_view str) {
+std::string http_unquote(std::string_view str) {
     if (str.empty() || str[0] != '\"') {
         return std::string(str);
     }
