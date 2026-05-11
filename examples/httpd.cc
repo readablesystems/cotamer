@@ -7,7 +7,7 @@
 namespace cot = cotamer;
 
 #if COTAMER_HTTPD_HAS_WSLAY
-cot::task<> run_ws_echo(cot::ws_stream ws) {
+cot::task<> run_ws_echo(cot::ws_parser ws) {
     while (true) {
         auto m = co_await ws.receive();
         if (std::holds_alternative<cot::ws_close>(m)) {

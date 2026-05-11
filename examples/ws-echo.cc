@@ -13,7 +13,7 @@ namespace cot = cotamer;
 cot::task<> run_client(std::string addr, std::string host, std::string path,
                        std::string message) {
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), host, path);
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), host, path);
     co_await ws.handshake();
     std::cerr << "ws-echo: handshake ok\n";
 

@@ -465,9 +465,9 @@ const wslay_event_callbacks ws_event_callbacks = {
 } // namespace
 
 
-// --- basic_ws_stream -------------------------------------------------------
+// --- ws_parser -------------------------------------------------------------
 
-ws_stream::ws_stream(std::unique_ptr<stream> strm, bool is_client)
+ws_parser::ws_parser(std::unique_ptr<stream> strm, bool is_client)
     : stream_(std::move(strm)),
       state_(std::make_unique<detail::ws_state>()) {
     state_->is_client = is_client;
@@ -483,29 +483,29 @@ ws_stream::ws_stream(std::unique_ptr<stream> strm, bool is_client)
     }
 }
 
-ws_stream::ws_stream(ws_stream&&) noexcept = default;
-ws_stream& ws_stream::operator=(ws_stream&&) noexcept = default;
-ws_stream::~ws_stream() = default;
+ws_parser::ws_parser(ws_parser&&) noexcept = default;
+ws_parser& ws_parser::operator=(ws_parser&&) noexcept = default;
+ws_parser::~ws_parser() = default;
 
 
-ws_stream ws_stream::wrap_client(
+ws_parser ws_parser::wrap_client(
     std::unique_ptr<stream> strm, std::string host, std::string path,
     std::vector<std::string> subprotocols,
-    bool offer_permessage_deflate)
+    ws_connection_options offer_options)
 {
-    ws_stream ws(std::move(strm), /*is_client=*/true);
+    ws_parser ws(std::move(strm), /*is_client=*/true);
     ws.client_host_ = std::move(host);
     ws.client_path_ = std::move(path);
     ws.client_subprotocols_ = std::move(subprotocols);
-    ws.client_offer_deflate_ = offer_permessage_deflate;
+    ws.client_offer_options_ = offer_options;
     return ws;
 }
 
-ws_stream ws_stream::wrap_server(
+ws_parser ws_parser::wrap_server(
     std::unique_ptr<stream> strm, std::string residual,
     ws_connection_options options)
 {
-    ws_stream ws(std::move(strm), /*is_client=*/false);
+    ws_parser ws(std::move(strm), /*is_client=*/false);
     if (!residual.empty()) {
         const auto* p = reinterpret_cast<const uint8_t*>(residual.data());
         ws.state_->recv_buf.assign(p, p + residual.size());
@@ -523,7 +523,7 @@ ws_stream ws_stream::wrap_server(
     return ws;
 }
 
-bool ws_stream::is_open() const noexcept {
+bool ws_parser::is_open() const noexcept {
     if (!state_) {
         return false;
     }
@@ -531,12 +531,12 @@ bool ws_stream::is_open() const noexcept {
         || wslay_event_get_write_enabled(state_->ctx);
 }
 
-bool ws_stream::permessage_deflate_negotiated() const noexcept {
+bool ws_parser::permessage_deflate_negotiated() const noexcept {
     return state_
         && unsigned(state_->options & ws_connection_options::permessage_deflate);
 }
 
-task<> ws_stream::pump_writes() {
+task<> ws_parser::pump_writes() {
     if (!state_) {
         co_return;
     }
@@ -561,7 +561,7 @@ task<> ws_stream::pump_writes() {
     }
 }
 
-task<bool> ws_stream::pump_reads() {
+task<bool> ws_parser::pump_reads() {
     if (!state_ || !wslay_event_get_read_enabled(state_->ctx)) {
         co_return false;
     }
@@ -592,7 +592,7 @@ task<bool> ws_stream::pump_reads() {
     co_return true;
 }
 
-task<ws_stream::receive_result> ws_stream::receive() {
+task<ws_parser::receive_result> ws_parser::receive() {
     while (true) {
         co_await pump_writes();
 
@@ -723,7 +723,7 @@ int queue_data_message(detail::ws_state* s, uint8_t opcode,
 
 } // namespace
 
-task<> ws_stream::send_text(std::string_view payload) {
+task<> ws_parser::send_text(std::string_view payload) {
     int rv = queue_data_message(state_.get(), WSLAY_TEXT_FRAME,
                                 payload.data(), payload.size());
     if (rv != 0) {
@@ -732,7 +732,7 @@ task<> ws_stream::send_text(std::string_view payload) {
     co_await pump_writes();
 }
 
-task<> ws_stream::send_binary(const void* data, size_t n) {
+task<> ws_parser::send_binary(const void* data, size_t n) {
     int rv = queue_data_message(state_.get(), WSLAY_BINARY_FRAME, data, n);
     if (rv != 0) {
         throw ws_error(rv);
@@ -740,7 +740,7 @@ task<> ws_stream::send_binary(const void* data, size_t n) {
     co_await pump_writes();
 }
 
-task<> ws_stream::send_ping(std::string_view payload) {
+task<> ws_parser::send_ping(std::string_view payload) {
     wslay_event_msg msg = {
         WSLAY_PING,
         reinterpret_cast<const uint8_t*>(payload.data()),
@@ -753,7 +753,7 @@ task<> ws_stream::send_ping(std::string_view payload) {
     co_await pump_writes();
 }
 
-task<> ws_stream::send_pong(std::string_view payload) {
+task<> ws_parser::send_pong(std::string_view payload) {
     wslay_event_msg msg = {
         WSLAY_PONG,
         reinterpret_cast<const uint8_t*>(payload.data()),
@@ -766,7 +766,7 @@ task<> ws_stream::send_pong(std::string_view payload) {
     co_await pump_writes();
 }
 
-task<> ws_stream::send_close(uint16_t code, std::string_view reason) {
+task<> ws_parser::send_close(uint16_t code, std::string_view reason) {
     int rv = wslay_event_queue_close(
         state_->ctx, code,
         reinterpret_cast<const uint8_t*>(reason.data()),
@@ -777,7 +777,7 @@ task<> ws_stream::send_close(uint16_t code, std::string_view reason) {
     co_await pump_writes();
 }
 
-task<> ws_stream::close() {
+task<> ws_parser::close() {
     if (!state_) {
         co_return;
     }
@@ -811,10 +811,10 @@ std::string make_random_key() {
 
 } // namespace
 
-task<> ws_stream::handshake() {
+task<> ws_parser::handshake() {
     if (!state_ || !state_->is_client) {
         throw ws_error(WSLAY_ERR_INVALID_ARGUMENT,
-                       "handshake() called on non-client ws_stream");
+                       "handshake() called on non-client ws_parser");
     }
 
     std::string key = make_random_key();
@@ -838,11 +838,20 @@ task<> ws_stream::handshake() {
         req += "\r\n";
     }
 #if COTAMER_HAVE_ZLIB
-    if (client_offer_deflate_) {
+    if (unsigned(client_offer_options_ & ws_connection_options::permessage_deflate)) {
         // Offer with `client_max_window_bits` so a server that wants to
         // restrict our window can do so by echoing a value.
         req += "Sec-WebSocket-Extensions: permessage-deflate; "
-               "client_max_window_bits\r\n";
+               "client_max_window_bits";
+        if (unsigned(client_offer_options_
+                     & ws_connection_options::server_no_context_takeover)) {
+            req += "; server_no_context_takeover";
+        }
+        if (unsigned(client_offer_options_
+                     & ws_connection_options::client_no_context_takeover)) {
+            req += "; client_no_context_takeover";
+        }
+        req += "\r\n";
     }
 #endif
     req += "\r\n";
@@ -850,11 +859,8 @@ task<> ws_stream::handshake() {
     iovec iov{ req.data(), req.size() };
     co_await stream_->sendv(&iov, 1, MSG_WAITALL);
 
-    // Parse the 101 response with http_parser. Today we only instantiate
-    // basic_ws_stream<fd>, so http_parser (which is fd-bound) suffices —
-    // wss:// (basic_ws_stream<tls_stream>) is a Phase 4 task and will
-    // require either specializing this method for fd or making http_parser
-    // transport-agnostic.
+    // Parse the 101 response with http_parser using the same underlying
+    // stream we've been writing to.
     http_parser hp(std::move(stream_), http_parser::client);
     auto resp = co_await hp.receive();
     if (!hp.ok()) {
@@ -911,7 +917,8 @@ task<> ws_stream::handshake() {
         ws_connection_options opts = {};
         parse_extension_header(extensions, opts);
         if (unsigned(opts & ws_connection_options::permessage_deflate)) {
-            if (!client_offer_deflate_) {
+            if (!unsigned(client_offer_options_
+                          & ws_connection_options::permessage_deflate)) {
                 throw ws_error(WSLAY_ERR_PROTO,
                                "ws handshake: server enabled an extension we "
                                "did not offer");
@@ -985,7 +992,7 @@ task<void> write_400(http_parser& hp, const std::string& reason) {
 
 } // namespace
 
-task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
+task<ws_parser> ws_upgrade(http_parser&& hp, const http_message& req,
                            std::vector<std::string> subprotocols,
                            ws_connection_options accept_options) {
     if (!is_ws_upgrade_request(req)) {
@@ -1070,7 +1077,7 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
     auto strm = hp.take_stream();
     co_await strm->send(res.data(), res.size(), MSG_WAITALL);
 
-    co_return ws_stream::wrap_server(std::move(strm), std::move(hp.receive_buffer()),
+    co_return ws_parser::wrap_server(std::move(strm), std::move(hp.receive_buffer()),
                                      conn_options);
 }
 

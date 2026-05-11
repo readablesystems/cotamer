@@ -13,9 +13,9 @@
 // cotamer/websocket.hh
 //    Coroutine-driven WebSocket (RFC 6455) streams built on wslay.
 //
-//    `basic_ws_stream<Transport>` wraps a connected byte-stream transport
-//    (typically `cotamer::fd` for ws://, or `cotamer::tls_stream` for wss://)
-//    and provides coroutine-based send/receive on top of wslay's framing.
+//    `ws_parser` wraps a connected byte-stream (a `cotamer::stream`, e.g.
+//    a `cotamer::fd` for ws:// or a `cotamer::tls_stream` for wss://) and
+//    provides coroutine-based send/receive on top of wslay's framing.
 //
 //    Server-side use:
 //        cot::http_parser hp(std::move(cfd), cot::http_parser::server);
@@ -27,7 +27,7 @@
 //
 //    Client-side use:
 //        auto cfd = co_await cot::tcp_connect("host:port");
-//        auto ws = cot::ws_stream::wrap_client(std::move(cfd),
+//        auto ws = cot::ws_parser::wrap_client(std::move(cfd),
 //                                              "host", "/path");
 //        co_await ws.handshake();
 //        // ... use ws ...
@@ -91,37 +91,39 @@ struct ws_close {
 namespace detail { struct ws_state; }
 
 
-class ws_stream {
+class ws_parser {
 public:
     using receive_result = std::variant<ws_message, ws_close>;
 
-    ws_stream(ws_stream&&) noexcept;
-    ws_stream& operator=(ws_stream&&) noexcept;
-    ws_stream(const ws_stream&) = delete;
-    ws_stream& operator=(const ws_stream&) = delete;
-    ~ws_stream();
+    ws_parser(ws_parser&&) noexcept;
+    ws_parser& operator=(ws_parser&&) noexcept;
+    ws_parser(const ws_parser&) = delete;
+    ws_parser& operator=(const ws_parser&) = delete;
+    ~ws_parser();
 
     explicit operator bool() const noexcept { return state_ != nullptr; }
 
-    // Wrap an already-connected transport in a client-side ws_stream.
+    // Wrap an already-connected transport in a client-side ws_parser.
     // The handshake is NOT performed; call `handshake()`.
     //
-    // `offer_permessage_deflate` (default true) controls whether the client
-    // advertises the permessage-deflate extension (RFC 7692) in the upgrade
-    // request. When the server accepts, both sides transparently compress
-    // data frames; otherwise the connection runs uncompressed.
-    static ws_stream wrap_client(std::unique_ptr<stream> strm,
+    // `offer_options` controls extension negotiation. Setting
+    // `permessage_deflate` (the default) advertises the permessage-deflate
+    // extension (RFC 7692) in the upgrade request. Additionally setting
+    // `server_no_context_takeover` and/or `client_no_context_takeover`
+    // asks the server to negotiate those parameters.
+    static ws_parser wrap_client(std::unique_ptr<stream> strm,
                                  std::string host,
                                  std::string path,
                                  std::vector<std::string> subprotocols = {},
-                                 bool offer_permessage_deflate = true);
+                                 ws_connection_options offer_options =
+                                     ws_connection_options::permessage_deflate);
     template <typename S>
-    static ws_stream wrap_client(S strm, std::string host, std::string path, std::vector<std::string> subprotocols = {}, bool offer_permessage_deflate = true) {
-        return wrap_client(make_stream(std::move(strm)), std::move(host), std::move(path), std::move(subprotocols), offer_permessage_deflate);
+    static ws_parser wrap_client(S strm, std::string host, std::string path, std::vector<std::string> subprotocols = {}, ws_connection_options offer_options = ws_connection_options::permessage_deflate) {
+        return wrap_client(make_stream(std::move(strm)), std::move(host), std::move(path), std::move(subprotocols), offer_options);
     }
 
     // Wrap a transport that is already past the HTTP/101 handshake (caller
-    // performed/validated the handshake) in a server-side ws_stream.
+    // performed/validated the handshake) in a server-side ws_parser.
     // `residual` holds any bytes the caller already read past the end of the
     // upgrade request (e.g. WebSocket frames piggybacked on the same TCP
     // segment); they are pushed into the receive pipeline before any further
@@ -131,11 +133,11 @@ public:
     // permessage-deflate was enabled and which side(s) must reset their
     // compression context after every message (per the parameters echoed in
     // the 101 response).
-    static ws_stream wrap_server(std::unique_ptr<stream> strm,
+    static ws_parser wrap_server(std::unique_ptr<stream> strm,
                                  std::string residual = {},
                                  ws_connection_options options = {});
     template <typename S>
-    static ws_stream wrap_server(S strm, std::string residual = {}, ws_connection_options options = {}) {
+    static ws_parser wrap_server(S strm, std::string residual = {}, ws_connection_options options = {}) {
         return wrap_server(make_stream(std::move(strm)), std::move(residual), options);
     }
 
@@ -171,14 +173,14 @@ public:
     bool permessage_deflate_negotiated() const noexcept;
 
 private:
-    ws_stream(std::unique_ptr<stream> strm, bool is_client);
+    ws_parser(std::unique_ptr<stream> strm, bool is_client);
 
     std::unique_ptr<stream> stream_;
     std::unique_ptr<detail::ws_state> state_;
     std::string client_host_;
     std::string client_path_;
     std::vector<std::string> client_subprotocols_;
-    bool client_offer_deflate_ = false;
+    ws_connection_options client_offer_options_ = {};
 
     task<> pump_writes();
     task<bool> pump_reads();   // returns false on EOF
@@ -193,7 +195,7 @@ bool is_ws_upgrade_request(const http_message& req);
 // Server-side handshake completion. The caller has already received the
 // upgrade request `req` from `hp`. This function validates the request,
 // writes the HTTP/101 response, takes ownership of the underlying fd, and
-// returns a server-mode ws_stream ready for receive()/send.
+// returns a server-mode ws_parser ready for receive()/send.
 //
 // `subprotocols` is the server's list of supported subprotocols; the first
 // entry from `Sec-WebSocket-Protocol` that appears in this list is selected
@@ -207,7 +209,7 @@ bool is_ws_upgrade_request(const http_message& req);
 //
 // On a malformed upgrade request, a 400 response is written and a ws_error
 // is thrown.
-task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
+task<ws_parser> ws_upgrade(http_parser&& hp, const http_message& req,
                            std::vector<std::string> subprotocols = {},
                            ws_connection_options accept_options =
                                ws_connection_options::permessage_deflate);

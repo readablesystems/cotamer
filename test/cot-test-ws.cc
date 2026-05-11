@@ -108,7 +108,7 @@ cot::task<> test_text_echo() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/");
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/");
     co_await ws.handshake();
 
     co_await ws.send_text("hello");
@@ -137,7 +137,7 @@ cot::task<> test_binary_large() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/");
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/");
     co_await ws.handshake();
 
     std::string payload;
@@ -180,7 +180,7 @@ cot::task<> test_server_close() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/");
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/");
     co_await ws.handshake();
 
     auto m = co_await ws.receive();
@@ -263,8 +263,8 @@ cot::task<> test_deflate_round_trip() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, /*offer_deflate=*/true);
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, cot::ws_connection_options::permessage_deflate);
     co_await ws.handshake();
     assert(ws.permessage_deflate_negotiated());
 
@@ -302,8 +302,8 @@ cot::task<> test_deflate_client_off() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, /*offer_deflate=*/false);
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, cot::ws_connection_options::none);
     co_await ws.handshake();
     assert(!ws.permessage_deflate_negotiated());
 
@@ -335,8 +335,8 @@ cot::task<> test_deflate_server_off() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, /*offer_deflate=*/true);
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, cot::ws_connection_options::permessage_deflate);
     co_await ws.handshake();
     assert(!ws.permessage_deflate_negotiated());
 
@@ -370,8 +370,8 @@ cot::task<> test_deflate_multi_message() {
     co_await cot::after(5ms);
 
     auto cfd = co_await cot::tcp_connect(addr);
-    auto ws = cot::ws_stream::wrap_client(std::move(cfd), "localhost", "/",
-                                          {}, true);
+    auto ws = cot::ws_parser::wrap_client(std::move(cfd), "localhost", "/",
+                                          {}, cot::ws_connection_options::permessage_deflate);
     co_await ws.handshake();
     assert(ws.permessage_deflate_negotiated());
 
