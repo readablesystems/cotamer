@@ -113,8 +113,7 @@ public:
     inline const char* method_name() const;
 
     // Examine headers
-    inline bool has_header(std::string_view name) const;
-    header_iterator find_header(std::string_view name) const;
+    bool has_header(std::string_view name) const;
     std::string header(std::string_view name) const;
     inline header_iterator header_begin() const;
     inline header_iterator header_end() const;
@@ -166,6 +165,7 @@ public:
 
     // Deprecated accessors
     [[deprecated]] inline bool has_header(const char* s, size_t count) const;
+    [[deprecated]] header_iterator find_header(std::string_view name) const;
     [[deprecated]] inline header_iterator find_header(const char* s, size_t count) const;
     [[deprecated]] inline std::string header(const char* s, size_t count) const;
 
@@ -388,15 +388,7 @@ inline constexpr const std::string& http_message::url() const {
 }
 
 inline bool http_message::has_header(const char* name, size_t length) const {
-    return find_header({name, length}) != header_end();
-}
-
-inline bool http_message::has_header(std::string_view name) const {
-    return find_header(name) != header_end();
-}
-
-inline http_message::header_iterator http_message::find_header(const char* name, size_t length) const {
-    return find_header({name, length});
+    return has_header({name, length});
 }
 
 inline std::string http_message::header(const char* name, size_t length) const {

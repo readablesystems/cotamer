@@ -158,9 +158,20 @@ const char* http_message::default_status_message(unsigned code) {
 }
 
 
+bool http_message::has_header(std::string_view name) const {
+    auto it = header_begin(), last = header_end();
+    while (it != last) {
+        if (it.name_ieq(name)) {
+            return true;
+        }
+        ++it;
+    }
+    return false;
+}
+
 http_message::header_iterator http_message::find_header(std::string_view name) const {
-    auto it = header_begin(), end = header_end();
-    while (it != end && !it.name_ieq(name)) {
+    auto it = header_begin(), last = header_end();
+    while (it != last && !it.name_ieq(name)) {
         ++it;
     }
     return it;
@@ -169,8 +180,8 @@ http_message::header_iterator http_message::find_header(std::string_view name) c
 std::string http_message::header(std::string_view name) const {
     std::string result;
     bool any = false;
-    auto it = header_begin(), end = header_end();
-    while (it != end) {
+    auto it = header_begin(), last = header_end();
+    while (it != last) {
         if (it.name_ieq(name)) {
             if (any) {
                 result += ", ";
@@ -587,21 +598,14 @@ task<http_parser::ticket_type> http_parser::send_request(http_message m) {
 task<> http_parser::send_response(http_message m) {
     // If the response is marked `Connection: close`, then ensure
     // should_keep_alive() returns 0
-    http_message::header_iterator connhdr;
-    const char* data;
-    if (should_keep_alive()
-        && (connhdr = m.find_header("connection")) != m.header_end()
-        && (connhdr.value().length() == 5
-            && (data = connhdr.value().data())
-            && (data[0] == 'C' || data[0] == 'c')
-            && (data[1] == 'L' || data[1] == 'l')
-            && (data[2] == 'O' || data[2] == 'o')
-            && (data[3] == 'S' || data[3] == 's')
-            && (data[4] == 'E' || data[4] == 'e'))) {
-        if (hp_.http_major > 0 && hp_.http_minor > 0) {
-            hp_.flags |= F_CONNECTION_CLOSE;
-        } else {
-            hp_.flags &= ~F_CONNECTION_KEEP_ALIVE;
+    if (should_keep_alive()) {
+        std::string connhdr = m.header("connection");
+        if (strings::ieq(connhdr, "close")) {
+            if (hp_.http_major > 0 && hp_.http_minor > 0) {
+                hp_.flags |= F_CONNECTION_CLOSE;
+            } else {
+                hp_.flags &= ~F_CONNECTION_KEEP_ALIVE;
+            }
         }
     }
 

@@ -395,22 +395,18 @@ cot::task<> test_header_value_ows() {
         auto req = co_await hp.receive();
         assert(hp.ok());
 
-        auto val = [&](const char* name) {
-            auto it = req.find_header(name);
-            assert(it != req.header_end());
-            return std::string(it.value());
-        };
-
-        assert(val("h-leading") == "value");
-        assert(val("h-trailing") == "value");
-        assert(val("h-both") == "value");
-        assert(val("h-tabs") == "value");
-        assert(val("h-mixed") == "value");
+        assert(req.header("h-leading") == "value");
+        assert(req.header("h-trailing") == "value");
+        assert(req.header("h-both") == "value");
+        assert(req.header("h-tabs") == "value");
+        assert(req.header("h-mixed") == "value");
         // Internal whitespace must be preserved verbatim.
-        assert(val("h-internal") == "foo bar  baz");
+        assert(req.header("h-internal") == "foo bar  baz");
         // Empty / OWS-only values normalize to empty.
-        assert(val("h-empty") == "");
-        assert(val("h-ows-only") == "");
+        assert(req.header("h-empty") == "");
+        assert(req.has_header("h-empty"));
+        assert(req.header("h-ows-only") == "");
+        assert(req.has_header("h-ows-only"));
 
         server_done.trigger();
     };
@@ -446,9 +442,8 @@ cot::task<> test_header_setter_ows() {
      .header("X-OWS-Only", "   \t  ");
 
     auto get = [&](const char* name) {
-        auto it = m.find_header(name);
-        assert(it != m.header_end());
-        return std::string(it.value());
+        assert(m.has_header(name));
+        return m.header(name);
     };
     assert(get("X-Plain") == "value");
     assert(get("X-Spaced") == "value");

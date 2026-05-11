@@ -951,23 +951,21 @@ bool is_ws_upgrade_request(const http_message& req) {
         || (req.http_major() == 1 && req.http_minor() < 1)) {
         return false;
     }
-    auto upg = req.find_header("upgrade");
-    if (upg == req.header_end()
-        || !strings::ieq(upg.value(), "websocket")) {
+    auto upg = req.header("upgrade");
+    if (upg.empty()
+        || !strings::http_value_list(upg).icontains("websocket")) {
         return false;
     }
-    auto conn = req.find_header("connection");
-    if (conn == req.header_end()
-        || !strings::http_value_list(std::string{conn.value()})
-                .icontains("upgrade")) {
+    auto conn = req.header("connection");
+    if (conn.empty()
+        || !strings::http_value_list(conn).icontains("upgrade")) {
         return false;
     }
-    auto key = req.find_header("sec-websocket-key");
-    if (key == req.header_end() || key.value().empty()) {
+    if (req.header("sec-websocket-key").empty()) {
         return false;
     }
-    auto ver = req.find_header("sec-websocket-version");
-    if (ver == req.header_end() || ver.value() != "13") {
+    // Joins duplicate occurrences with ", "; "13, 13" naturally fails.
+    if (req.header("sec-websocket-version") != "13") {
         return false;
     }
     return true;
@@ -995,15 +993,15 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
         throw ws_error(WSLAY_ERR_PROTO, "bad ws upgrade request");
     }
 
-    std::string key{req.find_header("sec-websocket-key").value()};
+    std::string key = req.header("sec-websocket-key");
     std::string accept = ws_compute_accept(key);
 
     // Pick a subprotocol if both sides support one.
     std::string chosen_subprotocol;
     if (!subprotocols.empty()) {
-        auto offered = req.find_header("sec-websocket-protocol");
-        if (offered != req.header_end()) {
-            for (auto tok : strings::http_value_list(std::string{offered.value()})) {
+        auto offered = req.header("sec-websocket-protocol");
+        if (!offered.empty()) {
+            for (auto tok : strings::http_value_list(offered)) {
                 for (auto& sup : subprotocols) {
                     if (tok == sup) {
                         chosen_subprotocol = sup;
@@ -1021,9 +1019,9 @@ task<ws_stream> ws_upgrade(http_parser&& hp, const http_message& req,
     ws_connection_options conn_options = {};
 #if COTAMER_HAVE_ZLIB
     if (unsigned(accept_options & ws_connection_options::permessage_deflate)) {
-        auto offered = req.find_header("sec-websocket-extensions");
-        if (offered != req.header_end()) {
-            parse_extension_header(offered.value(), conn_options);
+        auto offered = req.header("sec-websocket-extensions");
+        if (!offered.empty()) {
+            parse_extension_header(offered, conn_options);
             if (unsigned(conn_options & ws_connection_options::unknown_option)) {
                 // Decline to negotiate if the offer specifies a parameter
                 // we cannot honor.
