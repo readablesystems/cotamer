@@ -7,7 +7,7 @@
 namespace {
 struct status_code_map {
     unsigned code;
-    const char* message;
+    std::string_view message;
 } default_status_codes[] = {
     {100, "Continue"},
     {101, "Switching Protocols"},
@@ -83,9 +83,9 @@ struct status_code_map_comparator {
     }
 };
 
-constexpr uint8_t us_safe = 1;  // all URL-safe characters except ?
-constexpr uint8_t us_http_tchar = 2;
-constexpr uint8_t us_hex = 4;
+constexpr uint8_t us_safe = 1;         // all URL-safe characters except ?
+constexpr uint8_t us_http_tchar = 2;   // characters matching HTTP `token`
+constexpr uint8_t us_hex = 4;          // hex digits (hex value in upper 4 bits)
 
 struct charinfo {
     uint8_t v[256];
@@ -93,10 +93,10 @@ struct charinfo {
 const charinfo chartable = []{
     charinfo ct{};
     for (unsigned char ch = '0'; ch <= '9'; ++ch) {
-        ct.v[ch] = us_safe | us_hex | us_http_tchar | ((ch - '0') << 4);
+        ct.v[ch] = us_safe | us_http_tchar | us_hex | ((ch - '0') << 4);
     }
     for (unsigned char ch = 'A'; ch <= 'F'; ++ch) {
-        ct.v[ch] = ct.v[ch + 32] = us_safe | us_hex | us_http_tchar | ((ch - 'A' + 10) << 4);
+        ct.v[ch] = ct.v[ch + 32] = us_safe | us_http_tchar | us_hex | ((ch - 'A' + 10) << 4);
     }
     for (unsigned char ch = 'G'; ch <= 'Z'; ++ch) {
         ct.v[ch] = ct.v[ch + 32] = us_safe | us_http_tchar;
@@ -145,7 +145,10 @@ const llhttp_settings_t http_parser::settings = []{
     return s;
 }();
 
-const char* http_message::default_status_message(unsigned code) {
+std::string_view http_message::default_status_message(unsigned code) {
+    if (code == 200) { // common case
+        return "OK";
+    }
     size_t ncodes = sizeof(default_status_codes) / sizeof(status_code_map);
     status_code_map* m = std::lower_bound(default_status_codes,
                                           default_status_codes + ncodes,
@@ -610,7 +613,7 @@ task<> http_parser::send_response(http_message m) {
     }
 
     std::string_view status_message = m.status_message_.empty()
-        ? std::string_view(m.default_status_message(m.status_code()))
+        ? m.default_status_message(m.status_code())
         : std::string_view(m.status_message());
     std::string codeline = std::format("HTTP/{}.{} {} {}\r\n",
         m.http_major(), m.http_minor(), m.status_code(), status_message);

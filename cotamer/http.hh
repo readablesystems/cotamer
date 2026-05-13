@@ -161,7 +161,7 @@ public:
     template <detail::nlohmann_basic_json_type Json>
     http_message& body(const Json& j);
 
-    static const char* default_status_message(unsigned code);
+    static std::string_view default_status_message(unsigned code);
 
     // Deprecated accessors
     [[deprecated]] inline bool has_header(const char* s, size_t count) const;
