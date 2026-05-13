@@ -456,6 +456,7 @@ struct getaddrinfo_value {
     struct addrinfo hints{};
     struct addrinfo* ai = nullptr;
     int status = 0;
+    bool address_any;
     ~getaddrinfo_value() {
         if (status == 0 && ai) {
             freeaddrinfo(ai);
@@ -481,12 +482,22 @@ static void getaddrinfo_thread(std::string address,
                                std::shared_ptr<getaddrinfo_value> res,
                                event notifier) {
     auto colon = address.rfind(':');
+    res->address_any = colon == 0 || colon == std::string::npos;
     if (colon == std::string::npos) {
         res->status = EAI_NONAME;
         notifier.trigger();
         return;
     }
     auto host = address.substr(0, colon);
+    // bracketed IPv6 addresses must be trimmed
+    if (host.starts_with('[')
+        && host.ends_with(']')
+        && host.find(']') == host.size() - 1) {
+        if (res->hints.ai_family == AF_UNSPEC) {
+            res->hints.ai_family = AF_INET6;
+        }
+        host = host.substr(1, host.size() - 2);
+    }
     auto port = address.substr(colon + 1);
     res->status = getaddrinfo(host.empty() ? nullptr : host.c_str(),
                               port.c_str(), &res->hints, &res->ai);
@@ -512,7 +523,7 @@ task<cotamer::fd> tcp_listen(std::string address, int backlog) {
     std::thread(getaddrinfo_thread, std::move(address), res, notifier).detach();
     co_await notifier;
     if (res->status != 0) {
-        throw std::system_error(std::error_code(res->status, getaddrinfo_error_category()));
+        throw std::system_error(res->status, getaddrinfo_error_category());
     }
 
     // `getaddrinfo` can return multiple addresses (e.g., IPv4 and IPv6);
@@ -532,6 +543,7 @@ task<cotamer::fd> tcp_listen(std::string address, int backlog) {
         int flag = 1;
         setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
         if (ai->ai_family == AF_INET6) {
+            flag = res->address_any ? 0 : 1;
             setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
         }
 
@@ -628,6 +640,7 @@ task<cotamer::fd> udp_listen(std::string address) {
         int flag = 1;
         setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
         if (ai->ai_family == AF_INET6) {
+            flag = res->address_any ? 0 : 1;
             setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
         }
 

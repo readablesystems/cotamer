@@ -3,6 +3,7 @@
 #if COTAMER_HTTPD_HAS_WSLAY
 # include "cotamer/websocket.hh"
 #endif
+#include "examples/utils.hh"
 
 namespace cot = cotamer;
 
@@ -64,27 +65,35 @@ cot::task<> run_one(cot::fd cfd, double delay) {
 }
 
 cot::task<> start(std::string address, double delay) {
-    auto lfd = co_await cot::tcp_listen(address);
-    while (true) {
-        run_one(co_await cot::tcp_accept(lfd), delay).detach();
+    try {
+        auto lfd = co_await cot::tcp_listen(address);
+        while (true) {
+            run_one(co_await cot::tcp_accept(lfd), delay).detach();
+        }
+    } catch (std::system_error err) {
+        std::print(std::cerr, "{}\n", err.what());
+        exit(1);
     }
 }
 
 static void usage() {
-    fprintf(stderr, "Usage: tamer-httpd [-p PORT] [-d DELAY]\n");
+    fprintf(stderr, "Usage: tamer-httpd [-p PORT | -l ADDR:PORT] [-d DELAY]\n");
 }
 
 int main(int argc, char* argv[]) {
     int opt;
-    int port = 11111;
+    std::string listen = ":11111";
     double delay = 0;
-    while ((opt = getopt(argc, argv, "hp:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "hp:l:t:")) != -1) {
         switch (opt) {
         case 'h':
             usage();
             exit(0);
         case 'p':
-            port = strtol(optarg, 0, 0);
+            listen = std::format(":{}", from_str_chars<unsigned short>(optarg));
+            break;
+        case 'l':
+            listen = optarg;
             break;
         case 't':
             delay = strtod(optarg, 0);
@@ -101,6 +110,6 @@ int main(int argc, char* argv[]) {
     }
 
     cot::set_clock(cot::clock::real_time);
-    cot::task<> t = start(std::format("localhost:{}", port), delay);
+    cot::task<> t = start(std::move(listen), delay);
     cot::loop();
 }
