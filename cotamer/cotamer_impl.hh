@@ -1,5 +1,4 @@
 #pragma once
-#include "cotamer/small_vector.hh"
 #include <unistd.h>
 #include <system_error>
 #if defined(__x86_64__)

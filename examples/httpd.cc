@@ -64,11 +64,16 @@ cot::task<> run_one(cot::fd cfd, double delay) {
     } while (hp.should_keep_alive());
 }
 
+cot::task<> run_listen(cot::fd lfd, double delay) {
+    while (true) {
+        run_one(co_await cot::tcp_accept(lfd), delay).detach();
+    }
+}
+
 cot::task<> start(std::string address, double delay) {
     try {
-        auto lfd = co_await cot::tcp_listen(address);
-        while (true) {
-            run_one(co_await cot::tcp_accept(lfd), delay).detach();
+        for (auto& lfd : co_await cot::tcp_listen_all(address)) {
+            run_listen(std::move(lfd), delay).detach();
         }
     } catch (std::system_error err) {
         std::print(std::cerr, "{}\n", err.what());
@@ -77,21 +82,23 @@ cot::task<> start(std::string address, double delay) {
 }
 
 static void usage() {
-    fprintf(stderr, "Usage: tamer-httpd [-p PORT | -l ADDR:PORT] [-d DELAY]\n");
+    fprintf(stderr, "Usage: httpd [-p PORT | -l ADDR:PORT] [-d DELAY]\n");
 }
 
 int main(int argc, char* argv[]) {
     int opt;
-    std::string listen = ":11111";
+    std::string listen = "localhost:11111";
     double delay = 0;
     while ((opt = getopt(argc, argv, "hp:l:t:")) != -1) {
         switch (opt) {
         case 'h':
             usage();
             exit(0);
-        case 'p':
-            listen = std::format(":{}", from_str_chars<unsigned short>(optarg));
+        case 'p': {
+            auto port = from_str_chars<unsigned short>(optarg);
+            listen = std::format("localhost:{}", port);
             break;
+        }
         case 'l':
             listen = optarg;
             break;

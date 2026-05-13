@@ -229,6 +229,25 @@ cot::task<> echo_client(std::string address, std::string message) {
 }
 ```
 
+The `tcp_listen_all(address)` function can return multiple `fd`s, supporting
+`address`es that correspond to multiple address families. For instance,
+`localhost` has an IPv4 and an IPv6 version. Use it like this:
+
+```c++
+cot::task<> one_echo_server(cot::fd lfd) {
+    while (true) {
+        auto cfd = co_await cot::tcp_accept(lfd);
+        handle_connection(std::move(cfd)).detach();
+    }
+}
+
+cot::task<> all_echo_servers() {
+    for (auto& lfd : co_await cot::tcp_listen_all("localhost:9000")) {
+        one_echo_server(std::move(lfd)).detach();
+    }
+}
+```
+
 
 ## UDP
 
@@ -268,6 +287,8 @@ cot::task<> udp_echo_client(std::string address, std::string message) {
     }
 }
 ```
+
+As with TCP, a `udp_listen_all(address)` function can return multiple `fd`s.
 
 
 ## Mutual exclusion
