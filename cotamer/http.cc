@@ -645,7 +645,7 @@ task<> http_parser::send(http_message m) {
 }
 
 task<> http_parser::send_response_chunk(std::string str) {
-    std::string lenline = std::format("{}\r\n", str.length());
+    std::string lenline = std::format("{:X}\r\n", str.length());
     iovec iov[3];
     iov[0] = iovec{ lenline.data(), lenline.length() };
     iov[1] = iovec{ str.data(), str.length() };
