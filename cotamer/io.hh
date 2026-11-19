@@ -59,6 +59,46 @@ inline void set_nonblocking(const fd& f) {
 }
 
 
+// Create sockets that are nonblocking and close-on-exec. Where the system
+// lacks SOCK_CLOEXEC (macOS), the flags are set after creation, so a
+// concurrent fork+exec in another thread could inherit the socket. These
+// return -1 and set errno on error.
+
+namespace detail {
+
+inline int finish_nonblocking_cloexec(int fileno) {
+    int flags;
+    if (fileno >= 0
+        && ((flags = fcntl(fileno, F_GETFL, 0)) < 0
+            || fcntl(fileno, F_SETFL, flags | O_NONBLOCK) < 0
+            || fcntl(fileno, F_SETFD, FD_CLOEXEC) < 0)) {
+        int err = errno;
+        ::close(fileno);
+        errno = err;
+        return -1;
+    }
+    return fileno;
+}
+
+inline int nonblocking_socket(int domain, int type, int protocol) {
+#ifdef SOCK_CLOEXEC
+    return ::socket(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
+#else
+    return finish_nonblocking_cloexec(::socket(domain, type, protocol));
+#endif
+}
+
+inline int nonblocking_accept(int listen_fileno) {
+#ifdef SOCK_CLOEXEC
+    return ::accept4(listen_fileno, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#else
+    return finish_nonblocking_cloexec(::accept(listen_fileno, nullptr, nullptr));
+#endif
+}
+
+}
+
+
 // Ignore SIGPIPE. Prefer `set_no_sigpipe` or using `send`/`recv` to ignore
 // SIGPIPE on a specific socket; as a last resort, fall back to
 // `ignore_sigpipe()` process-wide.
@@ -291,21 +331,65 @@ inline task<> connect(fd f, const struct sockaddr* addr, socklen_t len) {
 }
 
 
-// Accepts a connection. Returns new fd (with ownership). Throws on error.
+namespace detail {
+
+// Errors that affect only the pending connection, not the listening socket.
+// (Linux reports already-pending network errors from `accept`.)
+inline bool accept_error_is_per_connection(int err) {
+    switch (err) {
+    case EINTR:
+    case ECONNABORTED:
+    case EPROTO:
+    case ENETDOWN:
+    case ENETUNREACH:
+    case EHOSTDOWN:
+    case EHOSTUNREACH:
+#ifdef ENONET
+    case ENONET:
+#endif
+#ifdef __linux__
+    case EPERM:         // firewall rules forbid connection
+#endif
+        return true;
+    default:
+        return false;
+    }
+}
+
+inline bool accept_error_is_resource_exhaustion(int err) {
+    return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
+}
+
+}
+
+// Accepts a connection. Returns new fd (with ownership). Errors affecting only
+// the pending connection are retried. On resource exhaustion (EMFILE, ENFILE,
+// ENOBUFS, ENOMEM), waits with exponential backoff (5ms up to 1s) and
+// retries. Throws on other errors (e.g., if `listen_fd` is closed).
 
 inline task<fd> accept(fd listen_fd) {
+    using namespace std::chrono_literals;
+    duration backoff = duration::zero();
     while (true) {
-        int fileno = ::accept(listen_fd.fileno(), nullptr, nullptr);
+        int fileno = detail::nonblocking_accept(listen_fd.fileno());
         if (fileno >= 0) {
-            set_nonblocking(fileno);
+            fd f(fileno);
 #ifdef SO_NOSIGPIPE
             set_no_sigpipe(fileno);
 #endif
-            co_return fd(fileno);
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            throw errno_error();
+            co_return std::move(f);
         }
-        co_await readable(listen_fd);
+        int err = errno;
+        if (err == EAGAIN || err == EWOULDBLOCK) {
+            co_await readable(listen_fd);
+        } else if (detail::accept_error_is_per_connection(err)) {
+            // retry immediately
+        } else if (detail::accept_error_is_resource_exhaustion(err)) {
+            backoff = std::clamp<duration>(backoff * 2, 5ms, 1s);
+            co_await after(backoff);
+        } else {
+            throw std::system_error(err, std::generic_category());
+        }
     }
 }
 

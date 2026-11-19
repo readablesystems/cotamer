@@ -56,9 +56,11 @@ ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 
 File descriptors must be in non-blocking mode for readiness events to work
 correctly. I/O helpers that return a `cotamer::fd` (`accept`, `tcp_listen`,
-`tcp_connect`, `tcp_accept`) automatically put that fd in non-blocking mode;
-for file descriptors obtained in other ways, call `cotamer::set_nonblocking`,
-which is overloaded for both a raw `int` fd and a `cotamer::fd`.
+`tcp_connect`, `tcp_accept`, `udp_listen`, `udp_connect`) automatically put
+that fd in non-blocking mode and mark it close-on-exec, so child processes
+started with `exec` do not inherit it. For file descriptors obtained in other
+ways, call `cotamer::set_nonblocking`, which is overloaded for both a raw
+`int` fd and a `cotamer::fd`.
 
 When a file descriptor closes or experiences a serious error, Cotamer triggers
 all three readiness events for that file descriptor. This means that most code
@@ -151,7 +153,11 @@ remote address; the coroutine suspends until the connection attempt succeeds.
 `accept` suspends until a new connection request arrives on `lfd`; when one
 does, it is accepted, put into non-blocking mode, and returned as an `fd`
 object. These functions throw `std::system_error` on serious error, rather
-than returning an `ioresult`.
+than returning an `ioresult`. `accept` does not throw for errors that affect
+only one pending connection, such as `ECONNABORTED`; it moves on to the next
+connection. If the process runs out of file descriptors or memory (`EMFILE`,
+`ENFILE`, `ENOBUFS`, `ENOMEM`), `accept` waits and retries, backing off from
+5ms to 1s, so an accept loop survives temporary resource exhaustion.
 
 To read and write the resulting sockets, prefer `cotamer::send` and
 `cotamer::recv`. Although `write` and `read` also work, the `send` and `recv`
@@ -463,6 +469,8 @@ res.status_code(200)
 | `header(name, value)`               | header                                | Any          | Write      |
 | `header(name)`                      | header by name                        | Any          | Read       |
 | `path()`                            | URL path part (no `?...` or `#...`)   | Request      | Read       |
+| `decoded_path()`                    | decoded, normalized path (see below)  | Request      | Read       |
+| `upgrade()`                         | true for CONNECT or protocol upgrade  | Any          | Read       |
 | `header_begin/end()`                | iterate over headers; each iterator has `.name()` and `.value()` | Any | Read |
 | `search_param_begin/end()`          | iterate over `?name=value` parameters | Request      | Read       |
 | `search_param(name)`                | search parameter by name              | Request      | Read       |
@@ -471,6 +479,83 @@ If `nlohmann::json` is enabled at build time, `http_message::body(const
 nlohmann::json&)` is also available; it serializes the JSON, sets the body,
 and adds a `Content-Type: application/json` header if none is already
 present.
+
+Header names must be HTTP tokens, and header values, status messages, and
+URLs may not contain CR, LF, or NUL (URLs also may not contain spaces or
+tabs). Adding an invalid header throws `std::invalid_argument`, as does
+sending a message with an invalid status message, URL, or status code (which
+must be between 100 and 999).
+
+`path()` returns the raw path, exactly as received. `decoded_path()`
+percent-decodes the path and resolves `.` and `..` segments, which is useful
+when mapping a URL to a file. It returns `std::nullopt` if the URL is
+invalid, the path contains `%00` or `%2F`, or a `..` segment would rise above
+the root.
+
+
+### Response framing
+
+`send_response` adds a `Content-Length` header to responses that lack both
+`Content-Length` and `Transfer-Encoding`. It never sends a body with a 1xx,
+204, or 304 response. When responding to a `HEAD` request, it sends headers
+but no body; if the response has a body, its `Content-Length` reports the
+body’s length. To stream a response body, set `Transfer-Encoding: chunked`,
+then use `send_response_chunk` and `send_response_end_chunk`. (Empty chunks
+are ignored.)
+
+On the client side, `http_parser` remembers the method of each request sent
+with `send_request`. It knows that a response to `HEAD` has no body, even if
+it has a nonzero `Content-Length`, and that a 2xx response to `CONNECT`
+starts a tunnel: the response has `upgrade()` true, and tunneled bytes that
+arrived with the response remain in `receive_buffer()`.
+
+
+### Limits and timeouts
+
+`http_parser` limits the messages it receives:
+
+| Setting                                  | Default                        |
+|:-----------------------------------------|:-------------------------------|
+| `set_max_header_size(n)`: request or status line plus headers | 64 KiB |
+| `set_max_body_size(n)`                   | 16 MiB                         |
+| `set_receive_timeout(d)`: time for one `receive()` to complete | 60s in server mode; none in client mode |
+
+Pass `cotamer::duration::max()` to `set_receive_timeout` to disable the
+timeout. In server mode, the timeout also bounds how long an idle keep-alive
+connection waits for its next request.
+
+When a limit is exceeded, `receive()` returns an error, `hp.ok()` is false,
+`hp.error()` is `HPE_USER`, and `hp.failure()` says which limit failed:
+`header_too_large` (suggested response 431), `body_too_large` (413), or
+`timeout` (408). A failed parser cannot receive more messages, and
+`should_keep_alive()` returns false. For example:
+
+```cpp
+auto req = co_await hp.receive();
+if (hp.failure() == cot::http_parser::failure_type::body_too_large) {
+    co_await hp.send(cot::http_message(413).header("Connection", "close"));
+}
+if (!hp.ok()) {
+    co_return;
+}
+```
+
+`receive()` may be cancelled, for instance with `cot::attempt`. If it is
+cancelled between messages, the parser remains usable. If it is cancelled
+partway through a message, the parser cannot resume; it fails with
+`failure_type::cancelled`.
+
+
+### Upgrades
+
+A CONNECT request, or a request with `Connection: upgrade` and an `Upgrade`
+header, ends the HTTP portion of a connection. `receive()` returns that
+request with `upgrade()` true. Afterward, `should_keep_alive()` returns false,
+later `receive()` calls fail with `HPE_PAUSED_UPGRADE`, and any bytes that
+followed the request remain in `receive_buffer()`. A server that supports the
+upgrade can respond with `101 Switching Protocols`, then use `take_file()`
+and `receive_buffer()` to continue with the new protocol. Other servers
+should respond normally; the connection then closes.
 
 
 ### Pipelining

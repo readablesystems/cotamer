@@ -112,14 +112,8 @@ curl_socket_t curl_driver::opensocket_cb(void* clientp,
                                          struct curl_sockaddr* addr) {
     (void) purpose;
     auto* drv = static_cast<curl_driver*>(clientp);
-    int s = ::socket(addr->family, addr->socktype, addr->protocol);
+    int s = detail::nonblocking_socket(addr->family, addr->socktype, addr->protocol);
     if (s < 0) {
-        return CURL_SOCKET_BAD;
-    }
-    try {
-        set_nonblocking(s);
-    } catch (...) {
-        ::close(s);
         return CURL_SOCKET_BAD;
     }
     drv->fds_.emplace(s, fd(s));
@@ -268,8 +262,11 @@ size_t write_header_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     if (line.empty()) {
         return n;
     }
-    // Skip status lines ("HTTP/x.y code reason").
+    // A status line ("HTTP/x.y code reason") starts a new response (e.g.,
+    // after a redirect or `100 Continue`); keep only the final response's
+    // headers.
     if (line.starts_with("HTTP/")) {
+        cr->resp.headers.clear();
         return n;
     }
     auto colon = line.find(':');
@@ -324,6 +321,15 @@ task<curl_response> curl_fetch(std::string url,
     // set options
     curl_easy_setopt(easy, CURLOPT_URL, url.c_str());
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(easy, CURLOPT_MAXREDIRS, 10L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(easy, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(easy, CURLOPT_PROTOCOLS, long(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+    curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS, long(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
+    curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(easy, CURLOPT_USERAGENT, "cotamer-curl/0.1");
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(easy, CURLOPT_ERRORBUFFER, errbuf);

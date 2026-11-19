@@ -531,13 +531,12 @@ task<fd_list> tcp_listen_all(std::string address, int backlog, size_t max) {
     fd_list result;
     int last_errno = EADDRNOTAVAIL;
     for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        int fileno = detail::nonblocking_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fileno < 0) {
             last_errno = errno;
             continue;
         }
 
-        set_nonblocking(fileno);
 #ifdef SO_NOSIGPIPE
         set_no_sigpipe(fileno);
 #endif
@@ -592,13 +591,12 @@ task<fd> tcp_connect(std::string address) {
     // try each address in turn
     std::exception_ptr last_err;
     for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        int fileno = detail::nonblocking_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fileno < 0) {
             last_err = std::make_exception_ptr(errno_error());
             continue;
         }
 
-        set_nonblocking(fileno);
 #ifdef SO_NOSIGPIPE
         set_no_sigpipe(fileno);
 #endif
@@ -639,13 +637,12 @@ task<fd_list> udp_listen_all(std::string address, size_t max) {
     fd_list result;
     int last_errno = EADDRNOTAVAIL;
     for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        int fileno = detail::nonblocking_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fileno < 0) {
             last_errno = errno;
             continue;
         }
 
-        set_nonblocking(fileno);
 #ifdef SO_NOSIGPIPE
         set_no_sigpipe(fileno);
 #endif
@@ -699,13 +696,12 @@ task<fd> udp_connect(std::string address) {
 
     std::exception_ptr last_err;
     for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        int fileno = detail::nonblocking_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fileno < 0) {
             last_err = std::make_exception_ptr(errno_error());
             continue;
         }
 
-        set_nonblocking(fileno);
 #ifdef SO_NOSIGPIPE
         set_no_sigpipe(fileno);
 #endif

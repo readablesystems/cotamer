@@ -12,10 +12,6 @@ struct status_code_map {
     {101, "Switching Protocols"},
     {102, "Processing"},                // RFC 2518, obsoleted by RFC 4918
     {103, "Early Hints"},               // RFC 8297
-    {110, "Early Hints"},
-    {111, "Early Hints"},
-    {112, "Early Hints"},
-    {113, "Early Hints"},
     {200, "OK"},
     {201, "Created"},
     {202, "Accepted"},
@@ -52,7 +48,7 @@ struct status_code_map {
     {415, "Unsupported Media Type"},
     {416, "Range Not Satisfiable"},
     {417, "Expectation Failed"},
-    {418, "I\'m a teapot"},             // RFC 2324
+    {418, "I'm a teapot"},              // RFC 2324
     {421, "Misdirected Request"},
     {422, "Unprocessable Content"},     // RFC 4918
     {423, "Locked"},                    // RFC 4918
@@ -85,6 +81,7 @@ struct status_code_map_comparator {
 constexpr uint8_t us_safe = 1;         // all URL-safe characters except ?
 constexpr uint8_t us_http_tchar = 2;   // characters matching HTTP `token`
 constexpr uint8_t us_hex = 4;          // hex digits (hex value in upper 4 bits)
+constexpr uint8_t us_header = 8;       // characters safe to include in HTTP headers
 
 struct charinfo {
     uint8_t v[256];
@@ -106,12 +103,36 @@ const charinfo chartable = []{
     for (auto s = "!$%&'()*+,-./:;=@[\\]^_`{|}~"; *s; ++s) {
         ct.v[(unsigned char) *s] |= us_safe;
     }
+    for (unsigned char ch = 1; ch != 0; ++ch) {
+        if (ch != '\r' && ch != '\n') {
+            ct.v[ch] |= us_header;
+        }
+    }
     return ct;
 }();
 
 
+// Bodies reserve space for at most this many bytes in advance
+constexpr size_t max_body_reserve = 1 << 20;
+
 inline int xvalue(unsigned char ch) {
     return chartable.v[ch] >> 4;
+}
+
+inline bool all_chars(std::string_view s, uint8_t mask) {
+    for (unsigned char ch : s) {
+        if (!(chartable.v[ch] & mask)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Request targets additionally exclude whitespace, which delimits the
+// request line.
+inline bool valid_request_target(std::string_view s) {
+    return all_chars(s, us_header)
+        && s.find_first_of(" \t") == std::string_view::npos;
 }
 
 int parse_method_on_method_complete(llhttp_t*) {
@@ -156,7 +177,7 @@ std::string_view http_message::default_status_message(unsigned code) {
     if (m != default_status_codes + ncodes && m->code == code) {
         return m->message;
     }
-    return llhttp_status_name((llhttp_status_t) code);
+    return "";
 }
 
 
@@ -206,14 +227,21 @@ void http_message::do_clear() {
     upgrade_ = has_body_ = 0;
     url_.clear();
     status_message_.clear();
-    body_.clear();
+    headers_.clear();
     hpairs_.clear();
+    body_.clear();
     if (info_) {
         info_->flags = 0;
     }
 }
 
 void http_message::add_header(std::string_view key, std::string_view value) {
+    if (key.empty() || !all_chars(key, us_http_tchar)) {
+        throw std::invalid_argument("invalid HTTP header name");
+    }
+    if (!all_chars(value, us_header)) {
+        throw std::invalid_argument("invalid HTTP header value");
+    }
     if (headers_.empty()) {
         headers_.reserve(2048);
     }
@@ -267,6 +295,7 @@ void http_message::make_info(unsigned fl) const {
             inf.f[fpos].second = s - s1;
             ++fpos;
         }
+        inf.flags |= info_url;
     }
 
     if (!(inf.flags & info_params) && (fl & info_params)) {
@@ -305,7 +334,7 @@ void http_message::make_info(unsigned fl) const {
                     state = 1;
                 }
                 if (*s == '%'
-                    && s2 - s >= 2
+                    && s2 - s >= 3
                     && (chartable.v[(unsigned char) s[1]] & us_hex)
                     && (chartable.v[(unsigned char) s[2]] & us_hex)) {
                     inf.qurl.append(last, s);
@@ -332,6 +361,61 @@ void http_message::make_info(unsigned fl) const {
         }
         inf.flags |= info_params;
     }
+}
+
+std::optional<std::string> http_message::decoded_path() const {
+    if (!has_valid_url()) {
+        return std::nullopt;
+    }
+    // `path()` starts with `/`; examine the segments that follow each `/`
+    std::string_view p = path();
+    std::vector<std::string> segments;
+    size_t pos = 1;
+    while (true) {
+        size_t slash = std::min(p.find('/', pos), p.size());
+        std::string seg;
+        for (size_t i = pos; i != slash; ++i) {
+            unsigned char ch = p[i];
+            if (ch == '%') {
+                if (slash - i < 3
+                    || !(chartable.v[(unsigned char) p[i + 1]] & us_hex)
+                    || !(chartable.v[(unsigned char) p[i + 2]] & us_hex)) {
+                    return std::nullopt;
+                }
+                ch = xvalue(p[i + 1]) * 16 + xvalue(p[i + 2]);
+                if (ch == '\0' || ch == '/') {
+                    return std::nullopt;
+                }
+                i += 2;
+            }
+            seg.push_back(ch);
+        }
+        bool last = slash == p.size();
+        if (seg == "." || seg == "..") {
+            if (seg == "..") {
+                if (segments.empty()) {
+                    return std::nullopt;
+                }
+                segments.pop_back();
+            }
+            // a final dot segment leaves a trailing slash
+            if (last) {
+                segments.emplace_back();
+            }
+        } else {
+            segments.push_back(std::move(seg));
+        }
+        if (last) {
+            break;
+        }
+        pos = slash + 1;
+    }
+    std::string result;
+    for (auto& seg : segments) {
+        result.push_back('/');
+        result += seg;
+    }
+    return result;
 }
 
 bool http_message::has_search_param(std::string_view name) const {
@@ -376,19 +460,51 @@ llhttp_method http_parser::parse_method(std::string_view s) {
 
 
 http_parser::http_parser(fd f, parser_type direction, std::string host)
-    : f_(std::move(f)), host_(std::move(host)) {
-    auto hp_type = direction == client ? HTTP_RESPONSE : HTTP_REQUEST;
-    llhttp_init(&hp_, hp_type, &settings);
+    : http_parser(std::move(f), direction == client ? HTTP_RESPONSE : HTTP_REQUEST) {
+    host_ = std::move(host);
 }
 
 http_parser::http_parser(fd f, enum llhttp_type receive_type)
-    : f_(std::move(f)) {
+    : f_(std::move(f)),
+      receive_timeout_(receive_type == HTTP_REQUEST
+                       ? default_server_receive_timeout
+                       : duration::max()) {
     llhttp_init(&hp_, receive_type, &settings);
 }
 
 void http_parser::clear() {
     llhttp_reset(&hp_);
     receive_buffer_.clear();
+    failure_ = failure_type::none;
+    upgraded_ = false;
+    pending_methods_.clear();
+}
+
+void http_parser::fail(message_data& md, failure_type f) {
+    static const char* const reasons[] = {
+        "", "header too large", "body too large",
+        "receive timeout", "receive cancelled"
+    };
+    failure_ = f;
+    hp_.error = HPE_USER;
+    llhttp_set_error_reason(&hp_, reasons[int(f)]);
+    md.hm.error_ = HPE_USER;
+}
+
+// Record a failure in a callback; `receive()` reports it after
+// `llhttp_execute()` returns.
+int http_parser::fail_callback(::llhttp_t* hp, failure_type f) {
+    get_message_data(hp)->failure = f;
+    return HPE_USER;
+}
+
+// Return true if `len` more bytes of request line, status line, or headers
+// fit within `max_header_size()`.
+bool http_parser::check_header_size(::llhttp_t* hp, size_t len) {
+    const http_message& m = get_message_data(hp)->hm;
+    size_t max = get_parser(hp)->max_header_size_;
+    size_t sz = m.url_.size() + m.status_message_.size() + m.headers_.size();
+    return sz <= max && len <= max - sz;
 }
 
 inline void http_parser::copy_parser_status(message_data& md) {
@@ -412,11 +528,15 @@ int http_parser::on_message_begin(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
     md->hm.clear();
     md->state = state_unknown;
+    md->begun = true;
     return 0;
 }
 
 int http_parser::on_url(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
+    if (!check_header_size(hp, len)) {
+        return fail_callback(hp, failure_type::header_too_large);
+    }
     md->hm.url_.append(s, len);
     md->state = state_unknown;
     return 0;
@@ -427,6 +547,9 @@ int http_parser::on_status(::llhttp_t* hp, const char* s, size_t len) {
     if (md->hm.major_ == 0) {
         get_parser(hp)->copy_parser_status(*md);
     }
+    if (!check_header_size(hp, len)) {
+        return fail_callback(hp, failure_type::header_too_large);
+    }
     md->hm.status_message_.append(s, len);
     md->state = state_unknown;
     return 0;
@@ -434,6 +557,9 @@ int http_parser::on_status(::llhttp_t* hp, const char* s, size_t len) {
 
 int http_parser::on_header_field(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
+    if (!check_header_size(hp, len)) {
+        return fail_callback(hp, failure_type::header_too_large);
+    }
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
         md->state = state_header_name;
@@ -444,6 +570,9 @@ int http_parser::on_header_field(::llhttp_t* hp, const char* s, size_t len) {
 
 int http_parser::on_header_field_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
+    if (!check_header_size(hp, 2)) {
+        return fail_callback(hp, failure_type::header_too_large);
+    }
     if (md->state != state_header_name) {
         md->name1 = md->hm.headers_.length();
     }
@@ -456,12 +585,18 @@ int http_parser::on_header_field_complete(::llhttp_t* hp) {
 
 int http_parser::on_header_value(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
+    if (!check_header_size(hp, len)) {
+        return fail_callback(hp, failure_type::header_too_large);
+    }
     md->hm.headers_.append(s, len);
     return 0;
 }
 
 int http_parser::on_header_value_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
+    if (!check_header_size(hp, 2)) {
+        return fail_callback(hp, failure_type::header_too_large);
+    }
     if (md->state == state_header_value) {
         // strip trailing OWS (llhttp stripped leading OWS)
         const char* s = md->hm.headers_.data();
@@ -476,25 +611,56 @@ int http_parser::on_header_value_complete(::llhttp_t* hp) {
     return 0;
 }
 
+// Return true if `len` more body bytes fit within `max`.
+static bool body_fits(const std::string& body, size_t max, uint64_t len) {
+    return body.size() <= max && len <= max - body.size();
+}
+
+// Reserve space for `len` more body bytes, up to `max_body_reserve`.
+static void reserve_body(std::string& body, uint64_t len) {
+    size_t want = body.size() + std::min<uint64_t>(len, max_body_reserve);
+    if (body.capacity() < want) {
+        body.reserve(std::max(want, body.capacity() * 2));
+    }
+}
+
 int http_parser::on_headers_complete(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
-    get_parser(hp)->copy_parser_status(*md);
-    if (md->hm.body_.capacity() < md->hm.body_.length() + hp->content_length) {
-        md->hm.body_.reserve(md->hm.body_.length() + hp->content_length);
+    http_parser* p = get_parser(hp);
+    p->copy_parser_status(*md);
+    // A client knows from its request whether a final response has a body:
+    // responses to HEAD do not, and a 2xx response to CONNECT starts a tunnel.
+    if (hp->type == HTTP_RESPONSE
+        && hp->status_code >= 200
+        && !p->pending_methods_.empty()) {
+        llhttp_method method = p->pending_methods_.front();
+        if (method == HTTP_HEAD) {
+            return 1;   // no body
+        } else if (method == HTTP_CONNECT && hp->status_code < 300) {
+            return 2;   // no body, upgrade
+        }
     }
+    if (!body_fits(md->hm.body_, get_parser(hp)->max_body_size_, hp->content_length)) {
+        return fail_callback(hp, failure_type::body_too_large);
+    }
+    reserve_body(md->hm.body_, hp->content_length);
     return 0;
 }
 
 int http_parser::on_chunk_header(::llhttp_t* hp) {
     message_data* md = get_message_data(hp);
-    if (md->hm.body_.capacity() < md->hm.body_.length() + hp->content_length) {
-        md->hm.body_.reserve(md->hm.body_.length() + hp->content_length);
+    if (!body_fits(md->hm.body_, get_parser(hp)->max_body_size_, hp->content_length)) {
+        return fail_callback(hp, failure_type::body_too_large);
     }
+    reserve_body(md->hm.body_, hp->content_length);
     return 0;
 }
 
 int http_parser::on_body(::llhttp_t* hp, const char* s, size_t len) {
     message_data* md = get_message_data(hp);
+    if (!body_fits(md->hm.body_, get_parser(hp)->max_body_size_, len)) {
+        return fail_callback(hp, failure_type::body_too_large);
+    }
     md->hm.body_.append(s, len);
     return 0;
 }
@@ -506,20 +672,62 @@ int http_parser::on_message_complete(::llhttp_t* hp) {
     return HPE_PAUSED;
 }
 
+// Detaches a `receive()` call's message data from the parser. If `receive()`
+// is destroyed partway through a message (because it was cancelled or a
+// callback threw), the parser cannot resume, so it is marked as failed.
+struct http_parser::receive_guard {
+    http_parser* hp;
+    message_data* md;
+    bool done = false;
+
+    ~receive_guard() {
+        if (!done && md->begun) {
+            hp->fail(*md, failure_type::cancelled);
+        }
+        hp->hp_.data = nullptr;
+    }
+};
+
 task<http_message> http_parser::receive(ticket_type ticket) {
     assert(ticket.mutex() == &m_[0]);
     char stackbuf[bufsize];
     message_data md;
-    md.hm.status_code(0);
+    md.hm.status_code_ = 0;
     unique_lock guard(co_await ticket);
+
+    // After an error or upgrade, no more HTTP messages can be received
+    if (upgraded_ && hp_.error == HPE_OK) {
+        hp_.error = HPE_PAUSED_UPGRADE;
+    }
+    if (hp_.error != HPE_OK) {
+        md.hm.error_ = hp_.error;
+        co_return std::move(md.hm);
+    }
+
+    receive_guard rguard{this, &md};
     hp_.data = &md;
+    bool timed = receive_timeout_ != duration::max();
+    event deadline;
+    if (timed) {
+        deadline = after(receive_timeout_);
+    }
 
     while (true) {
         const char* buf;
         size_t nr;
         if (receive_buffer_.empty()) {
             buf = stackbuf;
-            auto nx = co_await recv(f_, stackbuf, sizeof(stackbuf));
+            ioresult nx;
+            if (timed) {
+                auto ax = co_await attempt(recv(f_, stackbuf, sizeof(stackbuf)), deadline);
+                if (!ax) {
+                    fail(md, failure_type::timeout);
+                    break;
+                }
+                nx = *ax;
+            } else {
+                nx = co_await recv(f_, stackbuf, sizeof(stackbuf));
+            }
             if (!nx || *nx == 0) {
                 break;
             }
@@ -544,13 +752,12 @@ task<http_message> http_parser::receive(ticket_type ticket) {
             receive_buffer_ = std::string(buf + consumed, buf + nr);
         }
 
-        if (err == HPE_PAUSED_UPGRADE) {
-            llhttp_resume_after_upgrade(&hp_);
-            md.state = state_done;
-        } else if (err == HPE_PAUSED) {
+        if (err == HPE_PAUSED) {
             // we only pause at a message boundary
             llhttp_resume(&hp_);
             md.state = state_done;
+        } else if (err != HPE_OK && md.failure != failure_type::none) {
+            fail(md, md.failure);
         }
         if (err != HPE_OK || md.state == state_done) {
             copy_parser_status(md);
@@ -559,13 +766,27 @@ task<http_message> http_parser::receive(ticket_type ticket) {
         // otherwise, message incomplete: loop to read more.
     }
 
-    if (md.state != state_done && !md.hm.error_) {
+    if (md.state == state_done) {
+        // Leave bytes following an upgrade in `receive_buffer_`
+        if (md.hm.upgrade_) {
+            upgraded_ = true;
+        }
+        if (hp_.type == HTTP_REQUEST) {
+            pending_methods_.push_back(md.hm.method());
+        } else if (md.hm.status_code_ >= 200 && !pending_methods_.empty()) {
+            pending_methods_.pop_front();
+        }
+    } else if (!md.hm.error_) {
         hp_.error = md.hm.error_ = HPE_CLOSED_CONNECTION;
     }
+    rguard.done = true;
     co_return std::move(md.hm);
 }
 
 task<http_parser::ticket_type> http_parser::send_request(http_message m) {
+    if (!valid_request_target(m.url())) {
+        throw std::invalid_argument("invalid HTTP request target");
+    }
     std::string urlline = std::format("{} {} HTTP/{}.{}\r\n",
         m.method_name(), m.url(), m.http_major(), m.http_minor());
     if (!host_.empty()
@@ -588,8 +809,10 @@ task<http_parser::ticket_type> http_parser::send_request(http_message m) {
         ++iovcnt;
     }
 
-    // lock for writing, then obtain read ticket
+    // lock for writing, then obtain read ticket; responses arrive in the
+    // order requests are sent
     unique_lock guard(co_await m_[1].lock());
+    pending_methods_.push_back(m.method());
     auto ticket = m_[0].lock();
 
     co_await sendv_all(f_, iov, iovcnt);
@@ -597,6 +820,25 @@ task<http_parser::ticket_type> http_parser::send_request(http_message m) {
 }
 
 task<> http_parser::send_response(http_message m) {
+    unsigned code = m.status_code();
+    if (code < 100 || code > 999) {
+        throw std::invalid_argument("invalid HTTP status code");
+    }
+    std::string_view status_message = m.status_message_.empty()
+        ? m.default_status_message(code)
+        : std::string_view(m.status_message());
+    if (!all_chars(status_message, us_header)) {
+        throw std::invalid_argument("invalid HTTP status message");
+    }
+
+    // Lock before matching this response with its request
+    unique_lock guard(co_await m_[1].lock());
+    bool head = false;
+    if (code >= 200 && !pending_methods_.empty()) {
+        head = pending_methods_.front() == HTTP_HEAD;
+        pending_methods_.pop_front();
+    }
+
     // If the response is marked `Connection: close`, then ensure
     // should_keep_alive() returns 0
     if (should_keep_alive()) {
@@ -610,12 +852,16 @@ task<> http_parser::send_response(http_message m) {
         }
     }
 
-    std::string_view status_message = m.status_message_.empty()
-        ? m.default_status_message(m.status_code())
-        : std::string_view(m.status_message());
     std::string codeline = std::format("HTTP/{}.{} {} {}\r\n",
-        m.http_major(), m.http_minor(), m.status_code(), status_message);
-    if (m.has_body_
+        m.http_major(), m.http_minor(), code, status_message);
+
+    // 1xx, 204, and 304 responses never have a body. Other responses get a
+    // Content-Length unless they specify their own framing. A response to
+    // HEAD omits the body, but its Content-Length reports the body's length
+    // (if the body is nonempty).
+    bool bodyless = code < 200 || code == 204 || code == 304;
+    if (!bodyless
+        && !(head && m.body_.empty())
         && !m.has_header("content-length")
         && !m.has_header("transfer-encoding")) {
         m.add_header("Content-Length", m.body_.length());
@@ -626,12 +872,11 @@ task<> http_parser::send_response(http_message m) {
     iov[0] = iovec{ codeline.data(), codeline.length() };
     iov[1] = iovec{ m.headers_.data(), m.headers_.length() };
     size_t iovcnt = 2;
-    if (m.body_.length()) {
+    if (!bodyless && !head && m.body_.length()) {
         iov[2] = iovec{ m.body_.data(), m.body_.length() };
         ++iovcnt;
     }
 
-    unique_lock guard(co_await m_[1].lock());
     co_await sendv_all(f_, iov, iovcnt);
 }
 
@@ -644,7 +889,12 @@ task<> http_parser::send(http_message m) {
     }
 }
 
+// An empty chunk would terminate the body, so it is ignored; use
+// `send_response_end_chunk()` to terminate the body.
 task<> http_parser::send_response_chunk(std::string str) {
+    if (str.empty()) {
+        co_return;
+    }
     std::string lenline = std::format("{:X}\r\n", str.length());
     iovec iov[3];
     iov[0] = iovec{ lenline.data(), lenline.length() };

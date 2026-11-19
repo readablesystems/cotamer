@@ -16,7 +16,7 @@ endif
 targets = cot-test cot-test-threads cot-test-io cot-manual \
 	ctconsensus rpcg-server rpcg-client \
 	httpd jsond jsond-client jsond-curl-client \
-	cot-test-curl
+	cot-test-curl cot-test-http
 
 test_targets = cot-test cot-test-threads cot-test-io cot-manual ctconsensus
 
@@ -41,6 +41,10 @@ check test:
 	$(BUILD)/cot-test
 	$(BUILD)/cot-test-threads
 	$(BUILD)/cot-test-io
+	if grep -q "COTAMER_HAVE_LLHTTP 1" $(BUILD)/cotamer/config.hh; then \
+		cmake --build $(BUILD) --target cot-test-http $(cmake_verbose) \
+		&& $(BUILD)/cot-test-http; \
+	fi
 	$(BUILD)/cot-manual
 	$(BUILD)/ctconsensus -q -R 10000
 

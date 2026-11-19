@@ -3,6 +3,8 @@
 #include "cotamer/io.hh"
 #include "llhttp.h"
 #include <vector>
+#include <deque>
+#include <optional>
 #include <string>
 #include <memory>
 #include <cstring>
@@ -111,6 +113,10 @@ public:
     inline const std::string& status_message() const;
     inline constexpr llhttp_method method() const;
     inline const char* method_name() const;
+    // True for a received CONNECT request or protocol upgrade (request with
+    // `Connection: upgrade` and `Upgrade`, or `101 Switching Protocols`
+    // response)
+    inline constexpr bool upgrade() const;
 
     // Examine headers
     bool has_header(std::string_view name) const;
@@ -127,6 +133,10 @@ public:
     inline std::string_view path() const;      // → `/path`
     inline std::string_view search() const;    // → `?a=b&c=d`
     inline std::string_view hash() const;      // → `#hash`
+    // Percent-decoded path with `.` and `..` segments resolved. Returns
+    // nullopt if the URL is invalid, the path contains an invalid or
+    // forbidden escape (`%00`, `%2F`), or `..` would rise above `/`.
+    std::optional<std::string> decoded_path() const;
     bool has_search_param(std::string_view name) const;
     std::string_view search_param(std::string_view name) const;
     inline header_iterator search_param_begin() const;
@@ -188,7 +198,7 @@ private:
     unsigned char minor_;
     unsigned char method_;
     unsigned char error_;
-    unsigned short status_code_;
+    unsigned status_code_;
     unsigned upgrade_ : 1;
     unsigned has_body_ : 1;
 
@@ -218,8 +228,33 @@ public:
     inline bool ok() const;
     inline constexpr llhttp_errno error() const;
     inline const char* error_name() const;
+    inline const char* error_reason() const;
+
+    // Failures detected by `http_parser` itself, rather than by llhttp.
+    // These set `error()` to `HPE_USER`.
+    enum class failure_type {
+        none,
+        header_too_large,   // request line/status line plus headers exceed
+                            // `max_header_size()` (suggested response: 431)
+        body_too_large,     // body exceeds `max_body_size()` (413)
+        timeout,            // `receive()` exceeded `receive_timeout()` (408)
+        cancelled           // `receive()` was destroyed mid-message
+    };
+    inline failure_type failure() const;
 
     void clear();
+
+    // Limits on received messages
+    static constexpr size_t default_max_header_size = 64 << 10;
+    static constexpr size_t default_max_body_size = 16 << 20;
+    static constexpr duration default_server_receive_timeout = std::chrono::seconds(60);
+    inline size_t max_header_size() const;
+    inline http_parser& set_max_header_size(size_t);
+    inline size_t max_body_size() const;
+    inline http_parser& set_max_body_size(size_t);
+    // `duration::max()` means no timeout
+    inline duration receive_timeout() const;
+    inline http_parser& set_receive_timeout(duration);
 
     inline const std::string& host() const;
     inline http_parser& set_host(const std::string& host);
@@ -252,21 +287,30 @@ public:
 private:
     static constexpr size_t bufsize = 8192;
 
-    ::llhttp_t hp_;
+    ::llhttp_t hp_;     // must be first: see get_parser()
     fd f_;
     mutex m_[2];
     std::string receive_buffer_;
     std::string host_;
+    size_t max_header_size_ = default_max_header_size;
+    size_t max_body_size_ = default_max_body_size;
+    duration receive_timeout_;
+    failure_type failure_ = failure_type::none;
+    bool upgraded_ = false;
+    std::deque<llhttp_method> pending_methods_;   // methods of unanswered requests
 
     enum { state_unknown, state_header_name, state_header_value, state_done };
 
     struct message_data {
         http_message hm;
         int state = state_unknown;
+        bool begun = false;
+        failure_type failure = failure_type::none;
         unsigned name1;
         unsigned name2;
         unsigned value1;
     };
+    struct receive_guard;
 
     static const llhttp_settings_t settings;
     static http_parser* get_parser(::llhttp_t* hp);
@@ -282,7 +326,10 @@ private:
     static int on_chunk_header(::llhttp_t* hp);
     static int on_body(::llhttp_t* hp, const char* s, size_t len);
     static int on_message_complete(::llhttp_t* hp);
+    static int fail_callback(::llhttp_t* hp, failure_type f);
+    static bool check_header_size(::llhttp_t* hp, size_t len);
     inline void copy_parser_status(message_data& md);
+    void fail(message_data& md, failure_type f);
 };
 
 inline http_message::http_message()
@@ -309,7 +356,7 @@ inline http_message::http_message(const http_message& x)
     : major_(x.major_), minor_(x.minor_), method_(x.method_), error_(x.error_),
       status_code_(x.status_code_), upgrade_(x.upgrade_), has_body_(x.has_body_),
       url_(x.url_), status_message_(x.status_message_), headers_(x.headers_),
-      body_(x.body_) {
+      hpairs_(x.hpairs_), body_(x.body_) {
 }
 
 inline http_message& http_message::operator=(const http_message& x) {
@@ -381,6 +428,10 @@ inline constexpr llhttp_method http_message::method() const {
 
 inline const char* http_message::method_name() const {
     return llhttp_method_name((llhttp_method) method_);
+}
+
+inline constexpr bool http_message::upgrade() const {
+    return upgrade_;
 }
 
 inline constexpr const std::string& http_message::url() const {
@@ -571,6 +622,41 @@ inline const char* http_parser::error_name() const {
     return llhttp_errno_name((llhttp_errno) hp_.error);
 }
 
+inline const char* http_parser::error_reason() const {
+    return llhttp_get_error_reason(&hp_);
+}
+
+inline http_parser::failure_type http_parser::failure() const {
+    return failure_;
+}
+
+inline size_t http_parser::max_header_size() const {
+    return max_header_size_;
+}
+
+inline http_parser& http_parser::set_max_header_size(size_t n) {
+    max_header_size_ = n;
+    return *this;
+}
+
+inline size_t http_parser::max_body_size() const {
+    return max_body_size_;
+}
+
+inline http_parser& http_parser::set_max_body_size(size_t n) {
+    max_body_size_ = n;
+    return *this;
+}
+
+inline duration http_parser::receive_timeout() const {
+    return receive_timeout_;
+}
+
+inline http_parser& http_parser::set_receive_timeout(duration d) {
+    receive_timeout_ = d;
+    return *this;
+}
+
 inline const std::string& http_parser::host() const {
     return host_;
 }
@@ -586,7 +672,7 @@ inline http_parser& http_parser::clear_host() {
 }
 
 inline bool http_parser::should_keep_alive() const {
-    return llhttp_should_keep_alive(&hp_);
+    return ok() && !upgraded_ && llhttp_should_keep_alive(&hp_);
 }
 
 inline task<http_message> http_parser::receive() {

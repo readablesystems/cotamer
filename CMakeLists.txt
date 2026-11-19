@@ -150,6 +150,16 @@ add_executable(cot-test-io
     $<TARGET_OBJECTS:Cotamer>
 )
 
+if(COTAMER_HAVE_LLHTTP)
+    add_executable(cot-test-http
+        test/cot-test-http.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(cot-test-http PRIVATE ${LLHTTP_INCLUDE_DIR})
+    target_link_libraries(cot-test-http PRIVATE ${LLHTTP_LIBRARY})
+endif()
+
 add_executable(cot-manual
     test/cot-manual.cc
     $<TARGET_OBJECTS:Cotamer>

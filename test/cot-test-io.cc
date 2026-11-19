@@ -7,6 +7,8 @@
 #include <optional>
 #include <print>
 #include <thread>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -1399,6 +1401,96 @@ void test_clear_with_fd_events() {
 }
 
 
+// TEST: accept() survives file descriptor exhaustion: it backs off on EMFILE
+// and accepts connections once descriptors are available again. (On Linux,
+// connections pending during EMFILE stay queued; on macOS, they are dropped.)
+cot::task<> test_accept_fd_exhaustion() {
+    auto lfd = co_await cot::tcp_listen("127.0.0.1:0");
+    sockaddr_storage ss{};
+    socklen_t sslen = sizeof(ss);
+    int r = getsockname(lfd.fileno(), reinterpret_cast<sockaddr*>(&ss), &sslen);
+    assert(r == 0);
+
+    std::vector<cot::fd> clients;
+    auto add_client = [&] {
+        int c = socket(ss.ss_family, SOCK_STREAM, 0);
+        assert(c >= 0);
+        int cr = ::connect(c, reinterpret_cast<sockaddr*>(&ss), sslen);
+        assert(cr == 0);
+        (void) cr;
+        clients.emplace_back(c);
+    };
+
+    // Queue connections in the listen backlog
+    constexpr size_t nclients = 6;
+    for (size_t i = 0; i != nclients; ++i) {
+        add_client();
+    }
+    // ensure the driver has allocated its own notification fds
+    co_await cot::after(1ms);
+
+    // Leave room for at most two more file descriptors
+    struct rlimit old_rl;
+    getrlimit(RLIMIT_NOFILE, &old_rl);
+    int probe = dup(lfd.fileno());
+    assert(probe >= 0);
+    ::close(probe);
+    struct rlimit rl = old_rl;
+    rl.rlim_cur = probe + 2;
+    r = setrlimit(RLIMIT_NOFILE, &rl);
+    assert(r == 0);
+
+    std::vector<cot::fd> accepted;
+    auto acceptor = [](cot::fd lfd, std::vector<cot::fd>& accepted) -> cot::task<> {
+        while (true) {
+            accepted.push_back(co_await cot::accept(lfd));
+        }
+    }(lfd, accepted);
+
+    co_await cot::after(100ms);
+    assert(!acceptor.done());
+    size_t naccepted = accepted.size();
+    assert(naccepted < nclients);
+
+    // After the limit is restored, new connections are accepted
+    r = setrlimit(RLIMIT_NOFILE, &old_rl);
+    assert(r == 0);
+    add_client();
+    add_client();
+    for (int i = 0; i != 300 && accepted.size() < naccepted + 2; ++i) {
+        co_await cot::after(10ms);
+    }
+    assert(accepted.size() >= naccepted + 2);
+    assert(!acceptor.done());
+    std::cerr << "accept_fd_exhaustion: ok\n";
+}
+
+
+// TEST: Sockets created by the library are nonblocking and close-on-exec.
+cot::task<> test_sockets_cloexec() {
+    auto check = [](const cot::fd& f) {
+        assert(fcntl(f.fileno(), F_GETFD) & FD_CLOEXEC);
+        assert(fcntl(f.fileno(), F_GETFL) & O_NONBLOCK);
+    };
+    auto lfd = co_await cot::tcp_listen("127.0.0.1:0");
+    check(lfd);
+    sockaddr_storage ss{};
+    socklen_t sslen = sizeof(ss);
+    int r = getsockname(lfd.fileno(), reinterpret_cast<sockaddr*>(&ss), &sslen);
+    assert(r == 0);
+    (void) r;
+    int port = ntohs(reinterpret_cast<sockaddr_in*>(&ss)->sin_port);
+
+    auto cfd = co_await cot::tcp_connect(std::format("127.0.0.1:{}", port));
+    check(cfd);
+    auto afd = co_await cot::tcp_accept(lfd);
+    check(afd);
+    auto ufd = co_await cot::udp_listen("127.0.0.1:0");
+    check(ufd);
+    std::cerr << "sockets_cloexec: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1435,6 +1527,8 @@ int main(int argc, char* argv[]) {
     run("fd_reuse_race", test_fd_reuse_race);
     run("write_close_read", test_write_close_read);
     run("storm", test_storm);
+    run("accept_fd_exhaustion", test_accept_fd_exhaustion);
+    run("sockets_cloexec", test_sockets_cloexec);
 
     // Cross-thread wake tests use their own threads and drivers
     auto run_threaded = [&](const char* name, auto fn) {

@@ -11,9 +11,11 @@
 //
 //    `curl_fetch(url)` returns a `cot::task<curl_response>`; it fetches
 //    the given URL and co_returns the response. By default, `curl_fetch`
-//    follows redirects. Use `curl_fetch(url, func)` to override the
-//    default configuration; `func` is a function object that takes a
-//    `CURL*` easy handle pointer.
+//    allows only HTTP and HTTPS, follows up to 10 redirects, and gives up
+//    connecting after 30 seconds; `headers` holds the final response's
+//    headers. Use `curl_fetch(url, func)` to override the default
+//    configuration; `func` is a function object that takes a `CURL*` easy
+//    handle pointer.
 
 namespace cotamer {
 
