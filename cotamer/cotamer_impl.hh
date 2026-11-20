@@ -461,8 +461,10 @@ struct event_body {
     void set_user_flags(uint32_t userf) {
         assert((userf & ~efm_user) == 0);
         while (true) {
+            // wait for any lock holder, whose unlock() would overwrite us
             uint32_t flags = relaxed_flags();
-            if (flags_.compare_exchange_weak(flags, (flags & ~efm_user) | userf, std::memory_order_relaxed)) {
+            if ((flags & ef_lock) == 0
+                && flags_.compare_exchange_weak(flags, (flags & ~efm_user) | userf, std::memory_order_relaxed)) {
                 return;
             }
             spinlock_hint();
@@ -1048,6 +1050,8 @@ inline std::coroutine_handle<> task_promise_base::prepare_awaiter(task_promise_b
     // awaiter is interested in awaitee
     if (interest_) {
         interest_->trigger();
+    } else {
+        has_interest_ = true;
     }
     // record awaiter in awaitee’s promise
     awaiter_ = reinterpret_cast<uintptr_t>(&awaiter);
@@ -1339,7 +1343,8 @@ inline void driver::step_time() noexcept {
 }
 
 inline bool driver::empty() const noexcept {
-    return timed_.empty()
+    return asap_.empty()
+        && timed_.empty()
         && nfdctl_ == 0
         && !fds_.has_update()
         && !lock_.load(std::memory_order_relaxed)
@@ -1426,32 +1431,41 @@ inline bool driver::poll() {
 
 
 // driver_guard
+//    A guard counts toward `guard_count_` only within the clear generation
+//    in which it was created; clearing zeroes the count.
 
 inline driver_guard::driver_guard() {
     auto drv = driver::current.get();
     if (drv && !drv->clearing()) {
         drv_ = drv;
+        clear_generation_ = drv->clear_generation_;
         ++drv->guard_count_;
     } else {
         drv_ = nullptr;
     }
 }
 
-inline driver_guard::~driver_guard() {
-    if (drv_ && !drv_->clearing()) {
+inline void driver_guard::release() {
+    if (drv_ && drv_->clear_generation_ == clear_generation_) {
         --drv_->guard_count_;
     }
+}
+
+inline driver_guard::~driver_guard() {
+    release();
 }
 
 inline driver_guard::driver_guard(driver_guard&& x)
-    : drv_(std::exchange(x.drv_, nullptr)) {
+    : drv_(std::exchange(x.drv_, nullptr)),
+      clear_generation_(x.clear_generation_) {
 }
 
 inline driver_guard& driver_guard::operator=(driver_guard&& x) {
-    if (drv_ && !drv_->clearing()) {
-        --drv_->guard_count_;
+    if (this != &x) {
+        release();
+        drv_ = std::exchange(x.drv_, nullptr);
+        clear_generation_ = x.clear_generation_;
     }
-    drv_ = std::exchange(x.drv_, nullptr);
     return *this;
 }
 

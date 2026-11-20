@@ -1487,7 +1487,7 @@ cot::task<> test_at_past_deadline() {
 }
 
 // TEST: virtual time never goes backwards, even when the next timer is
-// already due (audit #3)
+// already due
 cot::task<> test_time_never_backwards() {
     co_await cot::after(2h);
     co_await cot::asap();               // run from asap processing
@@ -1529,6 +1529,84 @@ cot::task<> test_after_zero_yields() {
     }
     assert(st.done());
     std::cerr << "test_after_zero_yields: ok (" << spins << " spins)\n";
+}
+
+// TEST: loop() doesn't exit while asap() work is pending, even beyond the
+// per-iteration asap quota
+cot::task<> test_asap_over_quota() {
+    int n = 0;
+    auto spinner = [&]() -> cot::task<> {
+        for (int i = 0; i != 10000; ++i) {
+            co_await cot::asap();
+            ++n;
+        }
+    };
+    auto t = spinner();
+    assert(!cot::driver::current->empty());
+    co_await t;
+    assert(n == 10000);
+    std::cerr << "test_asap_over_quota: ok\n";
+}
+
+// TEST: a driver_guard that outlives clear() doesn't corrupt the guard
+// count
+cot::task<> test_guard_outlives_clear() {
+    // runs synchronously, before the harness's loop()
+    auto drv = cot::driver::current.get();
+    std::optional<cot::driver_guard> g1(std::in_place);
+    cot::clear();
+    cot::loop();
+    assert(drv->empty());
+    std::optional<cot::driver_guard> g2(std::in_place); // counts: clearing done
+    assert(!drv->empty());
+    g1.reset();                         // does not release g2's count
+    assert(!drv->empty());
+    cot::driver_guard g3(std::move(*g2));
+    g2.reset();
+    assert(!drv->empty());
+    g1.emplace();
+    *g1 = std::move(g3);
+    assert(!drv->empty());
+    g1.reset();
+    assert(drv->empty());
+    co_await cot::after(1s);
+    std::cerr << "test_guard_outlives_clear: ok\n";
+}
+
+// TEST: a task that reaches `co_await interest{}` after its caller is already
+// awaiting it proceeds (awaiting a task expresses interest in it)
+cot::task<int> interest_after_delay() {
+    co_await cot::after(1h);
+    co_await cot::interest{};
+    co_return 42;
+}
+cot::task<> test_interest_after_await() {
+    auto start = cot::now();
+    int v = co_await interest_after_delay();
+    assert(v == 42);
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_interest_after_await: ok\n";
+}
+
+// TEST: small_vector push_back/emplace_back of one of its own elements works
+// when the push reallocates
+cot::task<> test_small_vector_self_push() {
+    std::string a(100, 'a'), b(100, 'b');
+    small_vector<std::string, 2> v;
+    v.push_back(a);
+    v.push_back(b);
+    v.push_back(v[0]);               // copy, reallocates (2 -> 4)
+    assert(v.size() == 3 && v[0] == a && v[1] == b && v[2] == a);
+    v.emplace_back(v[1]);            // copy, no reallocation
+    v.emplace_back(v[2]);            // copy, reallocates (4 -> 8)
+    assert(v.size() == 5 && v[3] == b && v[4] == a);
+    for (int i = 0; i != 3; ++i) {
+        v.push_back(std::string(1, char('x' + i)));
+    }
+    v.push_back(std::move(v[1]));    // move, reallocates (8 -> 16)
+    assert(v.size() == 9 && v[8] == b);
+    std::cerr << "test_small_vector_self_push: ok\n";
+    co_return;
 }
 
 // TEST: first() with zero arguments never completes (and doesn't crash)
@@ -2753,9 +2831,13 @@ int main(int argc, char* argv[]) {
     run("race_single", test_race_single);
     run("race_zero", test_race_zero);
     run("first_zero", test_first_zero);
+    run("interest_after_await", test_interest_after_await);
+    run("small_vector_self_push", test_small_vector_self_push);
     run("at_past_deadline", test_at_past_deadline);
     run("after_zero_yields", test_after_zero_yields);
     run("time_never_backwards", test_time_never_backwards);
+    run("asap_over_quota", test_asap_over_quota);
+    run("guard_outlives_clear", test_guard_outlives_clear);
     run("any_const_event", test_any_const_event);
     run("race_single_lvalue", test_race_single_lvalue);
     run("start_before_resolve", test_start_before_resolve);

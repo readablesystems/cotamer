@@ -1128,6 +1128,41 @@ void test_thread_event_empty() {
 }
 
 
+// TEST: event::set_user_flags isn't lost to a concurrent holder of the event's
+// internal lock (whose unlock used to restore stale flags)
+void test_user_flags_vs_lock() {
+    cot::event ev;
+    auto* eb = ev.handle().get();
+    std::atomic<bool> stop{false};
+    std::atomic<unsigned> cycles{0};
+    std::thread locker([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            auto f = eb->lock();
+            for (int i = 0; i != 50; ++i) {
+                cot::detail::spinlock_hint();
+            }
+            eb->unlock(f);
+            cycles.fetch_add(1, std::memory_order_release);
+        }
+    });
+    int lost = 0;
+    for (int k = 0; k != 20000; ++k) {
+        int want = 1 + k % 15;
+        ev.set_user_flags(want);
+        // wait until any lock held during the set has been released
+        unsigned c = cycles.load(std::memory_order_acquire);
+        while (cycles.load(std::memory_order_acquire) < c + 2) {
+        }
+        if (ev.user_flags() != want) {
+            ++lost;
+        }
+    }
+    stop = true;
+    locker.join();
+    assert(lost == 0 && "set_user_flags lost to concurrent unlock");
+    std::cerr << "user_flags_vs_lock: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
 
@@ -1145,6 +1180,7 @@ int main(int argc, char* argv[]) {
     };
 
     run("cross_thread_trigger", test_cross_thread_trigger);
+    run("user_flags_vs_lock", test_user_flags_vs_lock);
     run("cross_thread_any", test_cross_thread_any);
     run("cross_thread_multi", test_cross_thread_multi);
     run("independent_drivers", test_independent_drivers);

@@ -1,10 +1,16 @@
 #pragma once
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <type_traits>
+#include <utility>
 
 template <typename T, size_t N>
 struct small_vector {
     static_assert(N > 0 && N <= 128);
+    // growth isn't exception-safe if moving an element can throw
+    static_assert(std::is_nothrow_move_constructible_v<T>);
 
     using value_type = T;
     using size_type = size_t;
@@ -19,7 +25,8 @@ struct small_vector {
         : sz_(x.sz_), cap_(x.cap_) {
         if (x.cap_ > N) {
             u_.out = x.u_.out;
-            x.sz_ = x.cap_ = 0;
+            x.sz_ = 0;
+            x.cap_ = N;
         } else {
             std::uninitialized_move_n(x.begin(), x.sz_, begin());
         }
@@ -42,11 +49,12 @@ struct small_vector {
     }
     void clear_capacity() {
         std::destroy_n(begin(), sz_);
+        sz_ = 0;
         if (cap_ > N) {
             std::allocator<T> alloc;
             alloc.deallocate(u_.out, cap_);
+            cap_ = N;
         }
-        sz_ = cap_ = 0;
     }
     iterator erase(const_iterator first, const_iterator last) {
         if (first != last) {
@@ -75,25 +83,6 @@ struct small_vector {
         return begin() + size();
     }
 
-    T* push_space() {
-        if (cap_ == 0) {
-            cap_ = N;
-        }
-        if (sz_ < cap_) {
-            return end();
-        }
-        std::allocator<T> alloc;
-        T* newptr = alloc.allocate(cap_ * 2);
-        std::uninitialized_move_n(begin(), sz_, newptr);
-        std::destroy_n(begin(), sz_);
-        if (cap_ > N) {
-            alloc.deallocate(u_.out, cap_);
-        }
-        u_.out = newptr;
-        cap_ *= 2;
-        return u_.out + sz_;
-    }
-
     T& front() {
         return *begin();
     }
@@ -114,17 +103,19 @@ struct small_vector {
     }
 
     void push_back(const T& v) {
-        std::construct_at(push_space(), v);
-        ++sz_;
+        emplace_back(v);
     }
     void push_back(T&& v) {
-        std::construct_at(push_space(), std::move(v));
-        ++sz_;
+        emplace_back(std::move(v));
     }
     template <typename... Args>
     T& emplace_back(Args&&... args) {
-        auto sp = push_space();
-        std::construct_at(sp, std::forward<Args>(args)...);
+        T* sp;
+        if (sz_ < cap_) {
+            sp = std::construct_at(end(), std::forward<Args>(args)...);
+        } else {
+            sp = hard_emplace_back(std::forward<Args>(args)...);
+        }
         ++sz_;
         return *sp;
     }
@@ -140,4 +131,27 @@ private:
         alignas(T) std::byte inbuf[sizeof(T) * N];
         T* out;
     } u_;
+
+    template <typename... Args>
+    T* hard_emplace_back(Args&&... args) {
+        // Grow. Construct the new element before moving the old ones, since
+        // `args` may refer to an existing element.
+        std::allocator<T> alloc;
+        T* newptr = alloc.allocate(cap_ * 2);
+        T* sp;
+        try {
+            sp = std::construct_at(newptr + sz_, std::forward<Args>(args)...);
+        } catch (...) {
+            alloc.deallocate(newptr, cap_ * 2);
+            throw;
+        }
+        std::uninitialized_move_n(begin(), sz_, newptr);
+        std::destroy_n(begin(), sz_);
+        if (cap_ > N) {
+            alloc.deallocate(u_.out, cap_);
+        }
+        u_.out = newptr;
+        cap_ *= 2;
+        return sp;
+    }
 };

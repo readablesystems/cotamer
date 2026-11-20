@@ -113,7 +113,8 @@ bool driver::loop(looptype lt) {
 
         // exit if nothing to do
         timed_.cull();
-        if (timed_.empty()
+        if (asap_.empty()
+            && timed_.empty()
             && nfdctl_ == 0
             && !lock_.load(std::memory_order_relaxed)
             && guard_count_ == 0
@@ -197,6 +198,7 @@ void driver::process_clearing() {
     assert(clearing_);
     keepalives_.clear();
     guard_count_ = 0;
+    ++clear_generation_;
 
     // trigger all fd events (but coroutines throw rather than running)
     int fd = -1;
