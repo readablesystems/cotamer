@@ -1369,6 +1369,11 @@ inline event driver::asap() {
     return e;
 }
 
+// driver::at, driver::after
+//    Timers never trigger immediately, even if the deadline has already
+//    passed; the driver loop triggers them. So `co_await after(0ms)` yields
+//    to other tasks in both real and virtual time.
+
 inline void driver::at(steady_time_point t, event e) {
     if (e.handle()) {
         timed_.emplace(t, std::move(e).handle());
@@ -1376,9 +1381,6 @@ inline void driver::at(steady_time_point t, event e) {
 }
 
 inline event driver::at(steady_time_point t) {
-    if (!real_time_ && t <= snow_) {
-        return event(nullptr);
-    }
     event e;
     at(t, e);
     return e;

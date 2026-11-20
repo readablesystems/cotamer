@@ -1460,6 +1460,77 @@ cot::task<> test_any_const_event() {
     std::cerr << "test_any_const_event: ok\n";
 }
 
+// TEST: timers with past deadlines are triggered by the loop, not
+// immediately, and don't move virtual time backwards
+cot::task<> test_at_past_deadline() {
+    auto& drv = *cot::driver::current;
+    co_await cot::after(2h);
+    auto start = cot::steady_now();
+
+    cot::event a1 = cot::after(0h);
+    cot::event a2 = cot::at(start - 1h);
+    cot::event e1, e2, e3;
+    drv.after(0h, e1);
+    drv.at(start, e2);
+    drv.at(start - 1h, e3);
+    assert(!a1.triggered() && !a2.triggered());
+    assert(!e1.triggered() && !e2.triggered() && !e3.triggered());
+
+    co_await cot::all(a1, a2, e1, e2, e3);
+    assert(cot::steady_now() >= start);
+    assert(cot::steady_now() - start < 1min);
+
+    // A later timer still advances time normally.
+    co_await cot::after(1h);
+    assert(cot::steady_now() - start >= 1h && cot::steady_now() - start < 2h);
+    std::cerr << "test_at_past_deadline: ok\n";
+}
+
+// TEST: virtual time never goes backwards, even when the next timer is
+// already due (audit #3)
+cot::task<> test_time_never_backwards() {
+    co_await cot::after(2h);
+    co_await cot::asap();               // run from asap processing
+    auto start = cot::steady_now();
+    co_await cot::at(start - 1h);
+    assert(cot::steady_now() >= start);
+
+    // A timer due in one tick, racing a batch of asap tasks: the timer task
+    // must not observe an earlier time than the asap tasks did.
+    std::vector<cot::steady_time_point> seen;
+    auto asap_task = [&]() -> cot::task<> {
+        co_await cot::asap();
+        seen.push_back(cot::steady_now());
+    };
+    std::vector<cot::task<>> ts;
+    for (int i = 0; i < 10; ++i) {
+        ts.push_back(asap_task());
+    }
+    co_await cot::after(cot::duration{1});
+    for (auto t : seen) {
+        assert(cot::steady_now() >= t);
+    }
+    std::cerr << "test_time_never_backwards: ok\n";
+}
+
+// TEST: a loop polling with `co_await after(0ms)` lets other tasks run
+// (in virtual time, `after(0ms)` used to trigger immediately, so this spun)
+cot::task<> test_after_zero_yields() {
+    bool flag = false;
+    auto setter = [&]() -> cot::task<> {
+        co_await cot::asap();
+        flag = true;
+    };
+    auto st = setter();
+    int spins = 0;
+    while (!flag) {
+        assert(++spins < 100);
+        co_await cot::after(0ms);
+    }
+    assert(st.done());
+    std::cerr << "test_after_zero_yields: ok (" << spins << " spins)\n";
+}
+
 // TEST: first() with zero arguments never completes (and doesn't crash)
 cot::task<> test_first_zero() {
     auto start = cot::now();
@@ -2682,6 +2753,9 @@ int main(int argc, char* argv[]) {
     run("race_single", test_race_single);
     run("race_zero", test_race_zero);
     run("first_zero", test_first_zero);
+    run("at_past_deadline", test_at_past_deadline);
+    run("after_zero_yields", test_after_zero_yields);
+    run("time_never_backwards", test_time_never_backwards);
     run("any_const_event", test_any_const_event);
     run("race_single_lvalue", test_race_single_lvalue);
     run("start_before_resolve", test_start_before_resolve);

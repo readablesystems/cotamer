@@ -151,7 +151,9 @@ bool driver::loop(looptype lt) {
         } else if (!timed_.empty()
                    && asap_.empty()
                    && !had_fd_event) {
-            snow_ = timed_.top_time();
+            // jump to the next timer, but never backwards (the top timer
+            // may already be due)
+            snow_ = std::max(snow_, timed_.top_time());
         }
 
         // process timers
