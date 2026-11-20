@@ -192,12 +192,22 @@ status lines but never resets `headers`. A 302→200 yields both
 Fix: `cr->resp.headers.clear()` on a line starting with `HTTP/` (also
 handles 1xx).
 
-### 21. [ ] latent — `COTAMER_USE_POLL` fallback broken
+### 21. [x] latent — `COTAMER_USE_POLL` fallback broken
 `io.cc:413`: `poll(...)` inside a `driver` member resolves to
 `driver::poll()` — doesn't compile; needs `::poll`. `io.cc:414`:
 `batch.size = batch.ev.size()` ignores `poll`'s return, so `watch_fds`
 always reports activity and virtual time never advances while any fd is
-watched; poll errors/`EINTR` are ignored. *repro*
+watched; poll errors/`EINTR` are ignored. Also, with no cross-thread wake,
+a trigger from another thread (e.g., `tcp_listen`'s `getaddrinfo` thread)
+waited out the full poll timeout (up to 1h), hanging `tcp_echo`. *repro*
+
+Fixed: `::poll`, whose return value now sets `batch.size`; a nonblocking
+self-pipe provides cross-thread wake (`pollfd_` is the read end,
+`internal_wakefd_`, formerly `epoll_wakefd_`, the write end); entries carry
+their fd epochs in a parallel `fd_batch::epochs` array, as kqueue/epoll
+entries do; `POLLRDHUP` (where available) reports `fdevent::close`, as
+`EPOLLRDHUP` does. All test suites pass with `-DCOTAMER_USE_POLL=1` on
+macOS and Linux. Test `virtual_time_idle_fd`.
 
 ### 22. [ ] latent — `fd_event_set::watch` segfaults on stale body
 `io.cc:133`. When the fd number was closed and reused behind cotamer's

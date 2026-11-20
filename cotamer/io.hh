@@ -337,6 +337,7 @@ struct fd_batch {
 #else
     using system_event_type = struct pollfd;
     small_vector<struct pollfd, 16> ev;
+    small_vector<unsigned, 16> epochs;
 #endif
     int size = 0;
     int index = 0;

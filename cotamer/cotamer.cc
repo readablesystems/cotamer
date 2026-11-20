@@ -15,20 +15,23 @@ statistics stats;
 
 
 inline void driver::migrate_wake() {
-#if !COTAMER_USE_POLL
     int wakefd = wakefd_.load(std::memory_order_seq_cst);
     if (wakefd >= 0) {
-# if COTAMER_USE_KQUEUE
+#if COTAMER_USE_KQUEUE
         struct kevent ev;
         EV_SET(&ev, -1, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
         kevent(wakefd, &ev, 1, nullptr, 0, nullptr);
-# elif COTAMER_USE_EPOLL
+#elif COTAMER_USE_EPOLL
         uint64_t val = 1;
         ssize_t nw = ::write(wakefd, &val, sizeof(val));
         (void) nw;
-# endif
-    }
+#else
+        // a full pipe already has a wake pending
+        char c = 0;
+        ssize_t nw = ::write(wakefd, &c, 1);
+        (void) nw;
 #endif
+    }
 }
 
 void driver::migrate_asap(detail::event_handle eh) {
@@ -69,8 +72,8 @@ driver::~driver() {
         loop();
     }
     fds_.deref_all(this);
-    if (epoll_wakefd_ >= 0) {
-        ::close(epoll_wakefd_);
+    if (internal_wakefd_ >= 0) {
+        ::close(internal_wakefd_);
     }
     if (pollfd_ >= 0) {
         ::close(pollfd_);
