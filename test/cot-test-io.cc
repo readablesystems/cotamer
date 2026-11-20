@@ -1399,6 +1399,38 @@ void test_clear_with_fd_events() {
 }
 
 
+// TEST: virtual time advances while an idle fd is watched
+void test_virtual_time_idle_fd() {
+    cot::set_clock(cot::clock::virtual_time);
+    cot::reset();
+
+    int p[2];
+    assert(pipe(p) == 0);
+    cot::set_nonblocking(p[0]);
+    cot::fd rfd(p[0]), wfd(p[1]);
+
+    auto start = cot::steady_now();
+    bool read_fired = false;
+    auto reader = [&]() -> cot::task<> {
+        co_await cot::readable(rfd);
+        read_fired = true;
+    };
+    auto writer = [&]() -> cot::task<> {
+        co_await cot::after(1h);
+        assert(!read_fired);
+        ssize_t nw = ::write(wfd.fileno(), "x", 1);
+        assert(nw == 1);
+    };
+    auto rt = reader();
+    auto wt = writer();
+    cot::loop();
+
+    assert(rt.done() && wt.done() && read_fired);
+    assert(cot::steady_now() - start >= 1h);
+    cot::set_clock(cot::clock::real_time);
+    std::cerr << "virtual_time_idle_fd: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1451,6 +1483,7 @@ int main(int argc, char* argv[]) {
     };
 
     run_threaded("clear_with_fd_events", test_clear_with_fd_events);
+    run_threaded("virtual_time_idle_fd", test_virtual_time_idle_fd);
     run_threaded("close_wakes_reader", test_close_wakes_reader);
     run_threaded("shutdown_wakes_reader", test_shutdown_wakes_reader);
     run_threaded("close_storm", test_close_storm);

@@ -220,6 +220,10 @@ void fd_batch::print_changes() {
 #endif
 }
 
+#if COTAMER_USE_POLL && !defined(POLLRDHUP)
+# define POLLRDHUP 0
+#endif
+
 inline int fd_batch::mask_out(fdevent mask) noexcept {
 #if COTAMER_USE_KQUEUE
     // should never be called
@@ -230,8 +234,11 @@ inline int fd_batch::mask_out(fdevent mask) noexcept {
         | (int(mask & fdevent::write) ? int(EPOLLOUT) : 0)
         | (int(mask & fdevent::close) ? int(EPOLLRDHUP) : 0);
 #else
-    return (int(mask & fdevent::read) ? int(POLLIN) : 0)
-        | (int(mask & fdevent::write) ? int(POLLOUT) : 0);
+    // POSIX says `POLLHUP` is ignored in `events`, but macOS, which lacks
+    // `POLLRDHUP`, reports read-side EOF as `POLLHUP` only if it’s requested.
+    return (int(mask & fdevent::read) ? int(POLLIN | POLLRDHUP) : 0)
+        | (int(mask & fdevent::write) ? int(POLLOUT) : 0)
+        | (int(mask & fdevent::close) ? int(POLLRDHUP | POLLHUP) : 0);
 #endif
 }
 
@@ -245,9 +252,9 @@ inline fdevent fd_batch::mask_in(const system_event_type& se) noexcept {
         | (se.events & (EPOLLOUT | EPOLLHUP | EPOLLERR) ? fdevent::write : fdevent::none)
         | (se.events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR) ? fdevent::close : fdevent::none);
 #else
-    return (se.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL) ? fdevent::read : fdevent::none)
+    return (se.revents & (POLLIN | POLLRDHUP | POLLERR | POLLHUP | POLLNVAL) ? fdevent::read : fdevent::none)
         | (se.revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL) ? fdevent::write : fdevent::none)
-        | (se.revents & (POLLERR | POLLHUP | POLLNVAL) ? fdevent::close : fdevent::none);
+        | (se.revents & (POLLRDHUP | POLLERR | POLLHUP | POLLNVAL) ? fdevent::close : fdevent::none);
 #endif
 }
 
@@ -298,7 +305,7 @@ inline std::optional<fd_update> fd_batch::pop() noexcept {
         unsigned epoch = e.data.u64 >> 32;
 #else
         int fd = e.fd;
-        unsigned epoch = fd_event_set::empty_epoch;
+        unsigned epoch = epochs[index - 1];
 #endif
         auto mask = mask_in(e);
         if (mask != fdevent::none) {
@@ -326,7 +333,7 @@ void driver::hard_pollfd() {
     if ((pollfd_ = epoll_create1(EPOLL_CLOEXEC)) < 0) {
         throw errno_error();
     }
-    if ((epoll_wakefd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0) {
+    if ((internal_wakefd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0) {
         int saved = errno;
         ::close(pollfd_);
         pollfd_ = -1;
@@ -334,10 +341,22 @@ void driver::hard_pollfd() {
     }
     epoll_event epev;
     epev.events = EPOLLIN;
-    epev.data.u64 = epoll_wakefd_ | (uint64_t(detail::fd_event_set::internal_epoch) << 32);
-    if (epoll_ctl(pollfd_, EPOLL_CTL_ADD, epoll_wakefd_, &epev) < 0) {
+    epev.data.u64 = internal_wakefd_ | (uint64_t(detail::fd_event_set::internal_epoch) << 32);
+    if (epoll_ctl(pollfd_, EPOLL_CTL_ADD, internal_wakefd_, &epev) < 0) {
         throw errno_error();
     }
+#else
+    // cross-thread wake writes to a self-pipe
+    int pfd[2];
+    if (pipe(pfd) < 0) {
+        throw errno_error();
+    }
+    for (int i = 0; i != 2; ++i) {
+        fcntl(pfd[i], F_SETFD, FD_CLOEXEC);
+        fcntl(pfd[i], F_SETFL, fcntl(pfd[i], F_GETFL) | O_NONBLOCK);
+    }
+    pollfd_ = pfd[0];
+    internal_wakefd_ = pfd[1];
 #endif
 }
 
@@ -377,15 +396,13 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
 #if COTAMER_USE_KQUEUE
     // Cross-thread wake injects an EVFILT_USER event onto the kqueue fd
     wakefd_.store(pollfd_, std::memory_order_seq_cst);
-#elif COTAMER_USE_EPOLL
-    // Cross-thread wake writes to an eventfd()
-    wakefd_.store(epoll_wakefd_, std::memory_order_seq_cst);
+#else
+    // Cross-thread wake writes to an eventfd() or self-pipe
+    wakefd_.store(internal_wakefd_, std::memory_order_seq_cst);
 #endif
-#if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
     if (lock_.load(std::memory_order_seq_cst)) {
         timeout = duration::zero();
     }
-#endif
 
 #if COTAMER_USE_KQUEUE
     // block in kernel
@@ -395,23 +412,23 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
 #elif COTAMER_USE_EPOLL
     batch.size = epoll_wait(pollfd_, batch.ev, batch.capacity, duration_milliseconds(timeout));
 #else
-    // The poll() fallback has no cross-thread wake mechanism (no equivalent
-    // of EVFILT_USER or eventfd). Cross-thread triggers will be delayed
-    // until the poll timeout expires. This is an acceptable tradeoff for a
-    // portability fallback; kqueue/epoll should be used on production systems.
-    //
     // NB: rebuilds the entire pollfd array on every call (O(max_fd) scan).
     // kqueue/epoll maintain kernel-side state and avoid this cost.
     batch.ev.clear();
+    batch.epochs.clear();
+    batch.ev.push_back({pollfd_, POLLIN, 0});
+    batch.epochs.push_back(detail::fd_event_set::internal_epoch);
     int fd = -1;
     while (auto fdu = fds_.next_known(fd)) {
         if (fdu->mask != fdevent::none) {
-            batch.ev.emplace_back(fdu->fd, batch.mask_out(fdu->mask), 0);
+            batch.ev.push_back({fdu->fd, short(batch.mask_out(fdu->mask)), 0});
+            batch.epochs.push_back(fdu->epoch);
         }
         fd = fdu->fd;
     }
-    poll(batch.ev.begin(), batch.ev.size(), duration_milliseconds(timeout));
-    batch.size = batch.ev.size();
+    int nready = ::poll(batch.ev.begin(), batch.ev.size(), duration_milliseconds(timeout));
+    // `pop()` skips entries with no returned events
+    batch.size = nready > 0 ? int(batch.ev.size()) : nready;
 #endif
     batch.index = 0;
 
@@ -420,17 +437,22 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
         throw errno_error();
     }
 
-#if COTAMER_USE_KQUEUE || COTAMER_USE_EPOLL
     wakefd_.store(-1, std::memory_order_relaxed);
-#endif
 
     // process returned events
     while (auto fdu = batch.pop()) {
 #if COTAMER_USE_EPOLL
-        if (fdu->fd == epoll_wakefd_) {
+        if (fdu->fd == internal_wakefd_) {
             uint64_t v;
-            ssize_t nr = ::read(epoll_wakefd_, &v, sizeof(v));
+            ssize_t nr = ::read(internal_wakefd_, &v, sizeof(v));
             (void) nr;
+            continue;
+        }
+#elif COTAMER_USE_POLL
+        if (fdu->fd == pollfd_) {
+            char buf[64];
+            while (::read(pollfd_, buf, sizeof(buf)) > 0) {
+            }
             continue;
         }
 #endif

@@ -264,8 +264,8 @@ private:
     std::vector<detail::event_handle> migrate_;
     std::vector<int> migrate_fd_close_;
 
-    int pollfd_ = -1;
-    int epoll_wakefd_ = -1;
+    int pollfd_ = -1;           // kqueue/epoll fd; poll(): wake pipe read end
+    int internal_wakefd_ = -1;  // epoll: eventfd; poll(): wake pipe write end
     unsigned nfdctl_ = 0;
     std::vector<uint64_t> fdctl_;
     detail::fd_event_set fds_;
