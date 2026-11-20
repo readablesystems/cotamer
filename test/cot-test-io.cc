@@ -1431,6 +1431,118 @@ void test_virtual_time_idle_fd() {
     std::cerr << "virtual_time_idle_fd: ok\n";
 }
 
+// TEST: waiting on `closed(f)` doesn't busy-poll
+static double cpu_seconds() {
+    rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6
+        + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
+}
+
+cot::task<> test_closed_no_spin() {
+    int sockraw[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockraw) == 0);
+    cot::set_nonblocking(sockraw[0]);
+    cot::set_nonblocking(sockraw[1]);
+    cot::fd a(sockraw[0]), b(sockraw[1]);
+
+    // Pending unread data must not make a close-only watch spin either.
+    assert(::write(b.fileno(), "x", 1) == 1);
+
+    auto closer = [&]() -> cot::task<> {
+        co_await cot::after(300ms);
+        b.close();
+    };
+    auto ct = closer();
+    double cpu0 = cpu_seconds();
+    co_await cot::closed(a);
+    double cpu = cpu_seconds() - cpu0;
+    assert(ct.done());
+    assert(cpu < 0.1 && "closed() wait burned CPU");
+
+    // any(readable, closed) on a socket with no data
+    int sockraw2[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockraw2) == 0);
+    cot::set_nonblocking(sockraw2[0]);
+    cot::set_nonblocking(sockraw2[1]);
+    cot::fd c(sockraw2[0]), d(sockraw2[1]);
+    auto closer2 = [&]() -> cot::task<> {
+        co_await cot::after(300ms);
+        d.close();
+    };
+    auto ct2 = closer2();
+    cpu0 = cpu_seconds();
+    co_await cot::any(cot::readable(c), cot::closed(c));
+    cpu = cpu_seconds() - cpu0;
+    assert(ct2.done());
+    assert(cpu < 0.1 && "any(readable, closed) wait burned CPU");
+    std::cerr << "closed_no_spin: ok\n";
+}
+
+// TEST: switching an fd between close-only and read interest. On kqueue
+// these use different EVFILT_READ modes (edge vs. level).
+cot::task<> test_closed_then_readable() {
+    int sockraw[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockraw) == 0);
+    cot::set_nonblocking(sockraw[0]);
+    cot::set_nonblocking(sockraw[1]);
+    cot::fd a(sockraw[0]), b(sockraw[1]);
+
+    cot::event cev = cot::closed(a);
+    co_await cot::after(10ms);
+    assert(!cev.triggered());
+
+    // add read interest; data arrives; readable fires, closed doesn't
+    cot::event rev = cot::readable(a);
+    assert(::write(b.fileno(), "x", 1) == 1);
+    co_await rev;
+    assert(!cev.triggered());
+
+    // level-triggered: still readable while the byte is unread
+    co_await cot::readable(a);
+    char ch;
+    assert(::read(a.fileno(), &ch, 1) == 1);
+
+    // back to close-only; EOF fires it
+    co_await cot::after(10ms);
+    assert(!cev.triggered());
+    b.close();
+    co_await cev;
+    std::cerr << "closed_then_readable: ok\n";
+}
+
+// TEST: `closed(f)` in virtual time doesn't stop time from advancing
+void test_virtual_time_closed() {
+    cot::set_clock(cot::clock::virtual_time);
+    cot::reset();
+
+    int sockraw[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockraw) == 0);
+    cot::set_nonblocking(sockraw[0]);
+    cot::set_nonblocking(sockraw[1]);
+    cot::fd a(sockraw[0]), b(sockraw[1]);
+
+    auto start = cot::steady_now();
+    bool closed_fired = false;
+    auto waiter = [&]() -> cot::task<> {
+        co_await cot::closed(a);
+        closed_fired = true;
+    };
+    auto closer = [&]() -> cot::task<> {
+        co_await cot::after(1h);
+        assert(!closed_fired);
+        b.close();
+    };
+    auto wt = waiter();
+    auto ct = closer();
+    cot::loop();
+
+    assert(wt.done() && ct.done() && closed_fired);
+    assert(cot::steady_now() - start >= 1h);
+    cot::set_clock(cot::clock::real_time);
+    std::cerr << "virtual_time_closed: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1467,6 +1579,8 @@ int main(int argc, char* argv[]) {
     run("fd_reuse_race", test_fd_reuse_race);
     run("write_close_read", test_write_close_read);
     run("storm", test_storm);
+    run("closed_no_spin", test_closed_no_spin);
+    run("closed_then_readable", test_closed_then_readable);
 
     // Cross-thread wake tests use their own threads and drivers
     auto run_threaded = [&](const char* name, auto fn) {
@@ -1484,6 +1598,7 @@ int main(int argc, char* argv[]) {
 
     run_threaded("clear_with_fd_events", test_clear_with_fd_events);
     run_threaded("virtual_time_idle_fd", test_virtual_time_idle_fd);
+    run_threaded("virtual_time_closed", test_virtual_time_closed);
     run_threaded("close_wakes_reader", test_close_wakes_reader);
     run_threaded("shutdown_wakes_reader", test_shutdown_wakes_reader);
     run_threaded("close_storm", test_close_storm);

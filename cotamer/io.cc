@@ -260,24 +260,40 @@ inline fdevent fd_batch::mask_in(const system_event_type& se) noexcept {
 
 inline void fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
 #if COTAMER_USE_KQUEUE
-    if (changes == capacity) {
+    // EVFILT_READ is level-triggered for read interest. For close-only
+    // interest it is edge-triggered (EV_CLEAR), so pending data doesn't fire
+    // repeatedly (but a change will fire). Since EV_ADD doesn't change the
+    // EV_CLEAR flag, we often delete & re-add EVFILT_READ.
+    int oldr = int(old_mask & fdevent::read) ? EV_ADD : 0,
+        oldw = int(old_mask & fdevent::write);
+    if (oldr == 0 && int(old_mask & fdevent::close)) {
+        oldr = EV_ADD | EV_CLEAR;
+    }
+    int newr = int(fdu.mask & fdevent::read) ? EV_ADD : 0,
+        neww = int(fdu.mask & fdevent::write);
+    if (newr == 0 && int(fdu.mask & fdevent::close)) {
+        newr = EV_ADD | EV_CLEAR;
+    }
+    if (oldr == newr && oldw == neww) {
+        return;
+    }
+    if (capacity - changes < (oldr == newr ? 0 : 2) + (oldw == neww ? 0 : 1)) {
         clear(pollfd);
     }
     void* udata = reinterpret_cast<void*>(uintptr_t(fdu.epoch));
-    int oldr = int(old_mask & fdevent::read_close), newr = int(fdu.mask & fdevent::read_close);
-    if (bool(oldr) != bool(newr)) {
-        EV_SET(&ev[changes], fdu.fd, EVFILT_READ, newr ? EV_ADD : EV_DELETE, 0, 0, udata);
+    if (oldr != newr && oldr) {
+        EV_SET(&ev[changes], fdu.fd, EVFILT_READ, EV_DELETE, 0, 0, udata);
         ++changes;
     }
-    int oldw = int(old_mask & fdevent::write_close), neww = int(fdu.mask & fdevent::write_close);
-    if (bool(oldw) == bool(neww)) {
-        return;
+    if (oldr != newr && newr) {
+        EV_SET(&ev[changes], fdu.fd, EVFILT_READ, newr, 0, 0, udata);
+        ++changes;
     }
-    if (changes == capacity) {
-        clear(pollfd);
+    if (oldw != neww) {
+        int action = oldw ? EV_DELETE : EV_ADD;
+        EV_SET(&ev[changes], fdu.fd, EVFILT_WRITE, action, 0, 0, udata);
+        ++changes;
     }
-    EV_SET(&ev[changes], fdu.fd, EVFILT_WRITE, neww ? EV_ADD : EV_DELETE, 0, 0, udata);
-    ++changes;
 #elif COTAMER_USE_EPOLL
     epoll_event epev;
     epev.events = mask_out(fdu.mask);
