@@ -1445,6 +1445,41 @@ cot::task<> test_race_zero() {
     std::cerr << "test_race_zero: ok\n";
 }
 
+// TEST: any(), all(), and attempt() accept const events
+cot::task<> test_any_const_event() {
+    auto start = cot::now();
+    const cot::event e1 = cot::after(1h);
+    const cot::event e2 = cot::after(2h);
+    co_await cot::any(e1, cot::after(10h));
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    co_await cot::all(e1, e2);
+    assert(cot::now() - start >= 2h && cot::now() - start < 3h);
+    co_await cot::any(e2);
+    auto r = co_await cot::attempt(race_slow(), e2);
+    assert(!r.has_value());
+    std::cerr << "test_any_const_event: ok\n";
+}
+
+// TEST: first() with zero arguments never completes (and doesn't crash)
+cot::task<> test_first_zero() {
+    auto start = cot::now();
+    auto result = co_await cot::attempt(cot::first(), cot::after(1h));
+    assert(!result.has_value());
+    assert(cot::now() - start >= 1h && cot::now() - start < 2h);
+    std::cerr << "test_first_zero: ok\n";
+}
+
+// TEST: race(t) on a single lvalue task is `t` itself (no wrapper)
+cot::task<> test_race_single_lvalue() {
+    auto t = race_fast();
+    auto& r = cot::race(t);
+    static_assert(std::is_same_v<decltype(cot::race(t)), cot::task<int>&>);
+    assert(&r == &t);
+    assert(co_await r == 42);
+    assert(t.done() && co_await t == 42);
+    std::cerr << "test_race_single_lvalue: ok\n";
+}
+
 // TEST: race() with void tasks
 cot::task<> test_race_void() {
     auto start = cot::now();
@@ -2646,6 +2681,9 @@ int main(int argc, char* argv[]) {
     run("race_last_wins", test_race_last_wins);
     run("race_single", test_race_single);
     run("race_zero", test_race_zero);
+    run("first_zero", test_first_zero);
+    run("any_const_event", test_any_const_event);
+    run("race_single_lvalue", test_race_single_lvalue);
     run("start_before_resolve", test_start_before_resolve);
     run("attempt_needs_resolve", test_attempt_needs_resolve);
     run("empty_task", test_empty_task);

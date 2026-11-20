@@ -388,14 +388,27 @@ struct describe_task_awaiter {
 };
 
 
-// make_event: converts various types into events.
+// make_event: converts combinator arguments into events. Accepts events
+// (and types convertible to event), mutex_events, and `interest{}`.
 
 template <typename T>
-inline event make_event(T resumable) {
-    co_await resumable;
+inline constexpr bool always_false_v = false;
+
+template <typename T>
+requires (!std::is_convertible_v<T&&, event>)
+inline event make_event(T&&) {
+    static_assert(always_false_v<T>,
+                  "any(), all(), and attempt() take events, mutex_events, "
+                  "or interest{}; to wait for a task, use first(), race(), "
+                  "or attempt(task, ...)");
+    return event();
 }
 
 inline event& make_event(event& ev) {
+    return ev;
+}
+
+inline event make_event(const event& ev) {
     return ev;
 }
 
@@ -1734,9 +1747,10 @@ using race_params_t = race_params<typename races::param<Ts>::type...>;
 }
 
 // attempt(t, e...)
-//    Runs a `task<T>` (the first argument) with cancellation (the other
-//    arguments). Returns `task<std::optional<T>>`, which is `nullopt` if the
-//    task was cancelled.
+//    Runs a version of `t` with cancellation support via the `e` arguments.
+//    The returned task, `task<std::optional<T>>`, resolves to `t`’s return
+//    value, unless one of the `e` arguments triggers first, in which case it
+//    resolves to `std::nullopt`.
 
 template <typename T, typename... Es>
 task<std::optional<task_attempt_type_t<T>>> attempt(T&& t, Es&&... es) {
@@ -1766,27 +1780,10 @@ task<std::optional<locked_mutex_t<shared>>> attempt(mutex_event<shared> e, Es&&.
 }
 
 
-// first(t, ...)
-//    Runs several tasks in parallel, and returns the result of the first
-//    to complete, cancelling the others. Returns `std::variant<T...>`.
-
-inline task<> first() {
-    return task<>();
-}
-
-template <typename... Ts>
-task<std::variant<task_alternative_type_t<Ts>...>> first(Ts&&... ts) {
-    detail::race_params_t<Ts...> ax(std::forward<Ts>(ts)...);
-    while (true) {
-        co_await resolve{};
-        size_t ridx = ax.find_resolved();
-        if (ridx != sizeof...(ts)) {
-            co_return ax.select_variant(ridx);
-        }
-        co_await ax.make_event();
-        ax.after_event();
-    }
-}
+// race(t, ...)
+//    Runs several tasks in parallel, all of which have the same return type.
+//    Returns the result of the first to complete. `race<T>()` with no arguments
+//    never completes; `race(task<T>& t)` returns `t` itself as a reference.
 
 template <typename T>
 inline task<T> race() {
@@ -1817,6 +1814,32 @@ task<common_task_value_type_t<Ts...>> race(Ts&&... ts) {
         ax.after_event();
     }
 }
+
+
+// first(t, ...)
+//    Runs several tasks in parallel, and returns the result of the first
+//    to complete. Returns `std::variant<T...>`. `first()` with no arguments
+//    never completes.
+
+[[nodiscard]] inline task<> first() {
+    co_await event(); // never resumes
+    throw cotamer_error(cotamer_errc::unreachable);
+}
+
+template <typename... Ts>
+task<std::variant<task_alternative_type_t<Ts>...>> first(Ts&&... ts) {
+    detail::race_params_t<Ts...> ax(std::forward<Ts>(ts)...);
+    while (true) {
+        co_await resolve{};
+        size_t ridx = ax.find_resolved();
+        if (ridx != sizeof...(ts)) {
+            co_return ax.select_variant(ridx);
+        }
+        co_await ax.make_event();
+        ax.after_event();
+    }
+}
+
 
 template <typename T>
 task<T> forward(task<T> t) {

@@ -148,29 +148,28 @@ struct resolve {};
 // Event combinators.
 // any(e1, e2, ...) — triggers when any one of its arguments triggers.
 // all(e1, e2, ...) — triggers when all of its arguments have triggered.
-// Arguments can be events, awaitables (converted to events via helper
-// coroutines), or `interest{}` (a lazy-start placeholder).
+// Arguments can be events, `mutex_event`s, or `interest{}` (a lazy-start
+// placeholder).
 template <typename... Es> inline event any(Es&&... es);
 template <typename... Es> inline event all(Es&&... es);
 
-// attempt(task, events...) — race a task against events. Returns the task's
-// result (wrapped in optional) if the task completes first, or nullopt if
-// one of the events triggers first.
-template <typename T, typename... Es>
-[[nodiscard]] task<std::optional<task_attempt_type_t<T>>> attempt(T&& t, Es&&... es);
-
-// first(task...) - run several tasks and return the result of the first one
-// that completes (wrapped in variant).
-
-template <typename... Ts>
-[[nodiscard]] task<std::variant<task_alternative_type_t<Ts>...>> first(Ts&&... ts);
-
-// race(task...) - run several tasks, all of the same type, and return the result
-// of the first one that completes (unwrapped).
+// race(task...) — run several tasks, all of the same type, and return the
+// result of the first one that completes.
 template <typename... Ts>
 [[nodiscard]] task<common_task_value_type_t<Ts...>> race(Ts&&... rest);
 template <typename T>
-[[nodiscard]] task<T> race();
+[[nodiscard]] task<T> race();             // never completes
+
+// attempt(task, events...) — race a task against events. Returns the task's
+// result, wrapped in std::optional, if the task completes first, or
+// std::nullopt if one of the events triggers first.
+template <typename T, typename... Es>
+[[nodiscard]] task<std::optional<task_attempt_type_t<T>>> attempt(T&& t, Es&&... es);
+
+// first(task...) — run several tasks and return the result of the first one
+// that completes, wrapped in std::variant.
+template <typename... Ts>
+[[nodiscard]] task<std::variant<task_alternative_type_t<Ts>...>> first(Ts&&... ts);
 
 // forward(t) — forward t’s resolution points into the current coroutine.
 template <typename T>
