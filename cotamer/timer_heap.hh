@@ -53,7 +53,7 @@ struct timer_heap {
     element* es_ = nullptr;
     unsigned size_ = 0;
     unsigned capacity_ = 0;
-    unsigned order_ = 0;         // next `order` to insert
+    unsigned order_ = 0;         // `order` of most recent insertion
     unsigned cull_rand_ = 8173;  // random seed for `cull`
 
     static inline unsigned heap_parent(unsigned i) noexcept;

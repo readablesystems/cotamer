@@ -36,7 +36,7 @@ enum class fdevent {
 inline fdevent operator&(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) & int(b)); }
 inline fdevent operator|(fdevent a, fdevent b) { return static_cast<fdevent>(int(a) | int(b)); }
 inline fdevent& operator|=(fdevent& a, fdevent b) { a = a | b; return a; }
-inline bool operator!(fdevent e) { return e != fdevent::none; }
+inline bool operator!(fdevent e) { return e == fdevent::none; }
 
 }
 #include "cotamer/event_handle.hh"
@@ -385,7 +385,7 @@ task<ioresult> recvmsg(fd f, msghdr* msg, int flags);
 task<ioresult> sendmsg(fd f, const msghdr* msg, int flags);
 inline task<ioresult> recv(fd f, void* buf, size_t count, int flags = 0);
 inline task<ioresult> send(fd f, const void* buf, size_t count, int flags = 0);
-inline task<ioresult> sendv(fd f, const void* buf, size_t count, int flags = 0);
+inline task<ioresult> sendv(fd f, const iovec* iov, size_t iovcnt, int flags = 0);
 inline task<ioresult> send_all(fd f, const void* buf, size_t count, int flags = 0);
 inline task<ioresult> sendv_all(fd f, const iovec* iov, size_t iovcnt, int flags = 0);
 inline task<ioresult> recvfrom(fd f, void* buf, size_t count, sockaddr* addr, socklen_t* addrlen, int flags = 0);
@@ -445,7 +445,6 @@ private:
     detail::event_handle ep_;
 
     inline mutex_event(mutex_type*);
-    inline bool trigger();
 };
 
 class mutex {

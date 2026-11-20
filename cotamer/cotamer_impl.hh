@@ -536,7 +536,7 @@ private:
     void add_listener_unlock(uintptr_t listener, uint32_t flags) {
         // A listener is either a `coroutine_handle<T>::address()` or the
         // address of a `quorum_event_body`. Quorum bodies are distinguished by
-        // setting the `lf_quorum` bit, bit 1; this is safe because coroutines
+        // setting the `lf_quorum` bit, bit 0; this is safe because coroutines
         // and quorum bodies are both aligned.
         assert(listener && (flags & ef_triggered) == 0);
         listeners_.push_back(listener);

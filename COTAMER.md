@@ -50,7 +50,7 @@ A task begins running as soon as it is called, and keeps running until it hits
 a `co_await`. Then it suspends and other tasks get a chance to run. When the
 awaited event or task becomes ready, the task resumes where it left off.
 
-`co_await t` on a `task<T>` produces the task's return value. If the task
+`co_await t` on a `task<T>` produces the task’s return value. If the task
 threw an exception, `co_await` rethrows it in the awaiting coroutine. At most
 one coroutine can `co_await` a given task.
 

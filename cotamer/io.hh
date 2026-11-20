@@ -314,7 +314,7 @@ inline task<fd> accept(fd listen_fd) {
 // this function sets the TCP_NODELAY option.
 
 inline task<fd> tcp_accept(fd listen_fd) {
-    auto f = co_await accept(listen_fd);
+    auto f = co_await accept(std::move(listen_fd));
     // disable Nagle’s algorithm
     int flag = 1;
     setsockopt(f.fileno(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));

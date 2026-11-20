@@ -417,6 +417,10 @@ inline bool http_message::has_valid_url() const {
     return has_url_field(0);
 }
 
+inline bool http_message::has_path() const {
+    return has_url_field(0);
+}
+
 inline std::string_view http_message::path() const {
     return url_field(0);
 }
