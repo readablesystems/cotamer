@@ -24,7 +24,7 @@ simultaneously leaked 19,881 / 20,000 fds. *repro*
 Fix: decide with `ref_.fetch_sub(1, std::memory_order_acq_rel) == 1`, then
 close/delete without decrementing again inside `close`.
 
-### 2. [ ] bug — `loop()` exits with pending `asap()` work
+### 2. [x] bug — `loop()` exits with pending `asap()` work
 `cotamer.cc:116`. The exit test checks timers, fds, lock, guards, and
 keepalives, but not `asap_`. With more than `asap_quota` (4096) queued asap
 events, `loop()` returns while coroutines are still runnable.
@@ -32,7 +32,7 @@ events, `loop()` returns while coroutines are still runnable.
 check `asap_`. Repro: one coroutine doing `for (i < 5000) co_await
 cot::asap();` reaches 4096 after the first `loop()`. *repro*
 
-Fix: add `&& asap_.empty()` to both.
+Fixed: added `asap_.empty()` to both. Test `asap_over_quota`.
 
 ### 3. [x] bug — virtual time can go backwards
 `cotamer.cc:154`. `snow_ = timed_.top_time()` runs even when
@@ -55,15 +55,17 @@ resumes; `loop()` exits. COTAMER.md says awaiting a task starts it. *repro*
 
 Fix: in `prepare_awaiter`, `else has_interest_ = true;` (mirror `start()`).
 
-### 5. [ ] bug — `driver_guard` outliving `clear()` drives `guard_count_` to −1
+### 5. [x] bug — `driver_guard` outliving `clear()` drives `guard_count_` to −1
 `cotamer_impl.hh:1425`, `cotamer.cc:197`. `process_clearing` zeroes
 `guard_count_`; `clearing_` resets when the loop exits; a guard destroyed
 afterwards decrements to −1. Repro: `{ driver_guard g; clear(); loop(); }`
 — afterwards `driver::empty()` is false and later `loop()`s never exit.
 *repro*
 
-Fix: guards record a clear generation and skip the decrement if it changed
-(or clamp at 0).
+Fixed: `process_clearing` bumps a clear generation; a guard records the
+generation it was counted in and decrements only if it is unchanged.
+(Clamping at 0 would let a pre-clear guard release a post-clear guard's
+count.) Test `guard_outlives_clear`.
 
 ### 6. [x] latent — `any()`/`all()` don't accept awaitables
 `cotamer.hh:151`, `cotamer_impl.hh:393`. The header comment said they do,

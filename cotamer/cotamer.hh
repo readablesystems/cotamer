@@ -252,6 +252,7 @@ private:
     bool clearing_ = false;
     bool real_time_ = false;
     int guard_count_ = 0;
+    unsigned clear_generation_ = 0;
     std::deque<detail::event_handle> asap_;
     timer_heap<detail::event_handle> timed_;
     std::vector<detail::event_handle> keepalives_;
@@ -331,6 +332,9 @@ public:
 
 private:
     driver* drv_;
+    unsigned clear_generation_ = 0;
+
+    inline void release();
 };
 
 

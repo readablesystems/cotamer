@@ -1531,6 +1531,48 @@ cot::task<> test_after_zero_yields() {
     std::cerr << "test_after_zero_yields: ok (" << spins << " spins)\n";
 }
 
+// TEST: loop() doesn't exit while asap() work is pending, even beyond the
+// per-iteration asap quota (audit #2)
+cot::task<> test_asap_over_quota() {
+    int n = 0;
+    auto spinner = [&]() -> cot::task<> {
+        for (int i = 0; i != 10000; ++i) {
+            co_await cot::asap();
+            ++n;
+        }
+    };
+    auto t = spinner();
+    assert(!cot::driver::current->empty());
+    co_await t;
+    assert(n == 10000);
+    std::cerr << "test_asap_over_quota: ok\n";
+}
+
+// TEST: a driver_guard that outlives clear() doesn't corrupt the guard
+// count (audit #5)
+cot::task<> test_guard_outlives_clear() {
+    // runs synchronously, before the harness's loop()
+    auto drv = cot::driver::current.get();
+    std::optional<cot::driver_guard> g1(std::in_place);
+    cot::clear();
+    cot::loop();
+    assert(drv->empty());
+    std::optional<cot::driver_guard> g2(std::in_place); // counts: clearing done
+    assert(!drv->empty());
+    g1.reset();                         // does not release g2's count
+    assert(!drv->empty());
+    cot::driver_guard g3(std::move(*g2));
+    g2.reset();
+    assert(!drv->empty());
+    g1.emplace();
+    *g1 = std::move(g3);
+    assert(!drv->empty());
+    g1.reset();
+    assert(drv->empty());
+    co_await cot::after(1s);
+    std::cerr << "test_guard_outlives_clear: ok\n";
+}
+
 // TEST: first() with zero arguments never completes (and doesn't crash)
 cot::task<> test_first_zero() {
     auto start = cot::now();
@@ -2756,6 +2798,8 @@ int main(int argc, char* argv[]) {
     run("at_past_deadline", test_at_past_deadline);
     run("after_zero_yields", test_after_zero_yields);
     run("time_never_backwards", test_time_never_backwards);
+    run("asap_over_quota", test_asap_over_quota);
+    run("guard_outlives_clear", test_guard_outlives_clear);
     run("any_const_event", test_any_const_event);
     run("race_single_lvalue", test_race_single_lvalue);
     run("start_before_resolve", test_start_before_resolve);
