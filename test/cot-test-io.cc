@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <vector>
 
 namespace cot = cotamer;
@@ -1714,6 +1715,30 @@ cot::task<> test_udp_port_exclusive() {
     std::cerr << "udp_port_exclusive: ok\n";
 }
 
+// TEST: address resolution errors throw `std::system_error` with
+// getaddrinfo_error_category()
+cot::task<> test_resolve_error() {
+    for (int i = 0; i != 4; ++i) {
+        std::error_code ec;
+        try {
+            if (i == 0) {
+                co_await cot::tcp_connect("localhost");
+            } else if (i == 1) {
+                co_await cot::tcp_listen("localhost");
+            } else if (i == 2) {
+                co_await cot::udp_connect("localhost");
+            } else {
+                co_await cot::udp_listen("localhost");
+            }
+        } catch (const std::system_error& e) {
+            ec = e.code();
+        }
+        assert(ec.category() == cot::getaddrinfo_error_category());
+        assert(ec.value() == EAI_NONAME);
+    }
+    std::cerr << "resolve_error: ok\n";
+}
+
 // TEST: listening with an empty host (`:PORT`) accepts both IPv4 and IPv6
 // connections when IPv6 is available, with tcp_listen_all and tcp_listen
 static cot::task<cot::fd> accept_any(cot::fd_list& lfds) {
@@ -1894,6 +1919,7 @@ int main(int argc, char* argv[]) {
     run("closed_fd_ready", test_closed_fd_ready);
     run("accept_after_reset", test_accept_after_reset);
     run("udp_port_exclusive", test_udp_port_exclusive);
+    run("resolve_error", test_resolve_error);
     run("listen_wildcard_dual_stack", test_listen_wildcard_dual_stack);
     run("sockets_cloexec", test_sockets_cloexec);
     run("accept_fd_exhaustion", test_accept_fd_exhaustion);

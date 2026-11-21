@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -410,6 +411,10 @@ inline task<fd> tcp_accept(fd listen_fd);
 task<fd_list> udp_listen_all(std::string address, size_t max = 0);
 task<fd> udp_listen(std::string address);
 task<fd> udp_connect(std::string address);
+
+// DNS resolution errors throw `std::system_error` with this category and error
+// code is an `EAI_*` value.
+const std::error_category& getaddrinfo_error_category() noexcept;
 
 
 // mutex, mutex_event, unique_lock, shared_lock

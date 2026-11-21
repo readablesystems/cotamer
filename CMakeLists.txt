@@ -130,6 +130,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 add_library(Cotamer OBJECT
     cotamer/cotamer.cc
+    cotamer/http_fields.cc
     cotamer/io.cc
 )
 
@@ -158,6 +159,16 @@ add_executable(cot-test-io
     test/cot-test-io.cc
     $<TARGET_OBJECTS:Cotamer>
 )
+
+if(COTAMER_HAVE_LLHTTP)
+    add_executable(cot-test-http
+        test/cot-test-http.cc
+        $<TARGET_OBJECTS:Cotamer>
+        $<TARGET_OBJECTS:CotamerHttp>
+    )
+    target_include_directories(cot-test-http PRIVATE ${LLHTTP_INCLUDE_DIR})
+    target_link_libraries(cot-test-http PRIVATE ${LLHTTP_LIBRARY})
+endif()
 
 add_executable(cot-manual
     test/cot-manual.cc

@@ -93,10 +93,12 @@ cot::task<> test_redirect() {
             res.status_code(302)
                .header("Location",
                        std::format("http://127.0.0.1:{}/to", port))
+               .header("X-Hop", "1")
                .body("");
         } else {
             res.status_code(200)
                .header("Content-Type", "text/plain")
+               .header("X-Final", "1")
                .body("final");
         }
         return res;
@@ -108,7 +110,42 @@ cot::task<> test_redirect() {
     auto resp = co_await cot::curl_fetch(url);
     assert(resp.status == 200);
     assert(resp.body == "final");
+    // only the final response's headers are reported
+    assert(resp.headers.contains("X-Final"));
+    assert(!resp.headers.contains("X-Hop"));
+    assert(!resp.headers.contains("Location"));
     std::cerr << "redirect: ok\n";
+
+    stop.trigger();
+    co_await cot::after(20ms);
+    cot::curl_reset();
+}
+
+
+// TEST: only HTTP and HTTPS are allowed, including in redirects.
+cot::task<> test_protocols() {
+    auto fetch_error = [](std::string url) -> cot::task<int> {
+        try {
+            co_await cot::curl_fetch(std::move(url));
+        } catch (const cot::curl_error& e) {
+            co_return e.code();
+        }
+        co_return CURLE_OK;
+    };
+    assert(co_await fetch_error("file:///etc/passwd") == CURLE_UNSUPPORTED_PROTOCOL);
+
+    uint16_t port = unique_port();
+    cot::event stop;
+    auto handler = [](const cot::http_message&) {
+        cot::http_message res;
+        res.status_code(302).header("Location", "file:///etc/passwd");
+        return res;
+    };
+    run_server(port, handler, stop).detach();
+    co_await cot::after(5ms);
+    int code = co_await fetch_error(std::format("http://127.0.0.1:{}/", port));
+    assert(code == CURLE_UNSUPPORTED_PROTOCOL);
+    std::cerr << "protocols: ok\n";
 
     stop.trigger();
     co_await cot::after(20ms);
@@ -302,6 +339,7 @@ cot::task<> run_all(int argc, char* argv[]) {
 
     co_await run("basic_get",   test_basic_get);
     co_await run("redirect",    test_redirect);
+    co_await run("protocols",   test_protocols);
     co_await run("stress",      test_stress);
     co_await run("torture",     test_torture);
     co_await run("cancel",      test_cancel);

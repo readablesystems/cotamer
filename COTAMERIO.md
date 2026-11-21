@@ -57,9 +57,10 @@ ssize_t n = ::read(rfd.fileno(), buf, sizeof(buf));
 
 File descriptors must be in non-blocking mode for readiness events to work
 correctly. I/O helpers that return a `cotamer::fd` (`accept`, `tcp_listen`,
-`tcp_connect`, `tcp_accept`) automatically put that fd in non-blocking mode;
-for file descriptors obtained in other ways, call `cotamer::set_nonblocking`,
-which is overloaded for both a raw `int` fd and a `cotamer::fd`.
+`tcp_connect`, `tcp_accept`, `udp_listen`, `udp_connect`, and the `_all`
+variants) automatically put that fd in non-blocking mode; for file descriptors obtained in other ways, call
+`cotamer::set_nonblocking`, which is overloaded for both a raw `int` fd and a
+`cotamer::fd`.
 
 Sockets created by these helpers are also close-on-exec, so child processes
 (started with `fork`/`exec`, `posix_spawn`, `system`, …) don’t inherit them.
@@ -96,7 +97,7 @@ bytes; you can access that count with `*result`. On failure, it encapsulates the
 Some example uses:
 
 ```c++
-cot::ioresult result = cot::read(fd, buf, n);
+cot::ioresult result = co_await cot::read(fd, buf, n);
 
 if (result) {
     // transfer succeeded (or end-of-file)
@@ -177,13 +178,14 @@ Signatures:
 
 | Function | Description |
 |:---------|:------------|
-| `task<ioresult> send(fd, const void* buf, size_t count)` | Send to first success |
-| `task<ioresult> send_all(fd, const void* buf, size_t count)` | Send to completion |
-| `task<ioresult> sendv_all(fd, const iovec* iov, size_t iovcnt)` | Scatter-gather send to completion |
-| `task<ioresult> sendto(fd, const void* buf, size_t count, const sockaddr* addr, socklen_t)` | Send datagram to explicit destination |
+| `task<ioresult> send(fd, const void* buf, size_t count[, int flags])` | Send to first success |
+| `task<ioresult> sendv(fd, const iovec* iov, size_t iovcnt[, int flags])` | Scatter-gather send to first success |
+| `task<ioresult> send_all(fd, const void* buf, size_t count[, int flags])` | Send to completion |
+| `task<ioresult> sendv_all(fd, const iovec* iov, size_t iovcnt[, int flags])` | Scatter-gather send to completion |
+| `task<ioresult> sendto(fd, const void* buf, size_t count, const sockaddr* addr, socklen_t[, int flags])` | Send datagram to explicit destination |
 | `task<ioresult> sendmsg(fd, const msghdr* msg, int flags)` | Send message |
-| `task<ioresult> recv(fd, void* buf, size_t count)` | Receive to first success |
-| `task<ioresult> recvfrom(fd, void* buf, size_t count, sockaddr* addr, socklen_t*)` | Receive datagram and capture sender address |
+| `task<ioresult> recv(fd, void* buf, size_t count[, int flags])` | Receive to first success |
+| `task<ioresult> recvfrom(fd, void* buf, size_t count, sockaddr* addr, socklen_t*[, int flags])` | Receive datagram and capture sender address |
 | `task<ioresult> recvmsg(fd, msghdr* msg, int flags)` | Receive message |
 | `task<> connect(fd, const sockaddr*, socklen_t)` | Connect client socket to address |
 | `task<fd> accept(fd)` | Accept new nonblocking socket from listening fd |
@@ -205,8 +207,10 @@ happens on a background thread to avoid blocking the event loop. `tcp_connect`
 and `tcp_accept` both set the `TCP_NODELAY` socket option to disable [Nagle’s
 algorithm](https://en.wikipedia.org/wiki/Nagle%27s_algorithm)
 ([why?](https://brooker.co.za/blog/2024/05/09/nagle.html)). If DNS resolution
-fails, the functions throw `std::runtime_error` with an error description; on
-other failures, they throw `std::system_error` with `errno` as error code.
+fails, the functions throw `std::system_error` whose code has category
+`cot::getaddrinfo_error_category()` and an `EAI_*` value (such as
+`EAI_NONAME`); on other failures, they throw `std::system_error` with `errno`
+as error code.
 
 ```cpp
 cot::task<> echo_server() {
@@ -299,7 +303,8 @@ cot::task<> udp_echo_client(std::string address, std::string message) {
 }
 ```
 
-As with TCP, a `udp_listen_all(address)` function can return multiple `fd`s.
+As with TCP, a `udp_listen_all(address)` function can return multiple `fd`s,
+and errors are reported the same way.
 
 
 ## Mutual exclusion
@@ -465,23 +470,158 @@ res.status_code(200)
     .body("hello\n");
 ```
 
-| Member                              | Accesses                              | Message type | Mode       |
-|:------------------------------------|:--------------------------------------|:-------------|:-----------|
-| `method()`, `method_name()`         | request method                        | Request      | Read/write |
-| `status_code()`                     | response status code (e.g. 200, 404)  | Response     | Read/write |
-| `url()`                             | request URL                           | Request      | Read/write |
-| `body()`                            | message body                          | Any          | Read/write |
-| `header(name, value)`               | header                                | Any          | Write      |
-| `header(name)`                      | header by name                        | Any          | Read       |
-| `path()`                            | URL path part (no `?...` or `#...`)   | Request      | Read       |
-| `header_begin/end()`                | iterate over headers; each iterator has `.name()` and `.value()` | Any | Read |
-| `search_param_begin/end()`          | iterate over `?name=value` parameters | Request      | Read       |
-| `search_param(name)`                | search parameter by name              | Request      | Read       |
+| Member                        | Accesses                              | Message type | Mode       |
+|:------------------------------|:--------------------------------------|:-------------|:-----------|
+| `method()`, `method_name()`   | request method                        | Request      | Read/write |
+| `status_code()`               | response status code (e.g. 200, 404)  | Response     | Read/write |
+| `url()`                       | request URL                           | Request      | Read/write |
+| `body()`                      | message body                          | Any          | Read/write |
+| `header(name, value)`         | header                                | Any          | Write      |
+| `header(name)`                | header by name                        | Any          | Read       |
+| `remove_header(name)`         | remove all headers named `name`       | Any          | Write      |
+| `remove_header_if(pred)`      | remove headers where `pred(name, value)` is true | Any | Write    |
+| `path()`                      | URL path part (no `?...` or `#...`)   | Request      | Read       |
+| `decoded_path()`              | decoded, normalized path (see below)  | Request      | Read       |
+| `upgrade()`                   | true for CONNECT or protocol upgrade  | Any          | Read       |
+| `header_begin/end()`          | iterate over headers; each iterator has `.name()` and `.value()` | Any | Read |
+| `search_param_begin/end()`    | iterate over `?name=value` parameters | Request      | Read       |
+| `search_param(name)`          | search parameter by name              | Request      | Read       |
 
 If `nlohmann::json` is enabled at build time, `http_message::body(const
 nlohmann::json&)` is also available; it serializes the JSON, sets the body,
 and adds a `Content-Type: application/json` header if none is already
 present.
+
+Header names must be HTTP tokens, and header values, status messages, and
+URLs may not contain CR, LF, or NUL (URLs also may not contain spaces or
+tabs). Adding an invalid header throws `std::invalid_argument`, as does
+sending a message with an invalid status message, URL, or status code (which
+must be between 100 and 999).
+
+`path()` returns the raw path, exactly as received. `decoded_path()`
+percent-decodes the path and resolves `.` and `..` segments, which is useful
+when mapping a URL to a file. It returns `std::nullopt` if the URL is
+invalid, the path contains `%00` or `%2F`, or a `..` segment would rise above
+the root.
+
+
+### Structured header values
+
+`cotamer/http_fields.hh` helps parse header values that follow the
+grammar of RFC 9110 §5.6. Both helpers are views; the string they parse must
+outlive them.
+
+- `cot::strings::http_value_list(value)` iterates over a comma-separated list
+  (as in `Connection`, `Upgrade`, or `Accept-Encoding`). Entries are trimmed
+  of whitespace, empty entries are skipped, and commas inside quoted strings
+  don’t split. `icontains(token)` tests whether a list contains `token`,
+  ignoring case.
+- `cot::strings::http_parameter_list(value)` iterates over a
+  semicolon-separated parameter list (as in `Content-Type` or
+  `Sec-WebSocket-Extensions`). Its iterator has `name()`, `has_value()`,
+  `raw_value()` (quoted values keep their quotes), and `value()` (quotes and
+  escapes removed by `cot::strings::http_unquote`).
+
+```cpp
+std::string conn = req.header("connection");   // the view needs a real string
+if (cot::strings::http_value_list(conn).icontains("upgrade")) { ... }
+```
+
+
+### Framing
+
+`http_parser` frames the bodies it sends. A message with a body (set with
+`body()` or `append_body()`, or received with one) is sent with a
+`Content-Length` that matches the body; any `Content-Length` or
+`Transfer-Encoding` headers on the message are replaced. A response without
+a body gets `Content-Length: 0`, unless it has its own `Content-Length` or
+`Transfer-Encoding` header. `send_response` never sends a body with a 1xx,
+204, or 304 response. When responding to a `HEAD` request, it sends headers
+but no body; if the response has a body, its `Content-Length` reports the
+body’s length. To stream a response body, set `Transfer-Encoding: chunked`
+without setting a body, then use `send_response_chunk` and
+`send_response_end_chunk`. (Empty chunks are ignored.)
+
+A received message keeps its headers as they arrived, including
+`Transfer-Encoding: chunked`, but its body is decoded. Thanks to the framing
+rules, it can be forwarded as is. A proxy should also remove hop-by-hop
+headers: `Connection`, any headers named in `Connection`, `Keep-Alive`,
+`Proxy-Connection`, `TE`, `Trailer`, and `Upgrade`. For example:
+
+```cpp
+#include "cotamer/http_fields.hh"
+using cot::strings::http_value_list;
+
+auto req = co_await downstream.receive();
+std::string conn = req.header("connection");
+http_value_list hop("connection, keep-alive, proxy-connection, te, trailer, upgrade");
+req.remove_header_if([&](std::string_view name, std::string_view) {
+    return hop.icontains(name) || http_value_list(conn).icontains(name);
+});
+auto ticket = co_await upstream.send_request(std::move(req));
+```
+
+(This checks every header against every name in `Connection`. A hostile peer
+can list many names there; a production proxy should limit their number or
+use a hash set.)
+
+A chunked message’s trailers are received as ordinary headers.
+
+On the client side, `http_parser` remembers the method of each request sent
+with `send_request`. It knows that a response to `HEAD` has no body, even if
+it has a nonzero `Content-Length`, and that a 2xx response to `CONNECT`
+starts a tunnel: the response has `upgrade()` true, and tunneled bytes that
+arrived with the response remain in `receive_buffer()`. A response with
+neither `Content-Length` nor `Transfer-Encoding` ends when the server closes
+the connection.
+
+
+### Limits and timeouts
+
+`http_parser` limits the messages it receives:
+
+| Setting                                  | Default                        |
+|:-----------------------------------------|:-------------------------------|
+| `set_max_header_size(n)`: request or status line plus headers | 64 KiB |
+| `set_max_body_size(n)`                   | 16 MiB                         |
+| `set_receive_timeout(d)`: time for one `receive()` to complete | 60s in server mode; none in client mode |
+
+Pass `cotamer::duration::max()` to `set_receive_timeout` to disable the
+timeout. In server mode, the timeout also bounds how long an idle keep-alive
+connection waits for its next request.
+
+When a limit is exceeded, `receive()` returns an error, `hp.ok()` is false,
+`hp.error()` is `HPE_USER`, and `hp.failure()` says which limit failed:
+`header_too_large` (suggested response 431), `body_too_large` (413), or
+`timeout` (408). A failed parser cannot receive more messages, and
+`should_keep_alive()` returns false. For example:
+
+```cpp
+auto req = co_await hp.receive();
+if (hp.failure() == cot::http_parser::failure_type::body_too_large) {
+    co_await hp.send(cot::http_message(413).header("Connection", "close"));
+}
+if (!hp.ok()) {
+    co_return;
+}
+```
+
+`receive()` may be cancelled, for instance with `cot::attempt`. If it is
+cancelled between messages, the parser remains usable. If it is cancelled
+partway through a message, the parser cannot resume; it fails with
+`failure_type::cancelled`.
+
+
+### Upgrades
+
+A CONNECT request, or a request with `Connection: upgrade` and an `Upgrade`
+header, ends the HTTP portion of a connection. `receive()` returns that
+request with `upgrade()` true. Afterward, `should_keep_alive()` returns false,
+later `receive()` calls fail with `HPE_PAUSED_UPGRADE`, and any bytes that
+followed the request remain in `receive_buffer()`. A server that supports the
+upgrade can respond with `101 Switching Protocols`, then use `take_file()`
+and `receive_buffer()` to continue with the new protocol. Other servers
+should respond normally; the connection then closes.
 
 
 ### Pipelining
@@ -492,8 +632,10 @@ responses in order. Cotamer `http_parser` also supports request pipelining, but
 some care is required to ensure requests and responses match. The
 `http_parser::send_request` coroutine therefore returns a *ticket*, the caller’s
 reserved position in line. If you aren’t using pipelining, you can ignore the
-ticket. If you are using pipelining, pass the ticket to `receive()` via
-`hp.receive(std::move(ticket))` to claim the matching response in line.
+ticket: dropping a ticket gives up its place in line, and `receive()` without a
+ticket takes the next place. If you are using pipelining, pass the ticket to
+`receive()` via `hp.receive(std::move(ticket))` to claim the matching response
+in line.
 
 
 For fuller examples covering routing, JSON request and response bodies, error
