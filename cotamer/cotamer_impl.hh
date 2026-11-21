@@ -2129,13 +2129,7 @@ inline detail::event_handle&& mutex_event<shared>::handle() && noexcept {
 
 inline mutex_event<false> mutex::lock() {
     mutex_event<false> me(this);
-    lock_impl(false, me.ep_, nullptr);
-    return me;
-}
-
-inline mutex_event<false> mutex::lock(bool& notify) {
-    mutex_event<false> me(this);
-    lock_impl(false, me.ep_, &notify);
+    lock_impl(false, me.ep_);
     return me;
 }
 
@@ -2156,13 +2150,7 @@ inline void mutex::unlock() {
 
 inline mutex_event<true> mutex::lock_shared() {
     mutex_event<true> me(this);
-    lock_impl(true, me.ep_, nullptr);
-    return me;
-}
-
-inline mutex_event<true> mutex::lock_shared(bool& notify) {
-    mutex_event<true> me(this);
-    lock_impl(true, me.ep_, &notify);
+    lock_impl(true, me.ep_);
     return me;
 }
 
@@ -2203,158 +2191,208 @@ inline auto mutex::latch() -> latch_type {
 
 inline void mutex::unlatch(latch_type l) {
     if (!waiters_.empty()) {
-        l += waiter_shared(waiters_.front().first) ? mf_next_shared : mf_next_excl;
+        l += waiter_shared(waiters_.front()) ? mf_next_shared : mf_next_excl;
     }
     latch_.store(l, std::memory_order_release);
 }
 
 
 inline unique_lock::unique_lock(locked_mutex_t<false> t) noexcept
-    : m_(t.m), owned_(true) {
-}
-
-inline unique_lock::~unique_lock() {
-    if (owned_) {
-        m_->unlock();
-    }
-}
-
-inline unique_lock::unique_lock(unique_lock&& x) noexcept
-    : m_(std::exchange(x.m_, nullptr)), owned_(std::exchange(x.owned_, false)) {
+    : m_(t.m), pending_(1) {
 }
 
 inline unique_lock::unique_lock(mutex_type& m, std::defer_lock_t) noexcept
-    : m_(&m), owned_(false) {
+    : m_(&m), pending_(0) {
 }
 
 inline unique_lock::unique_lock(mutex_type& m, std::try_to_lock_t) noexcept
-    : m_(&m), owned_(m.try_lock()) {
+    : m_(&m), pending_(m.try_lock() ? 1 : 0) {
 }
 
 inline unique_lock::unique_lock(mutex_type& m, std::adopt_lock_t) noexcept
-    : m_(&m), owned_(true) {
+    : m_(&m), pending_(1) {
+}
+
+inline unique_lock::unique_lock(unique_lock&& x) noexcept
+    : m_(std::exchange(x.m_, nullptr)), pending_(std::exchange(x.pending_, 0)) {
+}
+
+inline unique_lock::~unique_lock() {
+    reset();
+}
+
+// Unlock if owned and drop any pending request.
+inline void unique_lock::reset() noexcept {
+    if (m_ && m_->drop_request(pending_)) {
+        m_->unlock();
+    }
+    pending_ = 0;
 }
 
 inline unique_lock& unique_lock::operator=(unique_lock&& x) noexcept {
-    if (owned_) {
-        m_->unlock();
+    if (&x != this) {
+        reset();
+        m_ = std::exchange(x.m_, nullptr);
+        pending_ = std::exchange(x.pending_, 0);
     }
-    m_ = std::exchange(x.m_, nullptr);
-    owned_ = std::exchange(x.owned_, false);
     return *this;
 }
 
 inline void unique_lock::swap(unique_lock& x) noexcept {
     if (&x != this) {
         std::swap(m_, x.m_);
-        std::swap(owned_, x.owned_);
+        std::swap(pending_, x.pending_);
     }
+}
+
+inline bool unique_lock::owns_lock() const noexcept {
+    return pending_ == 1
+        || (pending_ > 1
+            && reinterpret_cast<detail::event_body*>(pending_)->triggered());
 }
 
 inline mutex_event<false> unique_lock::lock() {
     if (!m_) {
         throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
-    } else if (owned_) {
+    } else if (pending_) {
         throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
     }
-    return m_->lock(owned_);
+    auto me = m_->lock();
+    if (me.triggered()) {
+        pending_ = 1;
+    } else {
+        auto eb = me.handle().get();
+        eb->ref();
+        pending_ = reinterpret_cast<uintptr_t>(eb);
+    }
+    return me;
 }
 
 inline bool unique_lock::try_lock() {
     if (!m_) {
         throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
-    } else if (owned_) {
+    } else if (pending_) {
         throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
     }
-    owned_ = m_->try_lock();
-    return owned_;
+    pending_ = m_->try_lock() ? 1 : 0;
+    return pending_ != 0;
 }
 
 inline void unique_lock::unlock() {
-    if (!owned_) {
+    if (!owns_lock()) {
         throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
     }
-    m_->unlock();
-    owned_ = false;
+    reset();
 }
 
+// Give up the mutex without unlocking. A still-pending request is dropped;
+// unless someone else is awaiting it, the mutex will skip it.
 inline auto unique_lock::release() noexcept -> mutex_type* {
-    owned_ = false;
+    if (m_) {
+        // if the request was granted, the caller now holds the mutex
+        m_->drop_request(pending_);
+    }
+    pending_ = 0;
     return std::exchange(m_, nullptr);
 }
 
 
 inline shared_lock::shared_lock(locked_mutex_t<true> t) noexcept
-    : m_(t.m), owned_(true) {
-}
-
-inline shared_lock::~shared_lock() {
-    if (owned_) {
-        m_->unlock_shared();
-    }
+    : m_(t.m), pending_(1) {
 }
 
 inline shared_lock::shared_lock(mutex_type& m, std::defer_lock_t) noexcept
-    : m_(&m), owned_(false) {
+    : m_(&m), pending_(0) {
 }
 
 inline shared_lock::shared_lock(mutex_type& m, std::try_to_lock_t) noexcept
-    : m_(&m), owned_(m.try_lock_shared()) {
+    : m_(&m), pending_(m.try_lock_shared() ? 1 : 0) {
 }
 
 inline shared_lock::shared_lock(mutex_type& m, std::adopt_lock_t) noexcept
-    : m_(&m), owned_(true) {
+    : m_(&m), pending_(1) {
 }
 
 inline shared_lock::shared_lock(shared_lock&& x) noexcept
-    : m_(std::exchange(x.m_, nullptr)), owned_(std::exchange(x.owned_, false)) {
+    : m_(std::exchange(x.m_, nullptr)), pending_(std::exchange(x.pending_, 0)) {
+}
+
+inline shared_lock::~shared_lock() {
+    reset();
+}
+
+// Unlock if owned and drop any pending request.
+inline void shared_lock::reset() noexcept {
+    if (m_ && m_->drop_request(pending_)) {
+        m_->unlock_shared();
+    }
+    pending_ = 0;
 }
 
 inline shared_lock& shared_lock::operator=(shared_lock&& x) noexcept {
-    if (owned_) {
-        m_->unlock_shared();
+    if (&x != this) {
+        reset();
+        m_ = std::exchange(x.m_, nullptr);
+        pending_ = std::exchange(x.pending_, 0);
     }
-    m_ = std::exchange(x.m_, nullptr);
-    owned_ = std::exchange(x.owned_, false);
     return *this;
 }
 
 inline void shared_lock::swap(shared_lock& x) noexcept {
     if (&x != this) {
         std::swap(m_, x.m_);
-        std::swap(owned_, x.owned_);
+        std::swap(pending_, x.pending_);
     }
+}
+
+inline bool shared_lock::owns_lock() const noexcept {
+    return pending_ == 1
+        || (pending_ > 1
+            && reinterpret_cast<detail::event_body*>(pending_)->triggered());
 }
 
 inline mutex_event<true> shared_lock::lock() {
     if (!m_) {
         throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
-    } else if (owned_) {
+    } else if (pending_) {
         throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
     }
-    return m_->lock_shared(owned_);
+    auto me = m_->lock_shared();
+    if (me.triggered()) {
+        pending_ = 1;
+    } else {
+        auto eb = me.handle().get();
+        eb->ref();
+        pending_ = reinterpret_cast<uintptr_t>(eb);
+    }
+    return me;
 }
 
 inline bool shared_lock::try_lock() {
     if (!m_) {
         throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
-    } else if (owned_) {
+    } else if (pending_) {
         throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
     }
-    owned_ = m_->try_lock_shared();
-    return owned_;
+    pending_ = m_->try_lock_shared() ? 1 : 0;
+    return pending_ != 0;
 }
 
 inline void shared_lock::unlock() {
-    if (!owned_) {
+    if (!owns_lock()) {
         throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
     }
-    m_->unlock_shared();
-    owned_ = false;
+    reset();
 }
 
+// Give up the mutex without unlocking. A still-pending request is dropped;
+// unless someone else is awaiting it, the mutex will skip it.
 inline auto shared_lock::release() noexcept -> mutex_type* {
-    owned_ = false;
+    if (m_) {
+        // if the request was granted, the caller now holds the mutex
+        m_->drop_request(pending_);
+    }
+    pending_ = 0;
     return std::exchange(m_, nullptr);
 }
 

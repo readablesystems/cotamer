@@ -950,6 +950,48 @@ cot::task<> test_unique_lock() {
     std::cerr << "unique_lock: ok\n";
 }
 
+// TEST: moving a unique_lock or shared_lock while its lock request is pending
+// transfers the request; the grant goes to the moved-to lock
+cot::task<> test_lock_moved_while_pending() {
+    cot::mutex m;
+    {
+        cot::unique_lock holder(co_await m.lock());
+        cot::unique_lock g(m, std::defer_lock);
+        auto req = g.lock();            // pending: `holder` has the mutex
+        assert(!g.owns_lock());
+        cot::unique_lock g2(std::move(g));
+        holder.unlock();                // grants the request
+        (void) co_await req;
+        assert(g2.owns_lock() && !g.owns_lock());
+    }
+    assert(m.try_lock());               // g2 released it
+    m.unlock();
+    {
+        cot::unique_lock holder(co_await m.lock());
+        cot::shared_lock s(m, std::defer_lock);
+        auto req = s.lock();
+        cot::shared_lock s2;
+        s2 = std::move(s);
+        holder.unlock();
+        (void) co_await req;
+        assert(s2.owns_lock() && !s.owns_lock());
+    }
+    assert(m.try_lock());
+    m.unlock();
+    {
+        // released while pending: nothing is granted, nothing leaks
+        cot::unique_lock holder(co_await m.lock());
+        cot::unique_lock g(m, std::defer_lock);
+        (void) g.lock();
+        assert(g.release() == &m);
+        holder.unlock();
+        co_await cot::asap();
+        assert(m.try_lock());
+        m.unlock();
+    }
+    std::cerr << "lock_moved_while_pending: ok\n";
+}
+
 // TEST: unique_lock: move semantics and release()
 cot::task<> test_unique_lock_move() {
     cot::mutex m;
@@ -2833,6 +2875,7 @@ int main(int argc, char* argv[]) {
     run("race_zero", test_race_zero);
     run("first_zero", test_first_zero);
     run("interest_after_await", test_interest_after_await);
+    run("lock_moved_while_pending", test_lock_moved_while_pending);
     run("small_vector_self_push", test_small_vector_self_push);
     run("at_past_deadline", test_at_past_deadline);
     run("after_zero_yields", test_after_zero_yields);

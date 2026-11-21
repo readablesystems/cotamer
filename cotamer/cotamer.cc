@@ -299,16 +299,13 @@ inline bool mutex::allow(bool is_shared, latch_type l) const noexcept {
 inline auto mutex::notify_locked(latch_type l) -> latch_type {
     while (!waiters_.empty()) {
         auto& fw = waiters_.front();
-        if (!fw.first.empty()) {
-            bool fws = waiter_shared(fw.first);
+        if (!fw.empty()) {
+            bool fws = waiter_shared(fw);
             if (!allow(fws, l)) {
                 break;
             }
-            if (fw.first->trigger()) {
+            if (fw->trigger()) {
                 l += fws ? mf_lock_shared : mf_lock_excl;
-                if (fw.second) {
-                    *fw.second = true;
-                }
             }
         }
         waiters_.pop_front();
@@ -316,15 +313,12 @@ inline auto mutex::notify_locked(latch_type l) -> latch_type {
     return l;
 }
 
-void mutex::lock_impl(bool is_shared, detail::event_handle& e, bool* notify) {
+void mutex::lock_impl(bool is_shared, detail::event_handle& e) {
     latch_type l = latch();
     l = notify_locked(l);
     if (waiters_.empty() && allow(is_shared, l)) {
         if (e) {
             e->trigger();
-        }
-        if (notify) {
-            *notify = true;
         }
         l += is_shared ? mf_lock_shared : mf_lock_excl;
     } else {
@@ -334,7 +328,7 @@ void mutex::lock_impl(bool is_shared, detail::event_handle& e, bool* notify) {
         if (is_shared) {
             e->set_user_flags(detail::ef_user);
         }
-        waiters_.push_back({e, notify});
+        waiters_.push_back(e);
     }
     unlatch(l);
 }
@@ -343,6 +337,28 @@ void mutex::unlock_impl(bool is_shared) {
     latch_type l = latch();
     l = notify_locked(l - (is_shared ? mf_lock_shared : mf_lock_excl));
     unlatch(l);
+}
+
+// Drop a lock’s request state (`unique_lock::pending_`/`shared_lock::pending_`:
+// 0, 1, or an `event_body*` the lock holds a reference to). Returns true if the
+// lock holds the mutex. A triggered request was granted and stays granted, so
+// needs no latch. Otherwise decide under the latch, where grants happen: a
+// grant either already triggered the request, or will find it abandoned
+// (unless someone else still awaits it).
+bool mutex::drop_request(uintptr_t pending) {
+    if (pending <= 1) {
+        return pending == 1;
+    }
+    auto eb = reinterpret_cast<detail::event_body*>(pending);
+    if (eb->triggered()) {
+        detail::event_handle{eb};
+        return true;
+    }
+    latch_type l = latch();
+    bool granted = eb->triggered();
+    detail::event_handle{eb};
+    unlatch(l);
+    return granted;
 }
 
 

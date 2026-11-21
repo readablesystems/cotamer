@@ -1129,6 +1129,46 @@ void test_thread_event_empty() {
 }
 
 
+// TEST: a lock dropping its pending request while another thread unlocks
+// the mutex (and so may grant that request) never leaves the mutex held
+void test_lock_drop_vs_grant() {
+    constexpr int ROUNDS = 100000;
+    cot::mutex m;
+    std::atomic<int> round{-1}, pending{-1}, dropped{-1};
+    std::thread dropper([&] {
+        for (int r = 0; r != ROUNDS; ++r) {
+            while (round.load(std::memory_order_acquire) != r) {
+            }
+            {
+                cot::unique_lock g(m, std::defer_lock);
+                (void) g.lock();        // pending: main holds the mutex
+                pending.store(r, std::memory_order_release);
+            }                           // `g` drops the request (or unlocks)
+            dropped.store(r, std::memory_order_release);
+        }
+    });
+    int leaked = 0;
+    for (int r = 0; r != ROUNDS; ++r) {
+        bool locked = m.try_lock();
+        assert(locked);
+        round.store(r, std::memory_order_release);
+        while (pending.load(std::memory_order_acquire) != r) {
+        }
+        m.unlock();                     // races with the drop; may grant
+        while (dropped.load(std::memory_order_acquire) != r) {
+        }
+        if (m.try_lock()) {
+            m.unlock();
+        } else {
+            ++leaked;                   // held by nobody
+            m.unlock();
+        }
+    }
+    dropper.join();
+    assert(leaked == 0 && "mutex left held by a dropped request");
+    std::cerr << "lock_drop_vs_grant: ok\n";
+}
+
 // TEST: two threads dropping the last two references to an fd at the same
 // time close it exactly once
 void test_fd_deref_race() {
@@ -1221,6 +1261,7 @@ int main(int argc, char* argv[]) {
     run("cross_thread_trigger", test_cross_thread_trigger);
     run("user_flags_vs_lock", test_user_flags_vs_lock);
     run("fd_deref_race", test_fd_deref_race);
+    run("lock_drop_vs_grant", test_lock_drop_vs_grant);
     run("cross_thread_any", test_cross_thread_any);
     run("cross_thread_multi", test_cross_thread_multi);
     run("independent_drivers", test_independent_drivers);

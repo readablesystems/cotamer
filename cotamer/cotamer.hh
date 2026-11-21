@@ -462,12 +462,10 @@ public:
     inline ~mutex() = default;
 
     [[nodiscard]] inline mutex_event<false> lock();
-    [[nodiscard]] inline mutex_event<false> lock(bool& notify);
     [[nodiscard]] inline bool try_lock();
     inline void unlock();
 
     [[nodiscard]] inline mutex_event<true> lock_shared();
-    [[nodiscard]] inline mutex_event<true> lock_shared(bool& notify);
     [[nodiscard]] inline bool try_lock_shared();
     inline void unlock_shared();
 
@@ -483,15 +481,19 @@ private:
     // protects waiters_, tracks information about lock
     std::atomic<latch_type> latch_ = 0;          // see mf_ constants
     // queue of events waiting for mutex; see `lock_impl`
-    std::deque<std::pair<detail::event_handle, bool*>> waiters_;
+    std::deque<detail::event_handle> waiters_;
 
     inline latch_type latch();
     inline void unlatch(latch_type);
     inline bool allow(bool shared, latch_type) const noexcept;
     inline bool waiter_shared(const detail::event_handle&) const noexcept;
     [[nodiscard]] inline latch_type notify_locked(latch_type);
-    void lock_impl(bool shared, detail::event_handle& ep, bool* notify);
+    void lock_impl(bool shared, detail::event_handle& ep);
     void unlock_impl(bool shared);
+    bool drop_request(uintptr_t pending);
+
+    friend class unique_lock;
+    friend class shared_lock;
 };
 
 
@@ -521,12 +523,16 @@ public:
     inline mutex_type* release() noexcept;
 
     mutex_type* mutex() const noexcept { return m_; }
-    bool owns_lock() const noexcept { return owned_; }
-    explicit operator bool() const noexcept { return owned_; }
+    inline bool owns_lock() const noexcept;
+    explicit operator bool() const noexcept { return owns_lock(); }
 
 private:
     mutex_type* m_ = nullptr;
-    bool owned_ = false;
+    // 0: not owned; 1: directly owned; >1: an `event_body*`, owned if
+    // that body is triggered
+    uintptr_t pending_ = 0;
+
+    inline void reset() noexcept;
 };
 
 class shared_lock {
@@ -552,12 +558,16 @@ public:
     inline mutex_type* release() noexcept;
 
     mutex_type* mutex() const noexcept { return m_; }
-    bool owns_lock() const noexcept { return owned_; }
-    explicit operator bool() const noexcept { return owned_; }
+    inline bool owns_lock() const noexcept;
+    explicit operator bool() const noexcept { return owns_lock(); }
 
 private:
     mutex_type* m_ = nullptr;
-    bool owned_ = false;
+    // 0: not owned; 1: directly owned; >1: an `event_body*`, owned if
+    // that body is triggered
+    uintptr_t pending_ = 0;
+
+    inline void reset() noexcept;
 };
 
 
