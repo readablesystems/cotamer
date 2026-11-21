@@ -242,7 +242,8 @@ cot::task<> one_echo_server(cot::fd lfd) {
 }
 
 cot::task<> all_echo_servers() {
-    for (auto& lfd : co_await cot::tcp_listen_all("localhost:9000")) {
+    auto lfds = co_await cot::tcp_listen_all("localhost:9000");
+    for (auto& lfd : lfds) {
         one_echo_server(std::move(lfd)).detach();
     }
 }

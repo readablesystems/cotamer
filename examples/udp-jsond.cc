@@ -255,10 +255,11 @@ cot::task<> serve(cot::fd sock, notes_db& db) {
 
 cot::task<> start(std::string address, notes_db& db) {
     try {
-        for (auto& sock : co_await cot::udp_listen_all(address)) {
+        auto lfds = co_await cot::udp_listen_all(address);
+        for (auto& sock : lfds) {
             serve(std::move(sock), db).detach();
         }
-    } catch (std::system_error err) {
+    } catch (const std::system_error& err) {
         std::print(std::cerr, "{}\n", err.what());
         exit(1);
     }

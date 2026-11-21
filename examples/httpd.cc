@@ -39,10 +39,11 @@ cot::task<> run_listen(cot::fd lfd, double delay) {
 
 cot::task<> start(std::string address, double delay) {
     try {
-        for (auto& lfd : co_await cot::tcp_listen_all(address)) {
+        auto lfds = co_await cot::tcp_listen_all(address);
+        for (auto& lfd : lfds) {
             run_listen(std::move(lfd), delay).detach();
         }
-    } catch (std::system_error err) {
+    } catch (const std::system_error& err) {
         std::print(std::cerr, "{}\n", err.what());
         exit(1);
     }

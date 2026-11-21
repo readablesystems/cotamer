@@ -291,10 +291,11 @@ cot::task<> run_listen(cot::fd lfd, notes_db& db) {
 // than one.)
 cot::task<> start(std::string address, notes_db& db) {
     try {
-        for (auto& lfd : co_await cot::tcp_listen_all(address)) {
+        auto lfds = co_await cot::tcp_listen_all(address);
+        for (auto& lfd : lfds) {
             run_listen(std::move(lfd), db).detach();
         }
-    } catch (std::system_error err) {
+    } catch (const std::system_error& err) {
         std::print(std::cerr, "{}\n", err.what());
         exit(1);
     }
