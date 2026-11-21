@@ -742,7 +742,7 @@ void test_cross_thread_wake_race() {
 //      kernel keeps waking us for fds nobody cares about.
 //   2. The erec slots must be reclaimed eventually. With the lazy model
 //      they linger until a sweep point: a real kqueue fire on the fd,
-//      `process_clearing`, or `fd_close`. This test exercises both the
+//      `process_clearing`, or closing the fd. This test exercises both the
 //      kqueue-fire and the close paths.
 cot::task<> test_abandoned_event_cleanup() {
     int piperaw[2];
@@ -813,7 +813,7 @@ cot::task<> test_abandoned_event_cleanup() {
     assert(drv.fds().active_watch_count() == baseline_watches
            && "kqueue fire must reclaim entire matching chain");
 
-    // --- Part 3: abandon some more, then close the fd. fd_close
+    // --- Part 3: abandon some more, then close the fd. Closing
     // must walk the chain and reclaim everything — no dependence on a
     // kqueue fire, since the fd is going away.
     for (int i = 0; i < 10; ++i) {
@@ -1590,6 +1590,63 @@ cot::task<> test_submillisecond_timer_no_spin() {
     std::cerr << "submillisecond_timer_no_spin: ok (cpu " << cpu << "s, wall " << wall << "s)\n";
 }
 
+// TEST: an fd number closed and reused behind cotamer’s back. The old fd’s
+// watches wake, and the new fd’s watches work (its kernel registration
+// is set up fresh).
+cot::task<> test_fd_reused_behind_back() {
+    int p1[2], p2[2];
+    assert(pipe(p1) == 0);
+    cot::set_nonblocking(p1[0]);
+    cot::fd a(p1[0]);
+    cot::event aev = cot::readable(a);
+    co_await cot::after(10ms);      // let the loop register `a`
+    assert(!aev.triggered());
+
+    int n = p1[0];
+    ::close(n);                     // behind cotamer’s back
+    assert(pipe(p2) == 0);
+    if (p2[0] != n) {
+        assert(dup2(p2[0], n) == n);
+        ::close(p2[0]);
+        p2[0] = n;
+    }
+    cot::set_nonblocking(p2[0]);
+    cot::fd b(p2[0]);
+    cot::event bev = cot::readable(b);
+    assert(aev.triggered());
+    co_await cot::after(10ms);
+    assert(!bev.triggered());
+    assert(::write(p2[1], "x", 1) == 1);
+    co_await cot::any(bev, cot::after(1s));
+    assert(bev.triggered());
+
+    ::close(p1[1]);
+    ::close(p2[1]);
+    // `b` is destroyed before `a`; `a`’s destructor then closes `n` again,
+    // which harmlessly fails.
+    std::cerr << "fd_reused_behind_back: ok\n";
+}
+
+// TEST: readiness events on a closed or never-opened fd trigger immediately,
+// with user flags reporting the requested mask; an empty mask never fires
+cot::task<> test_closed_fd_ready() {
+    int p[2];
+    assert(pipe(p) == 0);
+    cot::fd r(p[0]), w(p[1]);
+    r.close();
+    cot::fd none;
+    for (cot::fd* f : {&r, &none}) {
+        cot::event rev = cot::readable(*f), wev = cot::writable(*f),
+            cev = cot::closed(*f);
+        assert(rev.triggered() && rev.user_flags() == int(cot::fdevent::read));
+        assert(wev.triggered() && wev.user_flags() == int(cot::fdevent::write));
+        assert(cev.triggered() && cev.user_flags() == int(cot::fdevent::close));
+        co_await cot::any(rev, cot::after(1s));
+        assert(!cot::file_event(*f, cot::fdevent::none).triggered());
+    }
+    std::cerr << "closed_fd_ready: ok\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1630,6 +1687,8 @@ int main(int argc, char* argv[]) {
     run("closed_then_readable", test_closed_then_readable);
     run("regular_file_ready", test_regular_file_ready);
     run("submillisecond_timer_no_spin", test_submillisecond_timer_no_spin);
+    run("fd_reused_behind_back", test_fd_reused_behind_back);
+    run("closed_fd_ready", test_closed_fd_ready);
 
     // Cross-thread wake tests use their own threads and drivers
     auto run_threaded = [&](const char* name, auto fn) {

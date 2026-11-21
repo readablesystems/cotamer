@@ -379,8 +379,10 @@ inline int driver::pollfd() {
     return pollfd_;
 }
 
-inline void driver::notify_close(int base_fd) {
-    if (auto pair = fds_.fd_close(base_fd)) {
+// Called once `base_fd` is closed, or (if `stale`) when `base_fd` is associated
+// with a different underlying descriptor now.
+inline void driver::notify_close(int base_fd, bool stale) {
+    if (auto pair = fds_.detach(base_fd, stale)) {
         detail::fd_batch batch;
         apply_fd_update(batch, {base_fd, fdevent::none, pair->second});
         batch.clear(pollfd());

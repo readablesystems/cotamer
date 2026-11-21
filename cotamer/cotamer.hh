@@ -225,7 +225,7 @@ public:
     inline event after(const std::chrono::duration<Rep, Period>&);
 
     inline event file_event(const cotamer::fd& f, fdevent mask);
-    inline void notify_close(int base_fileno);
+    inline void notify_close(int base_fileno, bool stale = false);
 
     inline void loop();
     inline bool poll();

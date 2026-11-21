@@ -27,9 +27,10 @@ assert(rfd.fileno() == rfd_copy.fileno());
 | `close()`                  | close fd                                         |
 
 Closing an `fd`, whether by calling `close()`, by destroying the last copy, or
-by cancelling the owning task, triggers all outstanding readiness events on
-that fd. This guarantees that coroutines waiting on a closed fd will always
-wake up.
+by cancelling the owning task, triggers all outstanding readiness events on that
+fd. Furthermore, readiness events created on an already-closed (or never-opened)
+`fd` trigger immediately. This guarantees that coroutines waiting on a closed fd
+will always wake up.
 
 
 ## Readiness events

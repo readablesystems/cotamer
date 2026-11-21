@@ -111,10 +111,10 @@ void fd_body::close(bool because_deref) {
             base_fd_ = -1;
         }
     }
-    bool deletable = because_deref && drivers_.empty();
     if (because_deref) {
-        ref_.fetch_sub(1, std::memory_order_release);
+        unreferenced_ = true;
     }
+    bool deletable = unreferenced_ && drivers_.empty();
     unlock();
 
     if (base_fd < 0) {
@@ -139,8 +139,15 @@ void fd_body::close(bool because_deref) {
 
 event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
                                  driver* drv) {
-    if (fd < 0 || imask == fdevent::none) {
+    if (imask == fdevent::none) {
+        // never fires (but can be triggered by hand)
         return event_handle{new event_body};
+    } else if (fd < 0) {
+        // A closed or unopened fd is always ready: I/O on it fails at once.
+        event_handle eh{new event_body};
+        eh->set_user_flags(int(imask) << efs_user);
+        eh->trigger();
+        return eh;
     }
     unsigned ufd = fd;
     if (ufd >= fdr_capacity_) {
@@ -151,11 +158,10 @@ event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
     fdrec& fdi = fdrs_[ufd];
     if (fdi.body != body) {
         if (fdi.body) {
-            // This should not happen: the user has closed and reopened the
-            // file descriptor, or, worse, constructed a new `fd_body` for
-            // the same descriptor. Trigger all events.
-            auto fx = fd_close(fd);
-            fx->first->remove_listener(drv);
+            // `fd`'s number now belongs to a different body: the file was
+            // closed and reopened behind cotamer's back, or two `fd`s were
+            // made for it. Forget the old body.
+            drv->notify_close(fd, true);
         }
         fdi.body = body;
         body->add_listener(drv);
@@ -190,13 +196,13 @@ event_handle fd_event_set::watch(int fd, fdevent imask, fd_body* body,
     return wr->ev;
 }
 
-std::optional<std::pair<fd_body*, unsigned>> fd_event_set::fd_close(int fd) {
+std::optional<std::pair<fd_body*, unsigned>> fd_event_set::detach(int fd, bool stale) {
     unsigned ufd = fd;
     if (ufd >= fdr_capacity_) {
         return std::nullopt;
     }
     fdrec& fdi = fdrs_[ufd];
-    if (!fdi.body || fdi.body->fileno() >= 0) {
+    if (!fdi.body || (!stale && fdi.body->fileno() >= 0)) {
         return std::nullopt;
     }
 
@@ -330,6 +336,10 @@ inline bool fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
     if (epoll_ctl(pollfd, op, fdu.fd, &epev) < 0) {
         if (errno == EPERM && op == EPOLL_CTL_ADD) {
             return false;
+        }
+        if (errno == ENOENT && op == EPOLL_CTL_DEL) {
+            // already gone (e.g., the fd was closed behind our back)
+            return true;
         }
         throw errno_error();
     }

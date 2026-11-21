@@ -48,18 +48,19 @@ inline void spinlock_hint() {
 }
 
 // fd_body
-//    Reference-counted body for cotamer::fd. Strong refs represent ownership;
-//    weak refs are held by fd_event_set::fdrec entries. When the last strong
-//    ref drops, the fd is closed and all associated events are triggered.
+//    Reference-counted body for cotamer::fd. `ref_` counts `fd` references.
+//    Drivers watching the fd (listed in `drivers_`) also maintain references.
+//    When the last `fd` ref drops, the fd is closed, all associated events
+//    are triggered, and the drivers remove it from their notifiers. The OS
+//    fd is closed, and `fd_body` deleted, only after *all* references drop.
 
 struct fd_body {
     std::atomic<int> fd_;
     int base_fd_;
     std::atomic<uint32_t> ref_ = 1;
     std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
+    bool unreferenced_ = false;             // no `fd` refers to us; under lock_
     small_vector<driver*, 1> drivers_;
-
-    static constexpr uint32_t wr_lock = 1;
 
     explicit fd_body(int raw) : fd_(raw), base_fd_(raw) {}
     fd_body(const fd_body&) = delete;
@@ -104,7 +105,7 @@ struct fd_body {
             return;
         }
         // The fd_body should be deleted when unreferenced.
-        bool deletable = ref_.load(std::memory_order_acquire) == 0;
+        bool deletable = unreferenced_;
         // The OS fd should be closed if close was explicitly requested
         // (fd_ < 0) and the fd_body isn't registered on any driver
         // (drivers_.empty() -- this branch).
@@ -122,10 +123,11 @@ struct fd_body {
     }
 
     inline void deref() noexcept {
-        if (ref_.load(std::memory_order_acquire) == 1) {
+        // The last reference has `ref_ == 1`; call `close(true)` (once) if we
+        // are the last reference.
+        if (ref_.load(std::memory_order_acquire) == 1
+            || ref_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             close(true);
-        } else {
-            ref_.fetch_sub(1, std::memory_order_release);
         }
     }
 

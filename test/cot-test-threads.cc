@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <thread>
+#include <fcntl.h>
 #include <unistd.h>
 #include <vector>
 
@@ -1128,6 +1129,44 @@ void test_thread_event_empty() {
 }
 
 
+// TEST: two threads dropping the last two references to an fd at the same
+// time close it exactly once
+void test_fd_deref_race() {
+    constexpr int ROUNDS = 20000;
+    std::optional<cot::fd> slots[2];
+    std::atomic<int> round{-1};
+    std::atomic<int> done{0};
+    auto worker = [&](int i) {
+        for (int r = 0; r != ROUNDS; ++r) {
+            while (round.load(std::memory_order_acquire) != r) {
+            }
+            slots[i].reset();
+            done.fetch_add(1, std::memory_order_acq_rel);
+        }
+    };
+    std::thread t0(worker, 0), t1(worker, 1);
+    int leaked = 0;
+    for (int r = 0; r != ROUNDS; ++r) {
+        int p[2];
+        assert(pipe(p) == 0);
+        ::close(p[1]);
+        slots[0].emplace(p[0]);
+        slots[1].emplace(*slots[0]);
+        done.store(0, std::memory_order_relaxed);
+        round.store(r, std::memory_order_release);
+        while (done.load(std::memory_order_acquire) != 2) {
+        }
+        if (fcntl(p[0], F_GETFD) != -1) {
+            ++leaked;
+            ::close(p[0]);
+        }
+    }
+    t0.join();
+    t1.join();
+    assert(leaked == 0 && "fd leaked by concurrent deref");
+    std::cerr << "fd_deref_race: ok\n";
+}
+
 // TEST: event::set_user_flags isn't lost to a concurrent holder of the event's
 // internal lock (whose unlock used to restore stale flags)
 void test_user_flags_vs_lock() {
@@ -1181,6 +1220,7 @@ int main(int argc, char* argv[]) {
 
     run("cross_thread_trigger", test_cross_thread_trigger);
     run("user_flags_vs_lock", test_user_flags_vs_lock);
+    run("fd_deref_race", test_fd_deref_race);
     run("cross_thread_any", test_cross_thread_any);
     run("cross_thread_multi", test_cross_thread_multi);
     run("independent_drivers", test_independent_drivers);

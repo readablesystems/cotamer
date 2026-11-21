@@ -71,7 +71,7 @@ public:
     ~fd_event_set();
 
     // Epochs tag fd registrations to detect stale kernel notifications.
-    // Bumped on body change and on `fd_close`. `internal_epoch`
+    // Bumped on body change and on `detach`. `internal_epoch`
     // is reserved for driver-internal fds (wakefd).
     static constexpr unsigned empty_epoch = 0;
     static constexpr unsigned internal_epoch = 1;
@@ -93,11 +93,13 @@ public:
     // Advances `wix`, recycles the slot, returns the watchrec's event.
     inline event_handle pop_watch_list_event(unsigned& wix, fdevent mask = fdevent::none);
 
-    // Called from `driver::notify_close` once the fd is closed. Triggers
-    // and reclaims every watchrec on `fd`, bumps the epoch, clears the
-    // body, queues the fd for kernel reconciliation. Returns body and
-    // pre-bump epoch; nullopt if no body or fd not marked closed.
-    std::optional<std::pair<fd_body*, unsigned>> fd_close(int fd);
+    // Called from `driver::notify_close`. Triggers and reclaims every
+    // watchrec on `fd`, bumps the epoch, clears the body, and queues the fd
+    // for kernel reconciliation. Returns body and pre-bump epoch; nullopt if
+    // no body. Unless `stale`, acts only if the body is marked closed; with
+    // `stale`, detaches any body (`fd`’s number now belongs to a different
+    // body: the file was closed and reopened behind our back).
+    std::optional<std::pair<fd_body*, unsigned>> detach(int fd, bool stale);
 
     // Are there any updates (fds whose interest mask may differ from the kernel
     // event notifier)?
