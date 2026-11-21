@@ -595,6 +595,58 @@ static void getaddrinfo_thread(std::string address,
 }
 
 
+// Return a nonblocking, close-on-exec socket for `ai`, or an invalid fd (with
+// `errno` set) if socket() fails. Setup errors throw; the fd closes itself.
+static cotamer::fd nonblocking_socket(const struct addrinfo* ai) {
+#ifdef SOCK_CLOEXEC
+    // close-on-exec atomically, so a concurrent fork+exec can't inherit it
+    cotamer::fd f(socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol));
+#else
+    cotamer::fd f(socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
+#endif
+    if (f) {
+#ifndef SOCK_CLOEXEC
+        set_cloexec(f.fileno());
+#endif
+        set_nonblocking(f);
+#ifdef SO_NOSIGPIPE
+        set_no_sigpipe(f.fileno());
+#endif
+    }
+    return f;
+}
+
+// The passive addresses to bind, in order. An empty host (`:PORT`) means every
+// address family: IPv6 goes first, so its dual-stack socket covers IPv4 too
+// (getaddrinfo’s order varies: glibc lists IPv4 first, macOS IPv6). If IPv6
+// is missing or dual-stack is refused, the IPv4 bind that follows still
+// succeeds. Other hosts keep getaddrinfo’s order.
+static small_vector<const struct addrinfo*, 4> passive_addresses(const getaddrinfo_value& res) {
+    small_vector<const struct addrinfo*, 4> v;
+    if (res.address_any) {
+        for (auto ai = res.ai; ai; ai = ai->ai_next) {
+            if (ai->ai_family == AF_INET6) {
+                v.push_back(ai);
+            }
+        }
+    }
+    for (auto ai = res.ai; ai; ai = ai->ai_next) {
+        if (!res.address_any || ai->ai_family != AF_INET6) {
+            v.push_back(ai);
+        }
+    }
+    return v;
+}
+
+// Set IPV6_V6ONLY on a passive IPv6 socket. For an empty host, make the
+// socket dual-stack unless an IPv4 socket is already bound to the port (on
+// Linux, a dual-stack socket would then fail to bind).
+static void set_v6only(int fileno, const getaddrinfo_value& res, bool bound_ipv4) {
+    int flag = res.address_any && !bound_ipv4 ? 0 : 1;
+    setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
+}
+
+
 // Create up to `max` TCP sockets passively listening on `address`, which
 // should follow the pattern `ADDR:PORT`. If `ADDR` is empty, accepts
 // connections from any address; if nonempty, accepts connections only from
@@ -620,33 +672,28 @@ task<fd_list> tcp_listen_all(std::string address, int backlog, size_t max) {
     // try each one in turn
     fd_list result;
     int last_errno = EADDRNOTAVAIL;
-    for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fileno < 0) {
+    bool bound_ipv4 = false;
+    for (auto ai : passive_addresses(*res)) {
+        auto f = nonblocking_socket(ai);
+        if (!f) {
             last_errno = errno;
             continue;
         }
-
-        set_nonblocking(fileno);
-#ifdef SO_NOSIGPIPE
-        set_no_sigpipe(fileno);
-#endif
         int flag = 1;
-        setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+        setsockopt(f.fileno(), SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
         if (ai->ai_family == AF_INET6) {
-            flag = res->address_any ? 0 : 1;
-            setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
+            set_v6only(f.fileno(), *res, bound_ipv4);
         }
 
-        if (bind(fileno, ai->ai_addr, ai->ai_addrlen) == 0
-            && listen(fileno, backlog) == 0) {
-            result.push_back(cotamer::fd(fileno));
+        if (bind(f.fileno(), ai->ai_addr, ai->ai_addrlen) == 0
+            && listen(f.fileno(), backlog) == 0) {
+            bound_ipv4 = bound_ipv4 || ai->ai_family == AF_INET;
+            result.push_back(std::move(f));
             if (max != 0 && result.size() == max) {
                 break;
             }
         } else {
-            last_errno = errno;
-            ::close(fileno);
+            last_errno = errno;     // `f` closes itself
         }
     }
 
@@ -656,6 +703,8 @@ task<fd_list> tcp_listen_all(std::string address, int backlog, size_t max) {
     co_return std::move(result);
 }
 
+// Like `tcp_listen_all(address, backlog, 1)`. With an empty host (`:PORT`),
+// the socket is dual-stack where possible, covering IPv4 and IPv6.
 task<fd> tcp_listen(std::string address, int backlog) {
     auto res = co_await tcp_listen_all(std::move(address), backlog, 1);
     co_return std::move(res[0]);
@@ -682,20 +731,14 @@ task<fd> tcp_connect(std::string address) {
     // try each address in turn
     std::exception_ptr last_err;
     for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fileno < 0) {
+        auto f = nonblocking_socket(ai);
+        if (!f) {
             last_err = std::make_exception_ptr(errno_error());
             continue;
         }
-
-        set_nonblocking(fileno);
-#ifdef SO_NOSIGPIPE
-        set_no_sigpipe(fileno);
-#endif
         int flag = 1;
-        setsockopt(fileno, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(f.fileno(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
-        cotamer::fd f(fileno);
         try {
             co_await connect(f, ai->ai_addr, ai->ai_addrlen);
             co_return std::move(f);
@@ -728,32 +771,27 @@ task<fd_list> udp_listen_all(std::string address, size_t max) {
 
     fd_list result;
     int last_errno = EADDRNOTAVAIL;
-    for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fileno < 0) {
+    bool bound_ipv4 = false;
+    for (auto ai : passive_addresses(*res)) {
+        auto f = nonblocking_socket(ai);
+        if (!f) {
             last_errno = errno;
             continue;
         }
-
-        set_nonblocking(fileno);
-#ifdef SO_NOSIGPIPE
-        set_no_sigpipe(fileno);
-#endif
-        int flag = 1;
-        setsockopt(fileno, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
+        // No SO_REUSEADDR: for UDP on Linux it lets several sockets bind the
+        // same address and port, silently splitting incoming datagrams.
         if (ai->ai_family == AF_INET6) {
-            flag = res->address_any ? 0 : 1;
-            setsockopt(fileno, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag));
+            set_v6only(f.fileno(), *res, bound_ipv4);
         }
 
-        if (bind(fileno, ai->ai_addr, ai->ai_addrlen) == 0) {
-            result.push_back(cotamer::fd(fileno));
+        if (bind(f.fileno(), ai->ai_addr, ai->ai_addrlen) == 0) {
+            bound_ipv4 = bound_ipv4 || ai->ai_family == AF_INET;
+            result.push_back(std::move(f));
             if (max != 0 && result.size() == max) {
                 break;
             }
         } else {
-            last_errno = errno;
-            ::close(fileno);
+            last_errno = errno;     // `f` closes itself
         }
     }
 
@@ -789,18 +827,12 @@ task<fd> udp_connect(std::string address) {
 
     std::exception_ptr last_err;
     for (auto ai = res->ai; ai; ai = ai->ai_next) {
-        int fileno = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fileno < 0) {
+        auto f = nonblocking_socket(ai);
+        if (!f) {
             last_err = std::make_exception_ptr(errno_error());
             continue;
         }
 
-        set_nonblocking(fileno);
-#ifdef SO_NOSIGPIPE
-        set_no_sigpipe(fileno);
-#endif
-
-        cotamer::fd f(fileno);
         try {
             co_await connect(f, ai->ai_addr, ai->ai_addrlen);
             co_return std::move(f);

@@ -61,6 +61,11 @@ correctly. I/O helpers that return a `cotamer::fd` (`accept`, `tcp_listen`,
 for file descriptors obtained in other ways, call `cotamer::set_nonblocking`,
 which is overloaded for both a raw `int` fd and a `cotamer::fd`.
 
+Sockets created by these helpers are also close-on-exec, so child processes
+(started with `fork`/`exec`, `posix_spawn`, `system`, …) don’t inherit them.
+To hand a socket to a child deliberately, clear the flag with
+`cotamer::set_cloexec(f, false)`.
+
 When a file descriptor closes or experiences a serious error, Cotamer triggers
 all three readiness events for that file descriptor. This means that most code
 doesn’t need `closed()`. It can be useful nevertheless for coroutines that
@@ -152,7 +157,11 @@ remote address; the coroutine suspends until the connection attempt succeeds.
 `accept` suspends until a new connection request arrives on `lfd`; when one
 does, it is accepted, put into non-blocking mode, and returned as an `fd`
 object. These functions throw `std::system_error` on serious error, rather
-than returning an `ioresult`.
+than returning an `ioresult`. `accept` does not throw for errors that affect
+only one pending connection, such as `ECONNABORTED`; it moves on to the next
+connection. If the process runs out of file descriptors or memory (`EMFILE`,
+`ENFILE`, `ENOBUFS`, `ENOMEM`), `accept` waits and retries, backing off from
+5ms to 1s, so an accept loop survives temporary resource exhaustion.
 
 To read and write the resulting sockets, prefer `cotamer::send` and
 `cotamer::recv`. Although `write` and `read` also work, the `send` and `recv`

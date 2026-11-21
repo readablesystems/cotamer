@@ -112,11 +112,18 @@ curl_socket_t curl_driver::opensocket_cb(void* clientp,
                                          struct curl_sockaddr* addr) {
     (void) purpose;
     auto* drv = static_cast<curl_driver*>(clientp);
+#ifdef SOCK_CLOEXEC
+    int s = ::socket(addr->family, addr->socktype | SOCK_CLOEXEC, addr->protocol);
+#else
     int s = ::socket(addr->family, addr->socktype, addr->protocol);
+#endif
     if (s < 0) {
         return CURL_SOCKET_BAD;
     }
     try {
+#ifndef SOCK_CLOEXEC
+        set_cloexec(s);
+#endif
         set_nonblocking(s);
     } catch (...) {
         ::close(s);

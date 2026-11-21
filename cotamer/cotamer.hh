@@ -376,6 +376,8 @@ inline event closed(const fd&);        // triggers when `fd` errors or closes
 inline void ignore_sigpipe();
 inline void set_nonblocking(int fileno);
 inline void set_nonblocking(const fd& f);
+inline void set_cloexec(int fileno, bool on = true);
+inline void set_cloexec(const fd& f, bool on = true);
 
 using ioresult = std::expected<size_t, std::error_code>;
 inline task<ioresult> read_once(fd f, void* buf, size_t count);

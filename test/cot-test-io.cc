@@ -10,6 +10,8 @@
 #include <thread>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <unistd.h>
 #include <vector>
 
@@ -1647,6 +1649,206 @@ cot::task<> test_closed_fd_ready() {
     std::cerr << "closed_fd_ready: ok\n";
 }
 
+static uint16_t local_port(int fileno) {
+    sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    assert(getsockname(fileno, reinterpret_cast<sockaddr*>(&ss), &len) == 0);
+    return ntohs(ss.ss_family == AF_INET6
+                 ? reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port
+                 : reinterpret_cast<sockaddr_in*>(&ss)->sin_port);
+}
+
+static uint16_t peer_port(int fileno) {
+    sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(fileno, reinterpret_cast<sockaddr*>(&ss), &len) != 0) {
+        return 0;
+    }
+    return ntohs(ss.ss_family == AF_INET6
+                 ? reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port
+                 : reinterpret_cast<sockaddr_in*>(&ss)->sin_port);
+}
+
+// TEST: a connection reset before it is accepted doesn't make tcp_accept
+// throw (macOS/BSD report ECONNABORTED for it)
+cot::task<> test_accept_after_reset() {
+    uint16_t port = 19881;
+    auto lfd = co_await cot::tcp_listen("127.0.0.1:" + std::to_string(port));
+
+    // client 1 connects, then resets the connection before it's accepted
+    int c1 = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in sin{};
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(port);
+    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(::connect(c1, reinterpret_cast<sockaddr*>(&sin), sizeof(sin)) == 0);
+    linger lg{1, 0};
+    setsockopt(c1, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+    ::close(c1);
+    co_await cot::after(20ms);
+
+    // client 2 connects normally; accept until we get it (Linux may first
+    // hand back client 1's dead connection)
+    auto c2 = co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port));
+    uint16_t c2port = local_port(c2.fileno());
+    bool found = false;
+    for (int i = 0; i != 3 && !found; ++i) {
+        auto afd = co_await cot::tcp_accept(lfd);
+        found = peer_port(afd.fileno()) == c2port;
+    }
+    assert(found);
+    std::cerr << "accept_after_reset: ok\n";
+}
+
+// TEST: only one UDP socket can bind a given address and port
+cot::task<> test_udp_port_exclusive() {
+    std::string address = "127.0.0.1:19882";
+    auto u1 = co_await cot::udp_listen(address);
+    bool in_use = false;
+    try {
+        auto u2 = co_await cot::udp_listen(address);
+    } catch (const std::system_error& e) {
+        in_use = e.code() == std::errc::address_in_use;
+    }
+    assert(in_use);
+    std::cerr << "udp_port_exclusive: ok\n";
+}
+
+// TEST: listening with an empty host (`:PORT`) accepts both IPv4 and IPv6
+// connections when IPv6 is available, with tcp_listen_all and tcp_listen
+static cot::task<cot::fd> accept_any(cot::fd_list& lfds) {
+    while (true) {
+        for (auto& lfd : lfds) {
+            if (auto f = co_await cot::attempt(cot::tcp_accept(lfd), cot::after(20ms))) {
+                co_return std::move(*f);
+            }
+        }
+    }
+}
+
+cot::task<> test_listen_wildcard_dual_stack() {
+    uint16_t port = 19883;
+    int probe = socket(AF_INET6, SOCK_STREAM, 0);
+    bool have_ipv6 = probe >= 0;
+    if (probe >= 0) {
+        ::close(probe);
+    }
+    // tcp_listen_all: one dual-stack socket, or one per family
+    auto lfds = co_await cot::tcp_listen_all(":" + std::to_string(port));
+    auto c4 = co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port));
+    auto a4 = co_await cot::attempt(accept_any(lfds), cot::after(1s));
+    assert(a4);
+    if (have_ipv6) {
+        auto c6 = co_await cot::tcp_connect("[::1]:" + std::to_string(port));
+        auto a6 = co_await cot::attempt(accept_any(lfds), cot::after(1s));
+        assert(a6);
+    }
+    size_t nall = lfds.size();
+    lfds.clear();
+
+    // tcp_listen: a single socket covers both families
+    auto lfd = co_await cot::tcp_listen(":" + std::to_string(port + 1));
+    auto d4 = co_await cot::tcp_connect("127.0.0.1:" + std::to_string(port + 1));
+    auto b4 = co_await cot::attempt(cot::tcp_accept(lfd), cot::after(1s));
+    assert(b4);
+    if (have_ipv6) {
+        auto d6 = co_await cot::tcp_connect("[::1]:" + std::to_string(port + 1));
+        auto b6 = co_await cot::attempt(cot::tcp_accept(lfd), cot::after(1s));
+        assert(b6);
+    }
+    std::cerr << "listen_wildcard_dual_stack: ok (tcp_listen_all: " << nall
+              << " sockets" << (have_ipv6 ? "" : "; no IPv6") << ")\n";
+}
+
+// TEST: sockets cotamer creates are close-on-exec; set_cloexec toggles it
+static bool is_cloexec(const cot::fd& f) {
+    int flags = fcntl(f.fileno(), F_GETFD, 0);
+    assert(flags >= 0);
+    return (flags & FD_CLOEXEC) != 0;
+}
+
+cot::task<> test_sockets_cloexec() {
+    std::string taddr = "127.0.0.1:19885", uaddr = "127.0.0.1:19886";
+    auto lfd = co_await cot::tcp_listen(taddr);
+    auto cfd = co_await cot::tcp_connect(taddr);
+    auto afd = co_await cot::tcp_accept(lfd);
+    auto ufd = co_await cot::udp_listen(uaddr);
+    auto ucfd = co_await cot::udp_connect(uaddr);
+    for (auto* f : {&lfd, &cfd, &afd, &ufd, &ucfd}) {
+        assert(is_cloexec(*f));
+    }
+    cot::set_cloexec(afd, false);
+    assert(!is_cloexec(afd));
+    cot::set_cloexec(afd);
+    assert(is_cloexec(afd));
+    std::cerr << "sockets_cloexec: ok\n";
+}
+
+// TEST: accept() survives file descriptor exhaustion: it backs off on EMFILE
+// and accepts connections once descriptors are available again. (On Linux,
+// connections pending during EMFILE stay queued; on macOS, they are dropped.)
+cot::task<> test_accept_fd_exhaustion() {
+    auto lfd = co_await cot::tcp_listen("127.0.0.1:0");
+    sockaddr_storage ss{};
+    socklen_t sslen = sizeof(ss);
+    int r = getsockname(lfd.fileno(), reinterpret_cast<sockaddr*>(&ss), &sslen);
+    assert(r == 0);
+
+    std::vector<cot::fd> clients;
+    auto add_client = [&] {
+        int c = socket(ss.ss_family, SOCK_STREAM, 0);
+        assert(c >= 0);
+        int cr = ::connect(c, reinterpret_cast<sockaddr*>(&ss), sslen);
+        assert(cr == 0);
+        (void) cr;
+        clients.emplace_back(c);
+    };
+
+    // Queue connections in the listen backlog
+    constexpr size_t nclients = 6;
+    for (size_t i = 0; i != nclients; ++i) {
+        add_client();
+    }
+    // ensure the driver has allocated its own notification fds
+    co_await cot::after(1ms);
+
+    // Leave room for at most two more file descriptors
+    struct rlimit old_rl;
+    getrlimit(RLIMIT_NOFILE, &old_rl);
+    int probe = dup(lfd.fileno());
+    assert(probe >= 0);
+    ::close(probe);
+    struct rlimit rl = old_rl;
+    rl.rlim_cur = probe + 2;
+    r = setrlimit(RLIMIT_NOFILE, &rl);
+    assert(r == 0);
+
+    std::vector<cot::fd> accepted;
+    auto acceptor = [](cot::fd lfd, std::vector<cot::fd>& accepted) -> cot::task<> {
+        while (true) {
+            accepted.push_back(co_await cot::accept(lfd));
+        }
+    }(lfd, accepted);
+
+    co_await cot::after(100ms);
+    assert(!acceptor.done());
+    size_t naccepted = accepted.size();
+    assert(naccepted < nclients);
+
+    // After the limit is restored, new connections are accepted
+    r = setrlimit(RLIMIT_NOFILE, &old_rl);
+    assert(r == 0);
+    add_client();
+    add_client();
+    for (int i = 0; i != 300 && accepted.size() < naccepted + 2; ++i) {
+        co_await cot::after(10ms);
+    }
+    assert(accepted.size() >= naccepted + 2);
+    assert(!acceptor.done());
+    std::cerr << "accept_fd_exhaustion: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1665,6 +1867,7 @@ int main(int argc, char* argv[]) {
         auto t = fn();
         cot::loop();
         assert(t.done() && "test did not complete");
+        t.promise_ptr()->result();      // rethrow if the test threw
     };
 
     run("pipe_readwrite", test_pipe_readwrite);
@@ -1689,6 +1892,11 @@ int main(int argc, char* argv[]) {
     run("submillisecond_timer_no_spin", test_submillisecond_timer_no_spin);
     run("fd_reused_behind_back", test_fd_reused_behind_back);
     run("closed_fd_ready", test_closed_fd_ready);
+    run("accept_after_reset", test_accept_after_reset);
+    run("udp_port_exclusive", test_udp_port_exclusive);
+    run("listen_wildcard_dual_stack", test_listen_wildcard_dual_stack);
+    run("sockets_cloexec", test_sockets_cloexec);
+    run("accept_fd_exhaustion", test_accept_fd_exhaustion);
 
     // Cross-thread wake tests use their own threads and drivers
     auto run_threaded = [&](const char* name, auto fn) {

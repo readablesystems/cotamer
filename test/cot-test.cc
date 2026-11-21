@@ -2765,6 +2765,7 @@ int main(int argc, char* argv[]) {
         auto t = fn();
         cot::loop();
         assert(t.done() && !test_incomplete && "test did not complete");
+        t.promise_ptr()->result();      // rethrow if the test threw
     };
 
     run("original", []() -> cot::task<> {

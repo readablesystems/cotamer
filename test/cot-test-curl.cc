@@ -317,7 +317,11 @@ cot::task<> run_all(int argc, char* argv[]) {
 
 int main(int argc, char* argv[]) {
     cot::set_clock(cot::clock::real_time);
-    run_all(argc, argv).detach();
+    auto t = run_all(argc, argv);   // exits on success
     cot::loop();
-    return 0;
+    if (t.done()) {
+        t.promise_ptr()->result();  // rethrow if a test threw
+    }
+    std::cerr << "tests did not complete\n";
+    return 1;
 }

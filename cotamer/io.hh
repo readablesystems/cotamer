@@ -1,5 +1,6 @@
 #pragma once
 #include "cotamer/cotamer.hh"
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
@@ -55,6 +56,24 @@ inline void set_nonblocking(int fileno) {
 inline void set_nonblocking(const fd& f) {
     if (f.fileno() >= 0) {
         set_nonblocking(f.fileno());
+    }
+}
+
+
+// Set or clear close-on-exec. Sockets cotamer creates are close-on-exec, so
+// child processes don’t inherit them; clear it to hand one to a child.
+
+inline void set_cloexec(int fileno, bool on) {
+    int flags = fcntl(fileno, F_GETFD, 0);
+    if (flags < 0
+        || fcntl(fileno, F_SETFD, on ? flags | FD_CLOEXEC : flags & ~FD_CLOEXEC) < 0) {
+        throw errno_error();
+    }
+}
+
+inline void set_cloexec(const fd& f, bool on) {
+    if (f.fileno() >= 0) {
+        set_cloexec(f.fileno(), on);
     }
 }
 
@@ -291,21 +310,75 @@ inline task<> connect(fd f, const struct sockaddr* addr, socklen_t len) {
 }
 
 
-// Accepts a connection. Returns new fd (with ownership). Throws on error.
+// Accepts a connection. Returns new fd (with ownership). Errors that affect
+// only the pending connection are skipped. On resource exhaustion (EMFILE,
+// ENFILE, ENOBUFS, ENOMEM), waits with exponential backoff (5ms up to 1s) and
+// retries. Throws on other errors (e.g., if `listen_fd` is closed).
+
+namespace detail {
+// Errors from accept(2) that concern a pending connection, not the listening
+// socket (e.g., the client reset it before we accepted). Linux's accept(2)
+// says to retry on the network errors too.
+inline bool accept_error_is_transient(int err) {
+    return err == EINTR
+        || err == ECONNABORTED
+        || err == EPROTO
+        || err == ENOPROTOOPT
+        || err == EHOSTDOWN
+        || err == EHOSTUNREACH
+        || err == ENETDOWN
+        || err == ENETUNREACH
+        || err == EOPNOTSUPP
+#ifdef ENONET
+        || err == ENONET
+#endif
+#ifdef __linux__
+        || err == EPERM         // firewall rules forbid the connection
+#endif
+        ;
+}
+
+inline bool accept_error_is_resource_exhaustion(int err) {
+    return err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
+}
+}
 
 inline task<fd> accept(fd listen_fd) {
+    using namespace std::chrono_literals;
+    duration backoff = duration::zero();
     while (true) {
+#ifdef SOCK_CLOEXEC
+        // close-on-exec atomically, so a concurrent fork+exec can't inherit it
+        int fileno = ::accept4(listen_fd.fileno(), nullptr, nullptr, SOCK_CLOEXEC);
+#else
         int fileno = ::accept(listen_fd.fileno(), nullptr, nullptr);
-        if (fileno >= 0) {
-            set_nonblocking(fileno);
-#ifdef SO_NOSIGPIPE
-            set_no_sigpipe(fileno);
 #endif
-            co_return fd(fileno);
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        if (fileno >= 0) {
+            fd f(fileno);
+            try {
+#ifndef SOCK_CLOEXEC
+                set_cloexec(f.fileno());
+#endif
+                set_nonblocking(f);
+#ifdef SO_NOSIGPIPE
+                set_no_sigpipe(f.fileno());
+#endif
+            } catch (const std::system_error&) {
+                // The connection died before setup (e.g., macOS returns a
+                // reset connection, then SO_NOSIGPIPE fails with EINVAL).
+                // Drop it (`f` closes itself) and accept the next one.
+                continue;
+            }
+            co_return std::move(f);
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            co_await readable(listen_fd);
+        } else if (detail::accept_error_is_resource_exhaustion(errno)) {
+            // wait for the application to free some fds or memory
+            backoff = std::clamp<duration>(backoff * 2, 5ms, 1s);
+            co_await after(backoff);
+        } else if (!detail::accept_error_is_transient(errno)) {
             throw errno_error();
         }
-        co_await readable(listen_fd);
     }
 }
 
