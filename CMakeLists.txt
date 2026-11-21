@@ -111,6 +111,15 @@ if(NOT COTAMER_ZLIB STREQUAL "OFF")
     endif()
 endif()
 
+# Detect epoll_pwait2 (epoll wait with a nanosecond timeout)
+include(CheckCXXSymbolExists)
+check_cxx_symbol_exists(epoll_pwait2 "sys/epoll.h" COTAMER_EPOLL_PWAIT2_DECLARED)
+if(COTAMER_EPOLL_PWAIT2_DECLARED)
+    set(COTAMER_HAVE_EPOLL_PWAIT2 1)
+else()
+    set(COTAMER_HAVE_EPOLL_PWAIT2 0)
+endif()
+
 # Generate config header
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cotamer/config.hh.in

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <optional>
 #include <print>
+#include <string>
 #include <thread>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -1543,6 +1544,52 @@ void test_virtual_time_closed() {
     std::cerr << "virtual_time_closed: ok\n";
 }
 
+// TEST: readable() and writable() on a regular file fire promptly. (epoll
+// rejects regular files with EPERM; those watches used to throw from the
+// driver loop.)
+cot::task<> test_regular_file_ready() {
+    const char* tmpdir = getenv("TMPDIR");
+    std::string path = std::string(tmpdir && *tmpdir ? tmpdir : "/tmp")
+        + "/cot-test-io-XXXXXX";
+    int fileno = mkstemp(path.data());
+    assert(fileno >= 0);
+    unlink(path.c_str());
+    assert(::write(fileno, "hello", 5) == 5);
+    assert(lseek(fileno, 0, SEEK_SET) == 0);
+    cot::fd f(fileno);
+
+    auto start = cot::now();
+    auto r = co_await cot::attempt(
+        [](cot::fd f) -> cot::task<> { co_await cot::readable(f); }(f),
+        cot::after(1s));
+    assert(r.has_value());
+    auto w = co_await cot::attempt(
+        [](cot::fd f) -> cot::task<> { co_await cot::writable(f); }(f),
+        cot::after(1s));
+    assert(w.has_value());
+    // a second watch after the first fired also works
+    auto r2 = co_await cot::attempt(
+        [](cot::fd f) -> cot::task<> { co_await cot::readable(f); }(f),
+        cot::after(1s));
+    assert(r2.has_value());
+    assert(cot::now() - start < 500ms);
+    std::cerr << "regular_file_ready: ok\n";
+}
+
+// TEST: waiting on sub-millisecond timers doesn't busy-poll (epoll and poll
+// take millisecond timeouts, which used to be truncated to 0)
+cot::task<> test_submillisecond_timer_no_spin() {
+    double cpu0 = cpu_seconds();
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i != 200; ++i) {
+        co_await cot::after(900us);
+    }
+    double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    double cpu = cpu_seconds() - cpu0;
+    assert(cpu < 0.1 * wall && "sub-millisecond timer waits burned CPU");
+    std::cerr << "submillisecond_timer_no_spin: ok (cpu " << cpu << "s, wall " << wall << "s)\n";
+}
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1581,6 +1628,8 @@ int main(int argc, char* argv[]) {
     run("storm", test_storm);
     run("closed_no_spin", test_closed_no_spin);
     run("closed_then_readable", test_closed_then_readable);
+    run("regular_file_ready", test_regular_file_ready);
+    run("submillisecond_timer_no_spin", test_submillisecond_timer_no_spin);
 
     // Cross-thread wake tests use their own threads and drivers
     auto run_threaded = [&](const char* name, auto fn) {

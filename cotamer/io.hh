@@ -345,7 +345,7 @@ struct fd_batch {
     static inline int mask_out(fdevent mask) noexcept;
     static inline fdevent mask_in(const system_event_type&) noexcept;
 
-    inline void add(int pollfd, const fd_update& fdu, fdevent old_mask);
+    inline bool add(int pollfd, const fd_update& fdu, fdevent old_mask);
     inline void clear(int pollfd);
     inline std::optional<fd_update> pop() noexcept;
     void print_changes();

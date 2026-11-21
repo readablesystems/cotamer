@@ -1,4 +1,6 @@
 #include "cotamer/io.hh"
+#include "cotamer/config.hh"
+#include <climits>
 #include <ranges>
 #include <thread>
 #include <netdb.h>
@@ -16,13 +18,35 @@ struct timespec duration_timespec(duration d) {
     return {sec.count(), nsec.count()};
 }
 
+// Truncate, since wakeups are usually late anyway, but round a nonzero
+// sub-millisecond timeout up to 1 so it waits rather than busy-polls.
 int duration_milliseconds(duration d) {
     if (d <= duration::zero()) {
         return 0;
     }
-    auto msec = std::chrono::duration_cast<std::chrono::milliseconds>(d);
-    return msec.count();
+    auto msec = std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
+    return msec < 1 ? 1 : (msec < INT_MAX ? int(msec) : INT_MAX);
 }
+
+#if COTAMER_USE_EPOLL
+// Wait with nanosecond precision via epoll_pwait2 (Linux 5.11) if the C
+// library declares it, otherwise with epoll_wait’s milliseconds.
+int epoll_wait_duration(int epfd, epoll_event* ev, int maxev, duration timeout) {
+# if COTAMER_HAVE_EPOLL_PWAIT2
+    static std::atomic<bool> have_pwait2{true};
+    if (have_pwait2.load(std::memory_order_relaxed)) {
+        struct timespec ts = duration_timespec(timeout);
+        int r = epoll_pwait2(epfd, ev, maxev, &ts, nullptr);
+        if (r >= 0 || errno != ENOSYS) {
+            return r;
+        }
+        // glibc has the wrapper but the kernel lacks the system call
+        have_pwait2.store(false, std::memory_order_relaxed);
+    }
+# endif
+    return epoll_wait(epfd, ev, maxev, duration_milliseconds(timeout));
+}
+#endif
 
 
 // file descriptor functions
@@ -258,7 +282,9 @@ inline fdevent fd_batch::mask_in(const system_event_type& se) noexcept {
 #endif
 }
 
-inline void fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
+// Returns false if the kernel can’t watch `fdu.fd` (epoll rejects regular
+// files and directories); such fds are always ready.
+inline bool fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
 #if COTAMER_USE_KQUEUE
     // EVFILT_READ is level-triggered for read interest. For close-only
     // interest it is edge-triggered (EV_CLEAR), so pending data doesn't fire
@@ -275,7 +301,7 @@ inline void fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
         newr = EV_ADD | EV_CLEAR;
     }
     if (oldr == newr && oldw == neww) {
-        return;
+        return true;
     }
     if (capacity - changes < (oldr == newr ? 0 : 2) + (oldw == neww ? 0 : 1)) {
         clear(pollfd);
@@ -302,11 +328,15 @@ inline void fd_batch::add(int pollfd, const fd_update& fdu, fdevent old_mask) {
         ? (old_mask != fdevent::none ? EPOLL_CTL_MOD : EPOLL_CTL_ADD)
         : EPOLL_CTL_DEL;
     if (epoll_ctl(pollfd, op, fdu.fd, &epev) < 0) {
+        if (errno == EPERM && op == EPOLL_CTL_ADD) {
+            return false;
+        }
         throw errno_error();
     }
 #else
     (void) pollfd, (void) fdu, (void) old_mask;
 #endif
+    return true;
 }
 
 inline std::optional<fd_update> fd_batch::pop() noexcept {
@@ -394,7 +424,19 @@ void driver::apply_fd_update(detail::fd_batch& batch,
     }
 
     // add to the batch of event notification fd updates
-    batch.add(pollfd(), fdu, old_mask);
+    if (!batch.add(pollfd(), fdu, old_mask)) {
+        // The kernel can’t watch this fd. Regular files are always ready to
+        // read and write (as poll() reports), so trigger those watches now;
+        // they run from the asap queue. Close watches never fire. The fd is
+        // not recorded as registered, so a later watch tries again.
+        auto wix = fds_.take_watch_list(fdu.fd, fdevent::read_write, fdu.epoch);
+        while (wix) {
+            if (auto eh = fds_.pop_watch_list_event(wix, fdevent::read_write)) {
+                eh->trigger();
+            }
+        }
+        return;
+    }
 
     // record the new notification state in `fdctl_`
     fdctl_[fdci] ^= uint64_t(int(old_mask) ^ int(fdu.mask)) << fdcs;
@@ -426,7 +468,7 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     batch.size = kevent(pollfd_, batch.ev, batch.changes, batch.ev, batch.capacity, &ts);
     batch.changes = 0;
 #elif COTAMER_USE_EPOLL
-    batch.size = epoll_wait(pollfd_, batch.ev, batch.capacity, duration_milliseconds(timeout));
+    batch.size = epoll_wait_duration(pollfd_, batch.ev, batch.capacity, timeout);
 #else
     // NB: rebuilds the entire pollfd array on every call (O(max_fd) scan).
     // kqueue/epoll maintain kernel-side state and avoid this cost.
