@@ -185,7 +185,7 @@ public:
 
 private:
     enum {
-        info_url = 1, info_params = 2
+        info_url = 1, info_params = 2, info_valid_url = 4
     };
 
     struct info_type {
@@ -484,15 +484,19 @@ inline std::string_view http_message::url_field(int field) const {
 }
 
 inline bool http_message::has_valid_url() const {
-    return has_url_field(0);
+    return info(info_url).flags & info_valid_url;
 }
 
 inline bool http_message::has_path() const {
-    return has_url_field(0);
+    return has_valid_url();
 }
 
 inline std::string_view http_message::path() const {
-    return url_field(0);
+    if (!has_valid_url()) {
+        return {};
+    }
+    // an absolute URL may lack a path (`http://host`)
+    return has_url_field(0) ? url_field(0) : std::string_view("/");
 }
 
 inline bool http_message::has_search() const {

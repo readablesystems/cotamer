@@ -15,6 +15,12 @@
 //    Example:
 //        if (auto c = req.header("Connection");
 //            cot::strings::http_value_list(c).icontains("upgrade")) ...
+//
+//    Also `url_view`, which splits a URL into its parts.
+
+namespace cotamer {
+class http_message;
+}
 
 namespace cotamer::strings {
 
@@ -185,18 +191,76 @@ private:
     std::string_view value_;
 };
 
+
+// View of a URL’s parts, for absolute URLs (`scheme://authority/path?search#hash`)
+// and origin-form URLs (`/path?search#hash`, as in most HTTP requests). For
+// `https://u@[::1]:8443/a?b#c`:
+//
+//     scheme()      https           (empty for origin-form)
+//     authority()   u@[::1]:8443
+//     host_port()   [::1]:8443      (authority without user info)
+//     host()        [::1]
+//     port()        8443            (empty if absent)
+//     path()        /a              (empty in `https://host?q`)
+//     search()      ?b              (with the `?`, or empty)
+//     hash()        #c              (with the `#`, or empty)
+//
+// `ok()` is false for other forms, for ports that aren't numbers up to 65535,
+// and for characters URLs don't allow (like spaces); then every part is
+// empty. Parts aren't percent-decoded. The URL must outlive the view.
+
+class url_view {
+public:
+    explicit url_view(std::string_view url) noexcept;
+
+    bool ok() const noexcept { return p_[p_end] != 0; }   // valid URLs aren't empty
+    bool is_absolute() const noexcept { return p_[p_scheme_end] != 0; }
+    std::string_view scheme() const noexcept { return part(0, p_[p_scheme_end]); }
+    std::string_view authority() const noexcept { return part(p_[p_authority], p_[p_path]); }
+    std::string_view host_port() const noexcept { return part(p_[p_host_port], p_[p_path]); }
+    std::string_view host() const noexcept { return part(p_[p_host_port], p_[p_host_end]); }
+    std::string_view port() const noexcept { return part(p_[p_port], p_[p_path]); }
+    std::string_view path() const noexcept { return part(p_[p_path], p_[p_search]); }
+    std::string_view search() const noexcept { return part(p_[p_search], p_[p_hash]); }
+    std::string_view hash() const noexcept { return part(p_[p_hash], p_[p_end]); }
+
+private:
+    // part boundaries (offsets from `s_`), all 0 on failure
+    enum {
+        p_scheme_end, p_authority, p_host_port, p_host_end, p_port,
+        p_path, p_search, p_hash, p_end, p_count
+    };
+
+    const char* s_;              // start of the URL
+    uint32_t p_[p_count];
+
+    bool parse(std::string_view url) noexcept;
+    std::string_view part(uint32_t first, uint32_t last) const noexcept {
+        return {s_ + first, last - first};
+    }
+
+    friend class cotamer::http_message;
+};
+
 } // namespace cotamer::strings
 
 
 namespace cotamer::detail {
 // Character classes for HTTP and URL parsing, shared by http.cc
-constexpr uint8_t us_safe = 1;         // all URL-safe characters except ?
-constexpr uint8_t us_http_tchar = 2;   // characters matching HTTP `token`
-constexpr uint8_t us_hex = 4;          // hex digits (hex value in upper 4 bits)
-constexpr uint8_t us_header = 8;       // characters safe to include in HTTP headers
+constexpr uint16_t us_ows = 1;         // optional whitespace (space and tab)
+constexpr uint16_t us_alpha = 2;       // ASCII letters
+constexpr uint16_t us_hex = 4;         // hex digits
+constexpr uint16_t us_safe = 8;        // URL-safe characters except ? and #
+constexpr uint16_t us_header = 16;     // characters safe to include in HTTP headers
+constexpr uint16_t us_http_tchar = 32; // characters matching HTTP `token`
+constexpr uint16_t us_target = 64;     // request-target characters (us_header
+                                       // except space and tab)
+constexpr uint16_t us_scheme = 128;    // URL scheme characters
+constexpr uint16_t us_query = 256;     // URL query characters (us_safe and ?)
+constexpr uint16_t us_fragment = 512;  // URL fragment characters (us_query and #)
 
 struct charinfo {
-    uint8_t v[256];
+    uint16_t v[256];
 };
 extern const charinfo chartable;
 } // namespace cotamer::detail

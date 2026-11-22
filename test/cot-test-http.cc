@@ -602,7 +602,9 @@ cot::task<> test_decoded_path() {
     assert(dp("/a%00b") == std::nullopt);
     assert(dp("/a%2") == std::nullopt);
     assert(dp("/a%zz") == std::nullopt);
-    assert(dp("http://example.com/") == std::nullopt);
+    assert(dp("http://example.com/a/../b") == "/b");
+    assert(dp("http://example.com") == "/");
+    assert(dp("*") == std::nullopt);
     assert(dp("") == std::nullopt);
     co_return;
 }
@@ -1038,6 +1040,72 @@ static_assert(std::ranges::forward_range<cot::strings::http_value_list>);
 static_assert(std::ranges::forward_range<cot::strings::http_parameter_list>);
 
 // TEST: http_value_list splits comma-separated header values.
+// TEST: url_view splits absolute and origin-form URLs
+cot::task<> test_url_view() {
+    using cot::strings::url_view;
+    {
+        url_view u("https://u:p@[::1]:8443/a/b?x=1?y#h?#z");
+        assert(u.ok() && u.is_absolute());
+        assert(u.scheme() == "https");
+        assert(u.authority() == "u:p@[::1]:8443");
+        assert(u.host_port() == "[::1]:8443");
+        assert(u.host() == "[::1]" && u.port() == "8443");
+        assert(u.path() == "/a/b" && u.search() == "?x=1?y" && u.hash() == "#h?#z");
+    }
+    {
+        url_view u("http://example.com");
+        assert(u.ok() && u.host() == "example.com" && u.port() == "");
+        assert(u.path() == "" && u.search() == "" && u.hash() == "");
+    }
+    {
+        url_view u("HTTP://h:80?q");
+        assert(u.ok() && u.scheme() == "HTTP" && u.host_port() == "h:80");
+        assert(u.path() == "" && u.search() == "?q");
+    }
+    {
+        url_view u("/p%20q?a=b#c");
+        assert(u.ok() && !u.is_absolute() && u.authority() == "");
+        assert(u.path() == "/p%20q" && u.search() == "?a=b" && u.hash() == "#c");
+    }
+    {
+        url_view u("//not/authority");             // origin-form path
+        assert(u.ok() && !u.is_absolute() && u.path() == "//not/authority");
+    }
+    {
+        url_view u("http://h:/x");                  // empty port
+        assert(u.ok() && u.host() == "h" && u.port() == "");
+    }
+    for (const char* bad : {"", "x", "*", "h:80", "1http://h/", "http:/h",
+                            "http://h:65536/", "http://h:8x/", "http://[::1/",
+                            "http://[::1]x/", "http://h/a b", "/a b",
+                            "/a\x01", "http://h\"/", "/\xc3\xa9"}) {
+        url_view u(bad);
+        assert(!u.ok() && u.path() == "" && u.host() == "");
+    }
+    std::cerr << "url_view: ok\n";
+    co_return;
+}
+
+// TEST: http_message parses absolute-form request targets
+cot::task<> test_absolute_form() {
+    auto r = co_await parse("GET http://example.com:8080/a/%7Eb?x=1&y=2 HTTP/1.1\r\n"
+                            "Host: example.com:8080\r\n\r\n");
+    assert(r.url() == "http://example.com:8080/a/%7Eb?x=1&y=2");
+    assert(r.has_valid_url());
+    assert(r.path() == "/a/%7Eb" && r.search() == "?x=1&y=2");
+    assert(r.search_param("y") == "2");
+    assert(r.decoded_path() == "/a/~b");
+    r = co_await parse("GET http://example.com?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    assert(r.has_valid_url() && r.path() == "/" && r.search_param("q") == "1");
+    // origin-form is unchanged
+    cot::http_message m(HTTP_GET, "/x?a=1#h");
+    assert(m.has_valid_url() && m.path() == "/x" && m.search() == "?a=1"
+           && m.hash() == "#h");
+    m.url("not a url");
+    assert(!m.has_valid_url() && m.path() == "" && m.search_param("a") == "");
+    std::cerr << "absolute_form: ok\n";
+}
+
 cot::task<> test_http_value_list() {
     using cot::strings::http_value_list;
 
@@ -1353,6 +1421,8 @@ int main(int argc, char* argv[]) {
     run("search_param", test_search_param);
     run("header_value_ows", test_header_value_ows);
     run("header_setter_ows", test_header_setter_ows);
+    run("url_view", test_url_view);
+    run("absolute_form", test_absolute_form);
     run("http_value_list", test_http_value_list);
     run("http_parameter_list", test_http_parameter_list);
     run("hop_by_hop", test_hop_by_hop);

@@ -537,8 +537,8 @@ the root.
 ### Structured header values
 
 `cotamer/http_fields.hh` helps parse header values that follow the
-grammar of RFC 9110 §5.6. Both helpers are views; the string they parse must
-outlive them.
+grammar of RFC 9110 §5.6, and URLs. These helpers are views; the string they
+parse must outlive them.
 
 - `cot::strings::http_value_list(value)` iterates over a comma-separated list
   (as in `Connection`, `Upgrade`, or `Accept-Encoding`). Entries are trimmed
@@ -550,6 +550,10 @@ outlive them.
   `Sec-WebSocket-Extensions`). Its iterator has `name()`, `has_value()`,
   `raw_value()` (quoted values keep their quotes), and `value()` (quotes and
   escapes removed by `cot::strings::http_unquote`).
+- `cot::strings::url_view(url)` splits an absolute or origin-form URL into
+  `scheme()`, `authority()`, `host_port()`, `host()`, `port()`, `path()`,
+  `search()`, and `hash()`, without decoding. `ok()` is false if the URL is
+  malformed. A missing path reads as `/`.
 
 ```cpp
 std::string conn = req.header("connection");   // the view needs a real string

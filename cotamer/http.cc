@@ -81,19 +81,21 @@ struct status_code_map_comparator {
 };
 
 using cotamer::detail::chartable;
-using cotamer::detail::us_safe;
 using cotamer::detail::us_http_tchar;
 using cotamer::detail::us_hex;
 using cotamer::detail::us_header;
+using cotamer::detail::us_target;
+using cotamer::detail::us_ows;
 
 // Bodies reserve space for at most this many bytes in advance
 constexpr size_t max_body_reserve = 1 << 20;
 
+// `ch` must be a hex digit
 inline int xvalue(unsigned char ch) {
-    return chartable.v[ch] >> 4;
+    return ch <= '9' ? ch - '0' : (ch | 0x20) - 'a' + 10;
 }
 
-inline bool all_chars(std::string_view s, uint8_t mask) {
+inline bool all_chars(std::string_view s, uint16_t mask) {
     for (unsigned char ch : s) {
         if (!(chartable.v[ch] & mask)) {
             return false;
@@ -105,8 +107,7 @@ inline bool all_chars(std::string_view s, uint8_t mask) {
 // Request targets additionally exclude whitespace, which delimits the
 // request line.
 inline bool valid_request_target(std::string_view s) {
-    return all_chars(s, us_header)
-        && s.find_first_of(" \t") == std::string_view::npos;
+    return all_chars(s, us_target);
 }
 
 int parse_method_on_method_complete(llhttp_t*) {
@@ -282,42 +283,14 @@ void http_message::make_info(unsigned fl) const {
     info_type& inf = *info_;
 
     if (!(inf.flags & info_url) && (fl & (info_url | info_params))) {
-        const unsigned char* s1 = reinterpret_cast<const unsigned char*>(url_.data());
-        const unsigned char* s2 = s1 + url_.length();
-        const unsigned char* s = s1;
-        int fpos = 0;
-        if (s == s2 || *s != '/') {
-            goto fail;
-        }
-        while (s != s2) {
-            if (chartable.v[*s] & us_safe) {
-                ++s;
-            } else if (*s == '?') {
-                if (fpos == 0) {
-                    inf.f[fpos].first = 0;
-                    inf.f[fpos].second = s - s1;
-                    fpos = 1;
-                }
-                ++s;
-            } else if (*s == '#') {
-                while (fpos < 2) {
-                    inf.f[fpos].first = fpos ? inf.f[fpos - 1].second : 0;
-                    inf.f[fpos].second = s - s1;
-                    ++fpos;
-                }
-                ++s;
-            } else {
-            fail:
-                fpos = 0;
-                s = s2 = s1;
-            }
-        }
-        while (fpos != 3) {
-            inf.f[fpos].first = fpos ? inf.f[fpos - 1].second : 0;
-            inf.f[fpos].second = s - s1;
-            ++fpos;
-        }
-        inf.flags |= info_url;
+        // origin-form or absolute-form URL
+        strings::url_view u(url_);
+        using uv = strings::url_view;
+        inf.f[0] = {u.p_[uv::p_path], u.p_[uv::p_search]};
+        inf.f[1] = {u.p_[uv::p_search], u.p_[uv::p_hash]};
+        inf.f[2] = {u.p_[uv::p_hash], u.p_[uv::p_end]};
+        inf.flags = (inf.flags & ~info_valid_url) | info_url
+            | (u.ok() ? info_valid_url : 0);
     }
 
     if (!(inf.flags & info_params) && (fl & info_params)) {
@@ -627,7 +600,7 @@ int http_parser::on_header_value_complete(::llhttp_t* hp) {
         // strip trailing OWS (llhttp stripped leading OWS)
         const char* s = md->hm.headers_.data();
         size_t v2 = md->hm.headers_.length();
-        while (v2 > md->value1 && (s[v2 - 1] == ' ' || s[v2 - 1] == '\t')) {
+        while (v2 > md->value1 && (chartable.v[(unsigned char) s[v2 - 1]] & us_ows)) {
             --v2;
         }
         md->hm.headers_.resize(v2);
