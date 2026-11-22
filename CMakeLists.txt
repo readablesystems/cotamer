@@ -5,6 +5,13 @@ option(SAN "Enable AddressSanitizer+UBSanitizer" OFF)
 option(ASAN "Enable AddressSanitizer" OFF)
 option(UBSAN "Enable UBSanitizer" OFF)
 option(TSAN "Enable ThreadSanitizer" OFF)
+# Build tests and examples by default only as the top-level project
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(COTAMER_TOP_LEVEL ON)
+else()
+    set(COTAMER_TOP_LEVEL OFF)
+endif()
+option(COTAMER_BUILD_TESTS "Build Cotamer tests and examples" ${COTAMER_TOP_LEVEL})
 
 # Optional integrations. AUTO enables if the dependency is found, ON requires
 # it, OFF skips it.
@@ -37,12 +44,14 @@ if(TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
-# Find xxhash
-find_path(XXHASH_INCLUDE_DIR xxhash.h HINTS /opt/homebrew/include)
-find_library(XXHASH_LIBRARY xxhash HINTS /opt/homebrew/lib)
+# Find xxhash (used by examples)
+if(COTAMER_BUILD_TESTS)
+    find_path(XXHASH_INCLUDE_DIR xxhash.h HINTS /opt/homebrew/include)
+    find_library(XXHASH_LIBRARY xxhash HINTS /opt/homebrew/lib)
 
-if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
-    message(FATAL_ERROR "xxhash not found. Install with: brew install xxhash")
+    if(NOT XXHASH_INCLUDE_DIR OR NOT XXHASH_LIBRARY)
+        message(FATAL_ERROR "xxhash not found. Install with: brew install xxhash")
+    endif()
 endif()
 
 # Find llhttp
@@ -133,12 +142,29 @@ add_library(Cotamer OBJECT
     cotamer/http_fields.cc
     cotamer/io.cc
 )
+target_include_directories(Cotamer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
 
 if(COTAMER_HAVE_LLHTTP)
     add_library(CotamerHttp OBJECT
         cotamer/http.cc
     )
     target_include_directories(CotamerHttp PUBLIC ${LLHTTP_INCLUDE_DIR})
+    target_link_libraries(CotamerHttp PUBLIC Cotamer ${LLHTTP_LIBRARY})
+endif()
+
+# Optional libcurl integration
+if(COTAMER_HAVE_CURL)
+    add_library(CotamerCurl OBJECT
+        cotamer/curl.cc
+    )
+    target_link_libraries(CotamerCurl PUBLIC Cotamer CURL::libcurl)
+endif()
+
+if(NOT COTAMER_BUILD_TESTS)
+    return()
 endif()
 
 add_library(CotamerExamples OBJECT
@@ -293,13 +319,7 @@ if(COTAMER_HAVE_NLOHMANN_JSON)
     )
 endif()
 
-# Optional libcurl integration
 if(COTAMER_HAVE_CURL)
-    add_library(CotamerCurl OBJECT
-        cotamer/curl.cc
-    )
-    target_link_libraries(CotamerCurl PUBLIC CURL::libcurl)
-
     # cot-test-curl uses cot::http_parser for its in-process test server.
     if(COTAMER_HAVE_LLHTTP)
         add_executable(cot-test-curl
