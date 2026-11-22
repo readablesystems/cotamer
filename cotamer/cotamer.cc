@@ -77,10 +77,14 @@ driver::~driver() {
         || nfdctl_ != 0
         || lock_.load(std::memory_order_relaxed)
         || guard_count_ > 0
-        || !keepalives_.empty()) {
+        || !keepalives_.empty()
+        || signals_) {
         // Clear any remaining events and coroutines
         clear();
         loop();
+    }
+    if (signals_) {
+        close_signals();
     }
     fds_.deref_all(this);
     if (internal_wakefd_ >= 0) {
@@ -98,6 +102,11 @@ bool driver::loop(looptype lt) {
         // import migrated tasks and fd close events
         if (lock_.load(std::memory_order_relaxed) != 0) {
             finish_migrate();
+        }
+
+        // trigger events for delivered signals
+        if (signals_) {
+            deliver_signals();
         }
 
         // process an aliquot of asap and migrated tasks
@@ -132,7 +141,8 @@ bool driver::loop(looptype lt) {
             && nfdctl_ == 0
             && !lock_.load(std::memory_order_relaxed)
             && guard_count_ == 0
-            && keepalives_.empty()) {
+            && keepalives_.empty()
+            && (!signals_ || !cull_signals())) {
             clearing_ = false;
             return false;
         }
@@ -235,9 +245,17 @@ void driver::process_clearing() {
             coh();
         }
     }
+    // trigger all signal events
+    if (signals_) {
+        deliver_signals(true);
+    }
 }
 
 void reset() {
+    // Clear the old driver while it is still current, so that coroutines
+    // woken by clearing can't register events with the new driver.
+    driver::current->clear();
+    driver::current->loop();
     driver::current.reset(new driver);
 }
 

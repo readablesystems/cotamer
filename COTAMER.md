@@ -254,12 +254,12 @@ cot::task<> print_by_move() {
 ## Event loop
 
 Cotamer runs coroutines from its event loop, `cotamer::loop()`. Every
-application thread has its own thread-local driver
-(`cotamer::driver::current`); free functions like `cotamer::loop()` call into
-that driver. The `loop` function repeatedly runs unblocked tasks, triggers
-expired timer events, and checks for file descriptor events, blocking as
-appropriate. It runs until there’s nothing left for it to do: no unblocked
-tasks, no timers, and no file descriptor interest.
+application thread has its own thread-local driver (`cotamer::driver::current`);
+free functions like `cotamer::loop()` call into that driver. The `loop` function
+repeatedly runs unblocked tasks, triggers expired timer events, and checks for
+file descriptor events and signal events, blocking as appropriate. It runs until
+there’s nothing left for it to do: no unblocked tasks, no timers, and no file
+descriptor or signal interest.
 
 A `cotamer::driver_guard` token keeps `cotamer::loop()` alive and processing
 events even if the loop has no other work. This is useful when suspending on

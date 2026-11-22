@@ -6,6 +6,11 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <sys/uio.h>
+#if !COTAMER_USE_KQUEUE && defined(__linux__)
+// signal wake fds are eventfds
+# define COTAMER_SIGNAL_EVENTFD 1
+# include <sys/eventfd.h>
+#endif
 
 namespace cotamer {
 
@@ -26,6 +31,40 @@ int duration_milliseconds(duration d) {
     }
     auto msec = std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
     return msec < 1 ? 1 : (msec < INT_MAX ? int(msec) : INT_MAX);
+}
+
+// Drain a signal wake fd
+static void drain_signal_wakefd(int fd) {
+#if COTAMER_SIGNAL_EVENTFD
+    uint64_t v;
+    ssize_t nr = ::read(fd, &v, sizeof(v));
+    (void) nr;
+#else
+    char buf[64];
+    while (::read(fd, buf, sizeof(buf)) > 0) {
+    }
+#endif
+}
+
+// per-driver signal state
+namespace detail {
+struct signal_waiter {
+    int signo;
+    unsigned count;             // signal count at start
+    bool weak;                  // doesn't keep loop() running
+    event_handle eh;
+};
+
+inline bool any_strong(const std::vector<signal_waiter>& waiters) {
+    return std::ranges::any_of(waiters, [](const signal_waiter& w) { return !w.weak; });
+}
+
+struct signal_set {
+    std::vector<signal_waiter> waiters;
+    int slot = -1;                  // index in `sigpool`
+    int readfd = -1;                // wake fd
+    unsigned generation = 0;        // `sigpool.generation` last seen
+};
 }
 
 #if COTAMER_USE_EPOLL
@@ -486,6 +525,10 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     batch.epochs.clear();
     batch.ev.push_back({pollfd_, POLLIN, 0});
     batch.epochs.push_back(detail::fd_event_set::internal_epoch);
+    if (signals_) {
+        batch.ev.push_back({signals_->readfd, POLLIN, 0});
+        batch.epochs.push_back(detail::fd_event_set::internal_epoch);
+    }
     int fd = -1;
     while (auto fdu = fds_.next_known(fd)) {
         if (fdu->mask != fdevent::none) {
@@ -509,6 +552,10 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
 
     // process returned events
     while (auto fdu = batch.pop()) {
+        if (signals_ && fdu->fd == signals_->readfd) {
+            drain_signal_wakefd(fdu->fd);
+            continue;
+        }
 #if COTAMER_USE_EPOLL
         if (fdu->fd == internal_wakefd_) {
             uint64_t v;
@@ -539,6 +586,225 @@ bool driver::watch_fds(detail::fd_batch& batch, duration timeout) {
     return batch.size > 0;
 }
 
+
+// signals
+//    Our handler is installed while any wait exists, then the previous action
+//    returns. Each waiting driver takes a wake fd (eventfd on Linux, else a
+//    pipe) from a never-closed pool; the handler counts the signal and writes
+//    every wake fd. (Not kqueue EVFILT_SIGNAL: it fires before the handler
+//    runs, so a driver could restore the old action too soon.)
+
+namespace {
+constexpr int signal_pool_size = 64;   // max drivers waiting for signals
+
+struct signal_pool {
+    // accessed by the signal handler
+    std::atomic<unsigned> generation{0};
+    std::atomic<unsigned> count[NSIG]{};
+    std::atomic<int> wakefd[signal_pool_size]{};   // wake fd + 1, or 0
+    // protected by `lock`
+    std::mutex lock;
+    int fds[signal_pool_size][2]{};    // read end, write end (same for eventfd)
+    bool fd_open[signal_pool_size]{};
+    bool slot_used[signal_pool_size]{};
+    unsigned nwaiters[NSIG]{};
+    struct sigaction old_action[NSIG]{};
+};
+static_assert(std::atomic<unsigned>::is_always_lock_free
+              && std::atomic<int>::is_always_lock_free);
+
+constinit signal_pool sigpool;
+
+extern "C" void cotamer_signal_handler(int signo) {
+    int saved_errno = errno;
+    sigpool.count[signo].fetch_add(1);
+    sigpool.generation.fetch_add(1);
+    for (auto& w : sigpool.wakefd) {
+        if (int fd = w.load() - 1; fd >= 0) {
+            // a full pipe already has a wake pending
+#if COTAMER_SIGNAL_EVENTFD
+            uint64_t v = 1;
+            ssize_t nw = ::write(fd, &v, sizeof(v));
+#else
+            char c = 0;
+            ssize_t nw = ::write(fd, &c, 1);
+#endif
+            (void) nw;
+        }
+    }
+    errno = saved_errno;
+}
+
+void signal_wait_locked(int signo) {
+    if (sigpool.nwaiters[signo] == 0) {
+        struct sigaction sa{};
+        sa.sa_handler = cotamer_signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESTART;
+        if (sigaction(signo, &sa, &sigpool.old_action[signo]) != 0) {
+            throw errno_error();
+        }
+    }
+    ++sigpool.nwaiters[signo];
+}
+
+void signal_unwait_locked(int signo) {
+    if (--sigpool.nwaiters[signo] == 0) {
+        sigaction(signo, &sigpool.old_action[signo], nullptr);
+    }
+}
+
+}
+
+event driver::at_signal(int signo) {
+    return add_signal_wait(signo, false);
+}
+
+event driver::at_signal_weak(int signo) {
+    return add_signal_wait(signo, true);
+}
+
+event driver::add_signal_wait(int signo, bool weak) {
+    if (signo <= 0 || signo >= NSIG || signo == SIGKILL || signo == SIGSTOP) {
+        throw std::invalid_argument("bad signal number");
+    }
+    std::lock_guard guard(sigpool.lock);
+    if (!signals_) {
+        int slot = 0;
+        while (slot != signal_pool_size && sigpool.slot_used[slot]) {
+            ++slot;
+        }
+        if (slot == signal_pool_size) {
+            throw std::runtime_error("too many drivers waiting for signals");
+        }
+        int* p = sigpool.fds[slot];
+        if (!sigpool.fd_open[slot]) {
+#if COTAMER_SIGNAL_EVENTFD
+            if ((p[0] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0) {
+                throw errno_error();
+            }
+            p[1] = p[0];
+#else
+            if (pipe(p) < 0) {
+                throw errno_error();
+            }
+            for (int i = 0; i != 2; ++i) {
+                fcntl(p[i], F_SETFD, FD_CLOEXEC);
+                fcntl(p[i], F_SETFL, fcntl(p[i], F_GETFL) | O_NONBLOCK);
+            }
+#endif
+            sigpool.fd_open[slot] = true;
+        }
+        drain_signal_wakefd(p[0]);
+        // (poll() adds it in watch_fds)
+#if COTAMER_USE_KQUEUE
+        struct kevent ev;
+        EV_SET(&ev, p[0], EVFILT_READ, EV_ADD, 0, 0,
+               reinterpret_cast<void*>(uintptr_t(detail::fd_event_set::internal_epoch)));
+        if (kevent(pollfd(), &ev, 1, nullptr, 0, nullptr) < 0) {
+            throw errno_error();
+        }
+#elif COTAMER_USE_EPOLL
+        epoll_event epev;
+        epev.events = EPOLLIN;
+        epev.data.u64 = p[0] | (uint64_t(detail::fd_event_set::internal_epoch) << 32);
+        if (epoll_ctl(pollfd(), EPOLL_CTL_ADD, p[0], &epev) < 0) {
+            throw errno_error();
+        }
+#endif
+        signals_ = new detail::signal_set;
+        signals_->slot = slot;
+        signals_->readfd = p[0];
+        signals_->generation = sigpool.generation.load();
+        sigpool.slot_used[slot] = true;
+        sigpool.wakefd[slot].store(p[1] + 1);
+    }
+
+    // read count before installing handler: earlier signals aren't ours
+    event e;
+    unsigned count = sigpool.count[signo].load();
+    signals_->waiters.push_back({signo, count, weak, e.handle()});
+    try {
+        signal_wait_locked(signo);
+    } catch (...) {
+        signals_->waiters.pop_back();
+        throw;
+    }
+    signal_waiting_ = signal_waiting_ || !weak;
+    return e;
+}
+
+// Trigger waits whose signal arrived (if `all`, every wait).
+void driver::deliver_signals(bool all) {
+    auto& ss = *signals_;
+    unsigned generation = sigpool.generation.load();
+    if (generation == ss.generation && !all) {
+        return;
+    }
+    ss.generation = generation;
+
+    std::vector<detail::signal_waiter> fire;
+    auto out = ss.waiters.begin();
+    for (auto it = ss.waiters.begin(); it != ss.waiters.end(); ++it) {
+        // (also drop abandoned waits)
+        if (all
+            || sigpool.count[it->signo].load() != it->count
+            || it->eh.empty()) {
+            fire.push_back(std::move(*it));
+        } else {
+            if (out != it) {
+                *out = std::move(*it);
+            }
+            ++out;
+        }
+    }
+    ss.waiters.erase(out, ss.waiters.end());
+    signal_waiting_ = detail::any_strong(ss.waiters);
+
+    for (auto& w : fire) {
+        while (auto coh = w.eh->driver_trigger(this)) {
+            coh();
+            step_time();
+        }
+    }
+
+    // restore actions after triggering, so re-waiting keeps our handler
+    std::lock_guard guard(sigpool.lock);
+    for (auto& w : fire) {
+        signal_unwait_locked(w.signo);
+    }
+}
+
+// Drop abandoned waits; return true if waits should keep loop() running:
+// non-weak waits, or any waits when clearing (which must trigger them all).
+bool driver::cull_signals() {
+    std::lock_guard guard(sigpool.lock);
+    std::erase_if(signals_->waiters, [](detail::signal_waiter& w) {
+        if (w.eh.empty()) {
+            signal_unwait_locked(w.signo);
+            return true;
+        }
+        return false;
+    });
+    signal_waiting_ = detail::any_strong(signals_->waiters);
+    return signal_waiting_ || (clearing_ && !signals_->waiters.empty());
+}
+
+void driver::close_signals() {
+    std::lock_guard guard(sigpool.lock);
+    for (auto& w : signals_->waiters) {
+        signal_unwait_locked(w.signo);
+    }
+    int slot = signals_->slot;
+#if COTAMER_USE_EPOLL
+    epoll_ctl(pollfd_, EPOLL_CTL_DEL, signals_->readfd, nullptr);
+#endif
+    sigpool.wakefd[slot].store(0);
+    sigpool.slot_used[slot] = false;
+    delete signals_;
+    signals_ = nullptr;
+    signal_waiting_ = false;
+}
 
 namespace {
 // ensure that the return value from `getaddrinfo` is properly freed

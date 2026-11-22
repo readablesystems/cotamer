@@ -228,6 +228,9 @@ public:
     inline event file_event(const cotamer::fd& f, fdevent mask);
     inline void notify_close(int base_fileno, bool stale = false);
 
+    event at_signal(int signo);
+    event at_signal_weak(int signo);
+
     inline void loop();
     inline bool poll();
 
@@ -270,6 +273,8 @@ private:
     unsigned nfdctl_ = 0;
     std::vector<uint64_t> fdctl_;
     detail::fd_event_set fds_;
+    detail::signal_set* signals_ = nullptr;
+    bool signal_waiting_ = false;      // a non-weak signal wait exists
 
     static std::atomic<bool> global_real_time;
 
@@ -291,6 +296,11 @@ private:
     bool loop(looptype);
 
     void process_clearing();
+
+    event add_signal_wait(int signo, bool weak);
+    void deliver_signals(bool all = false);
+    bool cull_signals();
+    void close_signals();
 };
 
 
@@ -315,6 +325,9 @@ template <typename Rep, typename Period>
 inline event after(const std::chrono::duration<Rep, Period>&);
 inline event at(steady_time_point);    // triggers at an absolute time
 inline event at(system_time_point);    // triggers at an absolute system time
+
+inline event at_signal(int signo);     // triggers when the process receives `signo`
+inline event at_signal_weak(int signo); // same, but doesn't keep loop() running
 
 
 // driver_guard

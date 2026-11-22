@@ -1351,7 +1351,8 @@ inline bool driver::empty() const noexcept {
         && !fds_.has_update()
         && !lock_.load(std::memory_order_relaxed)
         && guard_count_ == 0
-        && keepalives_.empty();
+        && keepalives_.empty()
+        && !signal_waiting_;
 }
 
 inline bool driver::clearing() const noexcept {
@@ -1506,6 +1507,14 @@ inline event at(steady_time_point t) {
 
 inline event at(system_time_point t) {
     return driver::current->at(t);
+}
+
+inline event at_signal(int signo) {
+    return driver::current->at_signal(signo);
+}
+
+inline event at_signal_weak(int signo) {
+    return driver::current->at_signal_weak(signo);
 }
 
 inline event after(duration d) {

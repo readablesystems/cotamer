@@ -1874,6 +1874,254 @@ cot::task<> test_accept_fd_exhaustion() {
 }
 
 
+using signal_handler_type = void (*)(int);
+
+static signal_handler_type signal_action(int signo) {
+    struct sigaction sa;
+    assert(sigaction(signo, nullptr, &sa) == 0);
+    return sa.sa_handler;
+}
+
+static cot::task<> kill_after(cot::duration d, int signo, int n = 1) {
+    co_await cot::after(d);
+    for (int i = 0; i != n; ++i) {
+        kill(getpid(), signo);
+    }
+}
+
+// TEST: at_signal waits keep loop() running, coalesce signals, miss earlier
+// signals, and restore the previous action when done
+cot::task<> test_at_signal() {
+    signal(SIGUSR1, SIG_IGN);
+    auto start = std::chrono::steady_clock::now();
+    cot::event e = cot::at_signal(SIGUSR1);
+    assert(signal_action(SIGUSR1) != SIG_IGN && signal_action(SIGUSR1) != SIG_DFL);
+    kill_after(20ms, SIGUSR1, 3).detach();
+    co_await e;
+    assert(std::chrono::steady_clock::now() - start >= 20ms);
+
+    cot::event e2 = cot::at_signal(SIGUSR1);
+    co_await cot::any(e2, cot::after(30ms));
+    assert(!e2.triggered());
+    e2 = cot::event();
+
+    // waiting again in a loop keeps our handler installed
+    for (int i = 0; i != 3; ++i) {
+        kill_after(5ms, SIGUSR1).detach();
+        co_await cot::at_signal(SIGUSR1);
+        assert(signal_action(SIGUSR1) != SIG_IGN);
+    }
+    co_await cot::after(1ms);
+    assert(signal_action(SIGUSR1) == SIG_IGN);
+    signal(SIGUSR1, SIG_DFL);
+    std::cerr << "at_signal: ok\n";
+}
+
+// TEST: waits for different signals trigger independently
+cot::task<> test_at_signal_independent() {
+    cot::event e1 = cot::at_signal(SIGUSR1), e2 = cot::at_signal(SIGUSR2);
+    kill_after(5ms, SIGUSR2).detach();
+    co_await e2;
+    assert(!e1.triggered());
+    kill_after(5ms, SIGUSR1).detach();
+    co_await e1;
+    co_await cot::after(1ms);
+    assert(signal_action(SIGUSR1) == SIG_DFL && signal_action(SIGUSR2) == SIG_DFL);
+    std::cerr << "at_signal_independent: ok\n";
+}
+
+// TEST: bad signal numbers throw
+cot::task<> test_at_signal_bad() {
+    for (int signo : {0, -1, SIGKILL, SIGSTOP, NSIG}) {
+        bool threw = false;
+        try {
+            (void) cot::at_signal(signo);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        assert(threw);
+    }
+    std::cerr << "at_signal_bad: ok\n";
+    co_return;
+}
+
+// TEST: abandoned waits don't keep loop() or our handler; reset() cancels
+// waits
+void test_at_signal_lifetime() {
+    cot::reset();
+    {
+        cot::event e = cot::at_signal(SIGUSR2);
+        assert(signal_action(SIGUSR2) != SIG_DFL);
+    }
+    cot::loop();
+    assert(signal_action(SIGUSR2) == SIG_DFL);
+
+    bool woke = false;
+    auto waiter = [](bool& woke) -> cot::task<> {
+        co_await cot::at_signal(SIGUSR2);
+        woke = true;
+    };
+    auto t = waiter(woke);
+    assert(signal_action(SIGUSR2) != SIG_DFL);
+    cot::reset();
+    assert(!woke && signal_action(SIGUSR2) == SIG_DFL);
+    std::cerr << "at_signal_lifetime: ok\n";
+}
+
+// TEST: a signal triggers waits in every driver
+void test_at_signal_threads() {
+    cot::reset();
+    std::atomic<int> ready{0}, woke{0};
+    auto waiter = [&]() -> cot::task<> {
+        cot::event e = cot::at_signal(SIGUSR1);
+        ++ready;
+        co_await cot::any(e, cot::after(5s));
+        if (e.triggered()) {
+            ++woke;
+        }
+    };
+    std::vector<std::thread> threads;
+    for (int i = 0; i != 3; ++i) {
+        threads.emplace_back([&] {
+            cot::reset();
+            auto t = waiter();
+            cot::loop();
+            cot::reset();
+        });
+    }
+    auto t = waiter();
+    while (ready.load() != 4) {
+        std::this_thread::yield();
+    }
+    kill(getpid(), SIGUSR1);
+    cot::loop();
+    for (auto& th : threads) {
+        th.join();
+    }
+    assert(woke.load() == 4);
+    assert(signal_action(SIGUSR1) == SIG_DFL);
+    std::cerr << "at_signal_threads: ok\n";
+}
+
+
+// TEST: a signal handled on another thread triggers the driver's wait
+void test_at_signal_other_thread() {
+    cot::reset();
+    sigset_t usr1;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    sigset_t old;
+    pthread_sigmask(SIG_BLOCK, &usr1, &old);
+    std::atomic<bool> done{false};
+    // SIGUSR1 is delivered here
+    std::thread receiver([&] {
+        pthread_sigmask(SIG_UNBLOCK, &usr1, nullptr);
+        while (!done.load()) {
+            std::this_thread::sleep_for(1ms);
+        }
+    });
+    auto fn = [&]() -> cot::task<> {
+        cot::event e = cot::at_signal(SIGUSR1);
+        kill_after(20ms, SIGUSR1).detach();
+        co_await cot::any(e, cot::after(5s));
+        assert(e.triggered());
+    };
+    auto start = std::chrono::steady_clock::now();
+    auto t = fn();
+    cot::loop();
+    assert(t.done());
+    assert(std::chrono::steady_clock::now() - start < 2s);
+    done = true;
+    receiver.join();
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    assert(signal_action(SIGUSR1) == SIG_DFL);
+    std::cerr << "at_signal_other_thread: ok\n";
+}
+
+
+// TEST: weak waits don't keep loop() running, but keep our handler; a signal
+// that arrives outside loop() triggers them on the next loop()
+void test_at_signal_weak() {
+    cot::reset();
+    bool woke = false;
+    auto waiter = [](bool& woke) -> cot::task<> {
+        co_await cot::at_signal_weak(SIGUSR1);
+        woke = true;
+    };
+    auto t = waiter(woke);
+    auto start = std::chrono::steady_clock::now();
+    cot::loop();                        // returns at once
+    assert(std::chrono::steady_clock::now() - start < 1s);
+    assert(!woke && !t.done());
+    assert(signal_action(SIGUSR1) != SIG_DFL);
+    kill(getpid(), SIGUSR1);            // caught; nothing runs yet
+    assert(!woke);
+    cot::loop();
+    assert(woke && t.done());
+    assert(signal_action(SIGUSR1) == SIG_DFL);
+
+    // a weak wait triggers while other work keeps the loop running
+    auto timed = []() -> cot::task<> {
+        kill_after(10ms, SIGUSR2).detach();
+        cot::event e = cot::at_signal_weak(SIGUSR2);
+        co_await cot::any(e, cot::after(5s));
+        assert(e.triggered());
+    };
+    auto t2 = timed();
+    cot::loop();
+    assert(t2.done());
+
+    // an abandoned weak wait gives back the handler
+    {
+        cot::event e = cot::at_signal_weak(SIGUSR2);
+        assert(signal_action(SIGUSR2) != SIG_DFL);
+    }
+    cot::loop();
+    assert(signal_action(SIGUSR2) == SIG_DFL);
+
+    // reset() destroys a coroutine in a weak wait and restores the action
+    woke = false;
+    auto t3 = waiter(woke);
+    assert(signal_action(SIGUSR1) != SIG_DFL);
+    cot::reset();
+    assert(!woke && signal_action(SIGUSR1) == SIG_DFL);
+
+    // clearing also wakes weak waits begun while clearing
+    auto stubborn = [](bool& woke) -> cot::task<> {
+        try {
+            co_await cot::at_signal_weak(SIGUSR1);
+        } catch (...) {
+        }
+        co_await cot::at_signal_weak(SIGUSR1);
+        woke = true;
+    };
+    auto t4 = stubborn(woke);
+    cot::clear();
+    cot::loop();
+    assert(t4.done() && !woke && signal_action(SIGUSR1) == SIG_DFL);
+    std::cerr << "at_signal_weak: ok\n";
+}
+
+
+// TEST: reset() clears the old driver while it is current, so a coroutine
+// that waits again after being cleared doesn't wait on the new driver
+void test_reset_rewait() {
+    cot::reset();
+    auto stubborn = []() -> cot::task<> {
+        try {
+            co_await cot::after(1h);
+        } catch (...) {
+        }
+        co_await cot::after(1h);
+    };
+    auto t = stubborn();
+    cot::reset();
+    assert(t.done());
+    assert(cot::driver::current->empty());
+    std::cerr << "reset_rewait: ok\n";
+}
+
+
 int main(int argc, char* argv[]) {
     unsigned ran = 0;
     cot::set_clock(cot::clock::real_time);
@@ -1923,6 +2171,9 @@ int main(int argc, char* argv[]) {
     run("listen_wildcard_dual_stack", test_listen_wildcard_dual_stack);
     run("sockets_cloexec", test_sockets_cloexec);
     run("accept_fd_exhaustion", test_accept_fd_exhaustion);
+    run("at_signal", test_at_signal);
+    run("at_signal_independent", test_at_signal_independent);
+    run("at_signal_bad", test_at_signal_bad);
 
     // Cross-thread wake tests use their own threads and drivers
     auto run_threaded = [&](const char* name, auto fn) {
@@ -1949,6 +2200,11 @@ int main(int argc, char* argv[]) {
     run_threaded("cross_thread_wake_hammer", test_cross_thread_wake_hammer);
     run_threaded("cross_thread_wake_repeated", test_cross_thread_wake_repeated);
     run_threaded("cross_thread_wake_race", test_cross_thread_wake_race);
+    run_threaded("at_signal_lifetime", test_at_signal_lifetime);
+    run_threaded("at_signal_threads", test_at_signal_threads);
+    run_threaded("at_signal_other_thread", test_at_signal_other_thread);
+    run_threaded("at_signal_weak", test_at_signal_weak);
+    run_threaded("reset_rewait", test_reset_rewait);
 
     if (ran == 0) {
         std::print(std::cerr, "No matching tests\n");

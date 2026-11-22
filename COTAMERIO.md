@@ -307,6 +307,35 @@ As with TCP, a `udp_listen_all(address)` function can return multiple `fd`s,
 and errors are reported the same way.
 
 
+## Signals
+
+`cot::at_signal(signo)` returns an event that triggers when the process next
+receives signal `signo`. Invalid signal numbers, `SIGKILL`, and `SIGSTOP` throw
+`std::invalid_argument`.
+
+```cpp
+cot::task<> reload_on_sighup() {
+    while (true) {
+        co_await cot::at_signal(SIGHUP);
+        reload_configuration();
+    }
+}
+```
+
+Cotamer installs a do-nothing signal handler for `signo` while some
+`at_signal(signo)` event is pending. If all such events trigger and their
+handlers don’t recreate them, the signal’s previous handler is reinstalled.
+
+Cotamer doesn’t remember how many times a signal is delivered, so multiple
+signals sent in close succession may be combined into a single event
+notification.
+
+A pending `at_signal` event keeps `loop()` running. If a signal handler should
+not keep the driver running, use `cot::at_signal_weak(signo)` instead. `loop()`
+will return if its driver has no outstanding events or tasks except weak
+signals.
+
+
 ## Mutual exclusion
 
 A logical operation like “write a message to a file descriptor” might require

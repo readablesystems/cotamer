@@ -18,6 +18,7 @@ namespace detail {
 struct event_body;
 struct fd_body;
 struct quorum_event_body;
+struct signal_set;
 template <typename T> struct task_promise;
 template <typename T> struct task_awaiter;
 struct task_event_awaiter;
