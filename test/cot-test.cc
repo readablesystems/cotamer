@@ -779,7 +779,11 @@ cot::task<> test_mutex_cancellation() {
     //       triggers excl(3); task3 pushes 3
     // t=3s: task3 pushes -3, unlocks; notify() triggers shared(4); task4 pushes 4
     // t=4s: task4 pushes -4, unlocks
-    std::print(std::cerr, "mutex_cancellation ops: {}\n", ops);
+    std::cerr << "mutex_cancellation ops:";
+    for (int op : ops) {
+        std::cerr << ' ' << op;
+    }
+    std::cerr << '\n';
     std::vector<int> expected = {1, 20, -1, 3, -3, 4, -4};
     assert(ops == expected && "mutex cancellation ordering mismatch");
     std::cerr << "mutex_cancellation: ok\n";

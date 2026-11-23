@@ -1121,7 +1121,7 @@ inline void update_iovec(iovec*& iov, Iovcnt& iovcnt,
     }
     if (r != 0) {
         if (iovcopy.empty()) {
-            iovcopy.append_range(std::span(iov, iovcnt));
+            iovcopy.assign(iov, iov + iovcnt);
             iov = iovcopy.data();
         }
         iov->iov_base = reinterpret_cast<char*>(iov->iov_base) + r;

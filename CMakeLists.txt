@@ -31,6 +31,17 @@ set_property(CACHE COTAMER_ZLIB PROPERTY STRINGS AUTO ON OFF)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Check for a C++23 standard library early, rather than failing mid-build
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+#include <expected>
+int main() { std::expected<int, int> e(1); return *e - 1; }" COTAMER_HAVE_STD_EXPECTED)
+if(NOT COTAMER_HAVE_STD_EXPECTED)
+    message(FATAL_ERROR "Cotamer requires C++23, including <expected> (GCC 13, "
+        "Clang 17, or later). On Amazon Linux 2023, `dnf install gcc14 gcc14-c++`, "
+        "then configure with -DCMAKE_CXX_COMPILER=gcc14-g++ -DCMAKE_C_COMPILER=gcc14-gcc")
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 add_compile_options(-g -O3 -W -Wall)
