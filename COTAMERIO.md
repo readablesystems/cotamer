@@ -447,6 +447,11 @@ build HTTP/1.x messages on top of a connected `cotamer::fd`.
 `cotamer::http_parser` wraps an `fd` and turns bytes on the wire into
 messages and back.
 
+CMake uses an installed llhttp if it finds one. Configure with
+`-DCOTAMER_LLHTTP=ON` to download and build the latest llhttp release when
+it isn’t installed (`FETCH` always downloads it; `COTAMER_LLHTTP_VERSION`
+picks a specific version).
+
 The central class is `cotamer::http_parser`, which can read and write HTTP
 messages. This example uses `cot::http_parser` to return the contents of
 `/robots.txt` on a given HTTP host:

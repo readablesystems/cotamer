@@ -17,8 +17,13 @@ option(COTAMER_BUILD_TESTS "Build Cotamer tests and examples" ${COTAMER_TOP_LEVE
 # it, OFF skips it.
 set(COTAMER_CURL "AUTO" CACHE STRING "libcurl integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_CURL PROPERTY STRINGS AUTO ON OFF)
-set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/OFF)")
-set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON OFF)
+# llhttp: AUTO uses an installed llhttp if found; ON also downloads it if
+# not found; FETCH always downloads it.
+set(COTAMER_LLHTTP "AUTO" CACHE STRING "llhttp integration (AUTO/ON/FETCH/OFF)")
+set_property(CACHE COTAMER_LLHTTP PROPERTY STRINGS AUTO ON FETCH OFF)
+set(COTAMER_LLHTTP_VERSION "latest" CACHE STRING
+    "llhttp version to download (`latest` for the latest release)")
+set(COTAMER_LLHTTP_SHA256 "" CACHE STRING "SHA-256 of the llhttp download")
 set(COTAMER_NLOHMANN_JSON "AUTO" CACHE STRING "nlohmann::json integration (AUTO/ON/OFF)")
 set_property(CACHE COTAMER_NLOHMANN_JSON PROPERTY STRINGS AUTO ON OFF)
 set(COTAMER_ZLIB "AUTO" CACHE STRING "zlib integration (AUTO/ON/OFF)")
@@ -54,21 +59,86 @@ if(COTAMER_BUILD_TESTS)
     endif()
 endif()
 
-# Find llhttp
+# Find or download llhttp
 set(COTAMER_HAVE_LLHTTP 0)
-if(NOT COTAMER_LLHTTP STREQUAL "OFF")
+if(COTAMER_LLHTTP STREQUAL "AUTO" OR COTAMER_LLHTTP STREQUAL "ON")
     find_path(LLHTTP_INCLUDE_DIR llhttp.h HINTS /opt/homebrew/include)
     find_library(LLHTTP_LIBRARY llhttp HINTS /opt/homebrew/lib)
     if(LLHTTP_INCLUDE_DIR AND LLHTTP_LIBRARY)
         set(COTAMER_HAVE_LLHTTP 1)
         message(STATUS "llhttp integration: enabled")
-    elseif(COTAMER_LLHTTP STREQUAL "ON")
-        message(FATAL_ERROR "COTAMER_LLHTTP=ON but llhttp was not found")
-    else()
+    elseif(COTAMER_LLHTTP STREQUAL "AUTO")
         message(STATUS "llhttp integration: disabled (llhttp not found)")
     endif()
-else()
+elseif(COTAMER_LLHTTP STREQUAL "OFF")
     message(STATUS "llhttp integration: disabled (COTAMER_LLHTTP=OFF)")
+elseif(NOT COTAMER_LLHTTP STREQUAL "FETCH")
+    message(FATAL_ERROR "COTAMER_LLHTTP must be AUTO, ON, FETCH, or OFF")
+endif()
+if(NOT COTAMER_HAVE_LLHTTP
+   AND (COTAMER_LLHTTP STREQUAL "ON" OR COTAMER_LLHTTP STREQUAL "FETCH"))
+    # Download a release and build its generated C sources directly (its
+    # CMakeLists.txt would change our build type and add install rules).
+    if(CMAKE_VERSION VERSION_LESS 3.19)
+        message(FATAL_ERROR "Downloading llhttp requires CMake 3.19 or later")
+    endif()
+    # This version's checksum is known; it's the fallback for `latest`.
+    set(_llhttp_pinned 9.4.4)
+    set(_llhttp_pinned_sha256 5600adb1498f82a9c719b8eb19310021737388e0d92362a6d47be532710d3c96)
+    set(_llhttp_version ${COTAMER_LLHTTP_VERSION})
+    if(_llhttp_version STREQUAL "latest")
+        if(COTAMER_LLHTTP_LATEST)
+            set(_llhttp_version ${COTAMER_LLHTTP_LATEST})
+        else()
+            set(_json "${CMAKE_CURRENT_BINARY_DIR}/llhttp-latest.json")
+            file(DOWNLOAD "https://api.github.com/repos/nodejs/llhttp/releases/latest"
+                "${_json}" STATUS _status TIMEOUT 30)
+            list(GET _status 0 _status_code)
+            if(_status_code EQUAL 0)
+                file(READ "${_json}" _json)
+                string(JSON _tag ERROR_VARIABLE _json_error GET "${_json}" tag_name)
+                if(NOT _json_error AND _tag MATCHES "^release/v([0-9]+[.][0-9]+[.][0-9]+)$")
+                    set(_llhttp_version ${CMAKE_MATCH_1})
+                    set(COTAMER_LLHTTP_LATEST ${_llhttp_version} CACHE INTERNAL
+                        "latest llhttp release, as of the first configure")
+                endif()
+            endif()
+            if(_llhttp_version STREQUAL "latest")
+                message(WARNING "Couldn't find the latest llhttp release; "
+                    "using llhttp ${_llhttp_pinned}")
+                set(_llhttp_version ${_llhttp_pinned})
+            endif()
+        endif()
+    endif()
+    if(COTAMER_LLHTTP_SHA256)
+        set(_llhttp_hash URL_HASH SHA256=${COTAMER_LLHTTP_SHA256})
+    elseif(_llhttp_version STREQUAL _llhttp_pinned)
+        set(_llhttp_hash URL_HASH SHA256=${_llhttp_pinned_sha256})
+    else()
+        set(_llhttp_hash)
+    endif()
+    if(POLICY CMP0135)
+        cmake_policy(SET CMP0135 NEW)   # extracted files get the current time
+    endif()
+    include(FetchContent)
+    FetchContent_Declare(cotamer_llhttp
+        URL "https://github.com/nodejs/llhttp/archive/refs/tags/release/v${_llhttp_version}.tar.gz"
+        ${_llhttp_hash}
+        SOURCE_SUBDIR cotamer-no-cmake)  # don't add llhttp's CMakeLists.txt
+    FetchContent_MakeAvailable(cotamer_llhttp)
+    enable_language(C)
+    add_library(cotamer_llhttp STATIC
+        ${cotamer_llhttp_SOURCE_DIR}/src/api.c
+        ${cotamer_llhttp_SOURCE_DIR}/src/http.c
+        ${cotamer_llhttp_SOURCE_DIR}/src/llhttp.c
+    )
+    target_include_directories(cotamer_llhttp PUBLIC ${cotamer_llhttp_SOURCE_DIR}/include)
+    target_compile_options(cotamer_llhttp PRIVATE -w)
+    set_target_properties(cotamer_llhttp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set(LLHTTP_INCLUDE_DIR ${cotamer_llhttp_SOURCE_DIR}/include)
+    set(LLHTTP_LIBRARY cotamer_llhttp)
+    set(COTAMER_HAVE_LLHTTP 1)
+    message(STATUS "llhttp integration: enabled (downloaded llhttp ${_llhttp_version})")
 endif()
 
 # Find libcurl
@@ -151,7 +221,8 @@ if(COTAMER_HAVE_LLHTTP)
     add_library(CotamerHttp OBJECT
         cotamer/http.cc
     )
-    target_include_directories(CotamerHttp PUBLIC ${LLHTTP_INCLUDE_DIR})
+    # (BEFORE, so a downloaded llhttp.h wins over one in other include dirs)
+    target_include_directories(CotamerHttp BEFORE PUBLIC ${LLHTTP_INCLUDE_DIR})
     target_link_libraries(CotamerHttp PUBLIC Cotamer ${LLHTTP_LIBRARY})
 endif()
 
@@ -192,7 +263,7 @@ if(COTAMER_HAVE_LLHTTP)
         $<TARGET_OBJECTS:Cotamer>
         $<TARGET_OBJECTS:CotamerHttp>
     )
-    target_include_directories(cot-test-http PRIVATE ${LLHTTP_INCLUDE_DIR})
+    target_include_directories(cot-test-http BEFORE PRIVATE ${LLHTTP_INCLUDE_DIR})
     target_link_libraries(cot-test-http PRIVATE ${LLHTTP_LIBRARY})
 endif()
 
@@ -202,7 +273,7 @@ add_executable(cot-manual
 )
 if(COTAMER_HAVE_LLHTTP)
     target_sources(cot-manual PRIVATE $<TARGET_OBJECTS:CotamerHttp>)
-    target_include_directories(cot-manual PRIVATE ${LLHTTP_INCLUDE_DIR})
+    target_include_directories(cot-manual BEFORE PRIVATE ${LLHTTP_INCLUDE_DIR})
     target_link_libraries(cot-manual PRIVATE ${LLHTTP_LIBRARY})
 endif()
 
@@ -249,7 +320,7 @@ if(COTAMER_HAVE_LLHTTP)
         $<TARGET_OBJECTS:Cotamer>
         $<TARGET_OBJECTS:CotamerHttp>
     )
-    target_include_directories(httpd PRIVATE
+    target_include_directories(httpd BEFORE PRIVATE
         ${LLHTTP_INCLUDE_DIR}
     )
     target_link_libraries(httpd PRIVATE
@@ -263,7 +334,7 @@ if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
         $<TARGET_OBJECTS:Cotamer>
         $<TARGET_OBJECTS:CotamerHttp>
     )
-    target_include_directories(jsond PRIVATE
+    target_include_directories(jsond BEFORE PRIVATE
         ${LLHTTP_INCLUDE_DIR}
     )
     target_link_libraries(jsond PRIVATE
@@ -276,7 +347,7 @@ if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
         $<TARGET_OBJECTS:Cotamer>
         $<TARGET_OBJECTS:CotamerHttp>
     )
-    target_include_directories(jsond-client PRIVATE
+    target_include_directories(jsond-client BEFORE PRIVATE
         ${LLHTTP_INCLUDE_DIR}
     )
     target_link_libraries(jsond-client PRIVATE
@@ -290,7 +361,7 @@ if(COTAMER_HAVE_LLHTTP AND COTAMER_HAVE_NLOHMANN_JSON)
             $<TARGET_OBJECTS:Cotamer>
             $<TARGET_OBJECTS:CotamerCurl>
         )
-        target_include_directories(jsond-curl-client PRIVATE
+        target_include_directories(jsond-curl-client BEFORE PRIVATE
             ${LLHTTP_INCLUDE_DIR}
         )
         target_link_libraries(jsond-curl-client PRIVATE
@@ -328,7 +399,7 @@ if(COTAMER_HAVE_CURL)
             $<TARGET_OBJECTS:CotamerCurl>
             $<TARGET_OBJECTS:CotamerHttp>
         )
-        target_include_directories(cot-test-curl PRIVATE
+        target_include_directories(cot-test-curl BEFORE PRIVATE
             ${LLHTTP_INCLUDE_DIR}
         )
         target_link_libraries(cot-test-curl PRIVATE
